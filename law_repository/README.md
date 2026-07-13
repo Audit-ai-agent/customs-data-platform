@@ -1,13 +1,13 @@
 # 관세법령 저장소 (law_repository)
 
 무역서류 AI 감사 프로젝트의 법령 저장소 레이어.
-관세법·시행령·시행규칙 전 조문(1,008개)을 자동 수집해서 3개 저장소에 나눠 담는다:
+관세법·시행령·시행규칙 현행 조문(현재 snapshot 1,007개)을 자동 수집해서 3개 저장소에 나눠 담는다:
 
 | 저장소 | 역할 |
 |---|---|
-| Postgres (`:5432`) | 시간버전 원장 — 모든 조문의 모든 버전 + 유효기간. 진실의 원천 |
+| Postgres (`:5432`) | 시간버전 법령 + CCCT 조회·raw item·Requirement 무손실 원장 |
 | Qdrant (`:6333`) | 현행 조문 검색 인덱스 — 의미검색(bge-m3 dense) + 키워드(BM25) |
-| Neo4j (`:7474`/`:7687`) | 그래프 — 조문 위임/인용, HS품목→요건법령→서류→기관 |
+| Neo4j (`:7474`/`:7687`) | 그래프 — 조문 위임/인용, HSK→Requirement→법령/서류/기관 |
 
 배경·설계 근거는 `docs/` (로컬 문서) 및 팀 공유 보고서 참고.
 
@@ -42,7 +42,7 @@ python -m src.ingest.laws           # ② 조문 수집+임베딩 (~15분, CPU �
 python -m src.ingest.ccct --load-only   # ③ 세관장확인 요건 (레포 내 스윕 결과 적재, ~1분)
 python -m src.ingest.graph          # ④ 조문 위임/인용 그래프 (~1분)
 
-pytest tests/               # 검증 63건 (모두 통과해야 정상)
+pytest tests/               # 단위 + 3-store 통합 검증
 ```
 
 - ③에서 `--load-only` 를 빼면 관세청 API 전수 재수집을 시도하는데, 일일 쿼터(1만건) 때문에
@@ -87,6 +87,28 @@ python -m src.cli           # 대화형 검색 (:hsk, :art, :asof 명령 — 파
 python -m src.repository    # 스모크 데모
 ```
 
+## AI Agent 내부 Evidence API v1
+
+`python -m src.webapp`으로 실행한 뒤 Agent는
+`POST /internal/rag/v1/retrieve`를 호출한다. wire trade type은 `import|export`,
+jurisdiction은 `KR`이다. HSK10은 `exact`, HS6는 하위 leaf가 하나일 때만
+`unique_descendant`로 확정하며, 여러 leaf면 `ambiguous`로 반환한다.
+
+`coverage=complete` 일 때만 `requirements_found=false`를 공식 요건 없음으로
+해석할 수 있다. 저장소 장애는 `partial|failed`와 구조화된 `errors[]`로
+반환되므로 Agent가 fail-closed 처리해야 한다. 구조화 CCCT 요건은 `top_k`로
+잘라 필수서류를 유실하지 않고 해당 HSK의 유효한 요건을 모두 반환한다.
+
+`query_intent`에 `law_support`가 포함되면 Evidence Service는 Qdrant dense/BM25
+두 arm을 RRF로 합치고 lexical rerank한 뒤 Neo4j 조문 그래프를 1-hop 확장한다.
+법령 결과는 `eligibility=supporting`이며, 구조화 CCCT Requirement만
+`eligibility=finding`이 될 수 있다. Qdrant 포인트 수가 PostgreSQL 인덱싱 대상과
+다르면 법령 검색을 `partial`로 차단한다.
+
+CCCT query coverage는 시점별 원장이 아니므로 현재 V1은 snapshot 생성일만 지원한다.
+그 외 과거/미래 `review_as_of`는 근거 없는 “요건 없음”을 막기 위해
+`UNSUPPORTED_REVIEW_AS_OF`로 실패 처리한다.
+
 ## 코드 구조
 
 ```
@@ -96,11 +118,12 @@ src/
   sync/delta.py     델타 동기화 + 승격 잡 (매일 1회)
   embed/            bge-m3 dense + BM25 sparse 인코더 (인덱스/쿼리 동일 인코더)
   repository.py     조회 계약 — search / resolve_as_of / hsk_requirements / expand_article
+  evidence.py       Agent 내부 Evidence API v1 계약·조합·오류 의미
   cli.py            대화형 CLI
   webapp.py         팀 데모 웹서버 (FastAPI)
 migrations/         Postgres DDL (유효구간 EXCLUDE 제약 포함)
-tests/              63건 — 스키마/적재/델타/그래프/repository/cross-store 정합성
+tests/              스키마/적재/Evidence 계약/델타/그래프/cross-store 정합성
 ```
 
-주의: 검색 결과 융합·rerank 는 이 레이어가 **일부러 안 한다** (에이전트 레이어 소유).
-`search()` 는 arm 별 `{article_pk, score, text}` 만 반환한다.
+주의: repository의 `search()` 자체는 arm 별 `{article_pk, score, text}`만 반환한다.
+RRF·경량 rerank·Evidence packaging은 그 위 Evidence Service orchestration이 소유한다.

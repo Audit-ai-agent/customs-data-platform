@@ -45,7 +45,7 @@
 <body>
 <header>
   <h1>관세법령 저장소</h1>
-  <span class="sub">관세법·시행령·시행규칙 1,008조문 · HSK 요건 그래프 · 시점 조회 — 팀 데모</span>
+  <span class="sub">관세법·시행령·시행규칙 현행 조문 · HSK 요건 그래프 · 시점 조회 — 팀 데모</span>
 </header>
 <main>
   <div class="tabs">
@@ -128,8 +128,14 @@ async function doHsk() {
   try {
     const t = $('hs-trade').value;
     const d = await j(`/api/hsk?code=${encodeURIComponent($('hs').value.trim())}${t?`&trade=${encodeURIComponent(t)}`:''}`);
-    const a = d.ancestors;
-    const chain = [a.chapter2, a.heading4, a.hs6].filter(x => x.name).map(x => esc(x.name)).join(' › ');
+    const a = d.ancestors || {};
+    const chain = [a.chapter2, a.heading4, a.hs6].filter(x => x && x.name).map(x => esc(x.name)).join(' › ');
+    if (!d.resolved_hsk10) {
+      const candidates = (d.candidate_hsk10s || []).map(esc).join(', ');
+      $('r-hsk').innerHTML = `<div><span class="tag warn">${esc(d.hs_resolution)}</span> HSK10을 확정할 수 없습니다.</div>
+        ${candidates ? `<div class="note">후보: ${candidates}</div>` : ''}`;
+      return;
+    }
     $('r-hsk').innerHTML = `
       <div style="font-size:15px"><b>${d.hsk10}</b> ${esc(d.name_ko) || '<span class="spin">(코드 미등록)</span>'}</div>
       <div class="note">${chain || ''}</div>

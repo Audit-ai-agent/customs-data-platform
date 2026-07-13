@@ -64,6 +64,12 @@ def do_hsk(args: list[str], st: State) -> None:
         return
     trade = args[1] if len(args) > 1 else None
     req = repo.hsk_requirements(args[0], trade_type=trade, as_of=st.as_of)
+    if not req["resolved_hsk10"]:
+        print(f"\nHS 해소: {req['hs_resolution']}")
+        if req["candidate_hsk10s"]:
+            print("  후보: " + ", ".join(req["candidate_hsk10s"][:20]))
+        print("  HSK10을 확정하기 전에는 요건 판단을 수행하지 않습니다.")
+        return
     anc = req["ancestors"]
     print(f"\n{req['hsk10']}  {req['name_ko'] or '(명칭 없음)'}")
     print(f"  계층: {anc['chapter2']['name']} > {anc['heading4']['name']} > {anc['hs6']['name']}")
