@@ -25,7 +25,7 @@ import requests
 from src.config import settings
 
 BASE = "https://www.law.go.kr/DRF"
-RAW_DIR = Path("data/raw")
+RAW_DIR = Path(__file__).resolve().parents[1] / "data" / "raw"
 
 _session = requests.Session()
 _session.headers.update({"User-Agent": "trade-doc-auditor/law-repository"})

@@ -30,7 +30,7 @@ from neo4j import Driver
 
 from src.db.neo4j import driver as make_driver
 
-DATA_DIR = Path("data")
+DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 LEVEL_NAMES_XLSX = DATA_DIR / "관세청_HS부호 단위별 품목명_20260101.xlsx"
 LEAF_ATTRS_XLSX = DATA_DIR / "관세청_HS부호_20260101.xlsx"
 

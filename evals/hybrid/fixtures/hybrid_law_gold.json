@@ -1,0 +1,38 @@
+[
+  {
+    "case_id": "law_submission_documents",
+    "description": "수입신고 제출서류 질의에서 관세법 제245조를 찾는다.",
+    "query": "수입신고 시 제출서류",
+    "relevant": [{"law_id": "001556", "article_no": "제245조", "gain": 3}]
+  },
+  {
+    "case_id": "law_customs_confirmation",
+    "description": "세관장확인대상 질의에서 관세법 제226조를 찾는다.",
+    "query": "세관장확인대상물품 허가 승인 증명 확인",
+    "relevant": [{"law_id": "001556", "article_no": "제226조", "gain": 3}]
+  },
+  {
+    "case_id": "law_origin_certificate",
+    "description": "원산지증명서 질의에서 법률과 시행령의 핵심 조문을 찾는다.",
+    "query": "원산지증명서 제출",
+    "relevant": [
+      {"law_id": "001556", "article_no": "제232조", "gain": 3},
+      {"law_id": "002421", "article_no": "제236조", "gain": 2}
+    ]
+  },
+  {
+    "case_id": "law_decree_declaration_documents",
+    "description": "시행령 신고서류 질의에서 관세법 시행령 제250조를 찾는다.",
+    "query": "신고서류 관세법 시행령",
+    "relevant": [{"law_id": "002421", "article_no": "제250조", "gain": 3}]
+  },
+  {
+    "case_id": "law_preclearance_release",
+    "description": "수입신고전 물품반출 질의에서 시행령 제257조와 법 제253조를 찾는다.",
+    "query": "수입신고전 물품반출",
+    "relevant": [
+      {"law_id": "002421", "article_no": "제257조", "gain": 3},
+      {"law_id": "001556", "article_no": "제253조", "gain": 2}
+    ]
+  }
+]

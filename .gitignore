@@ -1,34 +1,42 @@
-# Markdown (planning/design/handoff docs — kept local, not committed)
-*.md
-
-# Python
+# Python environments and generated files
 __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
 venv/
 env/
+dist/
+build/
 
-# Secrets / env
+# Tests, coverage, and tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.junit.xml
+
+# Secrets. Example templates are intentionally tracked.
 .env
 .env.*
 !.env.example
+!**/.env.example
+!**/.env.*.example
 
-# Data caches / large artifacts
+# Regenerable/local datasets. Curated fixtures and CCCT progress are tracked.
 *.npy
 **/data/raw/
+**/data/ccct_*
+!law_repository/data/ccct_progress.jsonl
 
-# OS / editor
+# Evaluation and runtime outputs
+evals/results/
+artifacts/
+logs/
+
+# OS and editors
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
-
-# API sweep 진행 캐시/로그 (재생성 가능)
-**/data/ccct_*
-# 단, 전수 스윕 결과는 커밋 (재수집에 쿼터 3일 — 팀원은 --load-only 로 즉시 적재)
-!law_repository/data/ccct_progress.jsonl
-
-# 팀원용 셋업 가이드·배포 문서는 커밋 (*.md 무시의 예외)
-!law_repository/README.md
-!law_repository/deploy/**

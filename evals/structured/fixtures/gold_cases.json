@@ -1,0 +1,256 @@
+[
+  {
+    "case_id": "gold_frozen_mackerel_exact",
+    "description": "0303540000 수입은 수입식품안전관리 특별법에 따른 식약처 수입신고확인증 요건을 반환한다.",
+    "request": {
+      "schema_version": "1.0",
+      "request_id": "req_gold_frozen_mackerel_exact",
+      "case_id": "gold_frozen_mackerel_exact",
+      "review_run_id": "run_gold_frozen_mackerel_exact",
+      "review_as_of": "2026-07-10",
+      "jurisdiction": "KR",
+      "trade_type": "import",
+      "top_k": 8,
+      "uploaded_requirement_document_codes": [],
+      "validation_issue_codes": [],
+      "query_intent": "required_import_documents",
+      "items": [
+        {
+          "item_id": "item_frozen_mackerel_1",
+          "description": "Frozen mackerel",
+          "hs_code": "0303540000",
+          "origin_country": "NO",
+          "destination_country": "KR"
+        }
+      ]
+    },
+    "expected": {
+      "allowed_statuses": ["ok"],
+      "item_id": "item_frozen_mackerel_1",
+      "hs_resolution": "exact",
+      "resolved_hsk10": "0303540000",
+      "candidate_hsk10s": ["0303540000"],
+      "coverage": "complete",
+      "requirements_found": true,
+      "minimum_evidence_records": 1,
+      "allow_additional_evidence": false,
+      "required_evidence": [
+        {
+          "source_type": "customs_requirement",
+          "law_id": "89",
+          "law_name": "수입식품안전관리 특별법",
+          "valid_from": "2020-04-06",
+          "matched_hs_code": "0303540000",
+          "trade_type": "import",
+          "required_document_name": "수입식품등 수입신고확인증",
+          "agencies": ["식품의약품안전처"],
+          "eligibility": "finding"
+        }
+      ]
+    }
+  },
+  {
+    "case_id": "gold_hs6_731815_ambiguous",
+    "description": "731815는 2026 HSK에 네 개 leaf가 존재하므로 우측 0 패딩 없이 ambiguous로 처리한다.",
+    "request": {
+      "schema_version": "1.0",
+      "request_id": "req_gold_hs6_731815_ambiguous",
+      "case_id": "gold_hs6_731815_ambiguous",
+      "review_run_id": "run_gold_hs6_731815_ambiguous",
+      "review_as_of": "2026-07-10",
+      "jurisdiction": "KR",
+      "trade_type": "import",
+      "top_k": 8,
+      "uploaded_requirement_document_codes": [],
+      "validation_issue_codes": ["AMBIGUOUS_HS_CODE"],
+      "query_intent": "required_import_documents",
+      "items": [
+        {
+          "item_id": "item_stainless_fastener_1",
+          "description": "Stainless bolts and machine screws",
+          "hs_code": "731815",
+          "origin_country": "NO",
+          "destination_country": "KR"
+        }
+      ]
+    },
+    "expected": {
+      "allowed_statuses": ["partial"],
+      "item_id": "item_stainless_fastener_1",
+      "hs_resolution": "ambiguous",
+      "resolved_hsk10": null,
+      "candidate_hsk10s": [
+        "7318151000",
+        "7318152000",
+        "7318153000",
+        "7318159000"
+      ],
+      "coverage": "unknown",
+      "requirements_found": false,
+      "minimum_evidence_records": 0,
+      "allow_additional_evidence": true,
+      "required_evidence": []
+    }
+  },
+  {
+    "case_id": "gold_7318151000_no_requirements",
+    "description": "정확한 HSK10 7318151000 수입은 현행 CCCT 원본에서 요건이 없음을 complete coverage로 확인한다.",
+    "request": {
+      "schema_version": "1.0",
+      "request_id": "req_gold_7318151000_no_requirements",
+      "case_id": "gold_7318151000_no_requirements",
+      "review_run_id": "run_gold_7318151000_no_requirements",
+      "review_as_of": "2026-07-10",
+      "jurisdiction": "KR",
+      "trade_type": "import",
+      "top_k": 8,
+      "uploaded_requirement_document_codes": [],
+      "validation_issue_codes": [],
+      "query_intent": "required_import_documents",
+      "items": [
+        {
+          "item_id": "item_machine_screw_1",
+          "description": "Machine screws",
+          "hs_code": "7318151000",
+          "origin_country": "NO",
+          "destination_country": "KR"
+        }
+      ]
+    },
+    "expected": {
+      "allowed_statuses": ["ok"],
+      "item_id": "item_machine_screw_1",
+      "hs_resolution": "exact",
+      "resolved_hsk10": "7318151000",
+      "candidate_hsk10s": ["7318151000"],
+      "coverage": "complete",
+      "requirements_found": false,
+      "minimum_evidence_records": 0,
+      "allow_additional_evidence": true,
+      "required_evidence": []
+    }
+  },
+  {
+    "case_id": "gold_0101299000_multi_agency",
+    "description": "0101299000 수입의 검역 및 CITES 허가 요건에서 다기관 관계를 임의의 한 기관으로 축약하지 않는다.",
+    "request": {
+      "schema_version": "1.0",
+      "request_id": "req_gold_0101299000_multi_agency",
+      "case_id": "gold_0101299000_multi_agency",
+      "review_run_id": "run_gold_0101299000_multi_agency",
+      "review_as_of": "2026-07-10",
+      "jurisdiction": "KR",
+      "trade_type": "import",
+      "top_k": 20,
+      "uploaded_requirement_document_codes": [],
+      "validation_issue_codes": [],
+      "query_intent": "required_import_documents",
+      "items": [
+        {
+          "item_id": "item_live_horse_1",
+          "description": "Other live horses",
+          "hs_code": "0101299000",
+          "origin_country": "US",
+          "destination_country": "KR"
+        }
+      ]
+    },
+    "expected": {
+      "allowed_statuses": ["ok"],
+      "item_id": "item_live_horse_1",
+      "hs_resolution": "exact",
+      "resolved_hsk10": "0101299000",
+      "candidate_hsk10s": ["0101299000"],
+      "coverage": "complete",
+      "requirements_found": true,
+      "minimum_evidence_records": 2,
+      "allow_additional_evidence": true,
+      "required_evidence": [
+        {
+          "source_type": "customs_requirement",
+          "law_id": "13",
+          "law_name": "가축전염병 예방법",
+          "valid_from": "2020-04-06",
+          "required_document_name": "동물검역증명서",
+          "agencies": ["농림축산검역본부(동축산물)"],
+          "eligibility": "finding"
+        },
+        {
+          "source_type": "customs_requirement",
+          "law_id": "71",
+          "law_name": "야생생물 보호 및 관리에 관한 법률(허가)",
+          "valid_from": "2020-04-06",
+          "required_document_name": "국제적멸종위기 동식물 수입허가서",
+          "agencies": [
+            "서울특별시",
+            "부산광역시",
+            "대구광역시",
+            "광주광역시",
+            "대전광역시",
+            "인천광역시",
+            "울산광역시",
+            "유역(지방)환경청"
+          ],
+          "eligibility": "finding"
+        }
+      ]
+    }
+  },
+  {
+    "case_id": "gold_3808929000_distinct_document_rows",
+    "description": "3808929000 수입의 동일 화학물질관리법 key 아래 서로 다른 기관·서류·시행일 두 row를 모두 보존한다.",
+    "request": {
+      "schema_version": "1.0",
+      "request_id": "req_gold_3808929000_distinct_document_rows",
+      "case_id": "gold_3808929000_distinct_document_rows",
+      "review_run_id": "run_gold_3808929000_distinct_document_rows",
+      "review_as_of": "2026-07-10",
+      "jurisdiction": "KR",
+      "trade_type": "import",
+      "top_k": 20,
+      "uploaded_requirement_document_codes": [],
+      "validation_issue_codes": [],
+      "query_intent": "required_import_documents",
+      "items": [
+        {
+          "item_id": "item_fungicide_1",
+          "description": "Other fungicides",
+          "hs_code": "3808929000",
+          "origin_country": "CN",
+          "destination_country": "KR"
+        }
+      ]
+    },
+    "expected": {
+      "allowed_statuses": ["ok"],
+      "item_id": "item_fungicide_1",
+      "hs_resolution": "exact",
+      "resolved_hsk10": "3808929000",
+      "candidate_hsk10s": ["3808929000"],
+      "coverage": "complete",
+      "requirements_found": true,
+      "minimum_evidence_records": 5,
+      "allow_additional_evidence": true,
+      "required_evidence": [
+        {
+          "source_type": "customs_requirement",
+          "law_id": "41",
+          "law_name": "화학물질관리법",
+          "valid_from": "2023-04-07",
+          "required_document_name": "수입(변경)허가증 및 수입(변경)신고증",
+          "agencies": ["기후에너지환경부"],
+          "eligibility": "finding"
+        },
+        {
+          "source_type": "customs_requirement",
+          "law_id": "41",
+          "law_name": "화학물질관리법",
+          "valid_from": "2020-04-06",
+          "required_document_name": "화학물질 수입허가(신고)서",
+          "agencies": ["유역(지방)환경청"],
+          "eligibility": "finding"
+        }
+      ]
+    }
+  }
+]

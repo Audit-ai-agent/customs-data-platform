@@ -11,11 +11,11 @@ import hashlib
 import re
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Literal, Protocol
+from typing import Annotated, Literal, Protocol
 from urllib.parse import quote
 
 from psycopg.rows import dict_row
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AnyUrl, BaseModel, ConfigDict, Field, model_validator
 
 from src import repository
 from src.db.neo4j import driver as make_driver
@@ -23,31 +23,47 @@ from src.db.postgres import connect
 
 SCHEMA_VERSION = "1.0"
 
+NonEmpty128 = Annotated[str, Field(min_length=1, max_length=128)]
+NonEmpty500 = Annotated[str, Field(min_length=1, max_length=500)]
+NullableNonEmpty = Annotated[str, Field(min_length=1)] | None
+CountryCode = Annotated[str, Field(pattern=r"^[A-Z]{2}$")]
+VersionHash = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
+EvidenceId = Annotated[str, Field(pattern=r"^ev_[a-f0-9]{64}$")]
+Hsk10 = Annotated[str, Field(pattern=r"^[0-9]{10}$")]
+Hs6 = Annotated[str, Field(pattern=r"^[0-9]{6}$")]
+MatchedHsCode = Hs6 | Hsk10
+
 
 class ContractModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
 class RetrieveItem(ContractModel):
-    item_id: str = Field(min_length=1, max_length=128)
+    item_id: NonEmpty128
     description: str = Field(min_length=1, max_length=2000)
-    hs_code: str | None = Field(default=None, min_length=1, max_length=64)
-    origin_country: str | None = Field(default=None, pattern=r"^[A-Z]{2}$")
-    destination_country: str = Field(pattern=r"^[A-Z]{2}$")
+    hs_code: Annotated[str, Field(min_length=1, max_length=64)] | None
+    origin_country: CountryCode | None
+    destination_country: CountryCode
 
 
 class RetrieveRequest(ContractModel):
     schema_version: Literal["1.0"]
-    request_id: str = Field(min_length=1, max_length=128)
-    case_id: str = Field(min_length=1, max_length=128)
-    review_run_id: str = Field(min_length=1, max_length=128)
+    request_id: NonEmpty128
+    case_id: NonEmpty128
+    review_run_id: NonEmpty128
     review_as_of: date
     jurisdiction: Literal["KR"]
     trade_type: Literal["import", "export"]
     top_k: int = Field(ge=1, le=100)
     items: list[RetrieveItem] = Field(min_length=1, max_length=100)
-    uploaded_requirement_document_codes: list[str] = Field(default_factory=list)
-    validation_issue_codes: list[str] = Field(default_factory=list)
+    uploaded_requirement_document_codes: list[NonEmpty128] = Field(
+        default_factory=list,
+        json_schema_extra={"default": [], "uniqueItems": True},
+    )
+    validation_issue_codes: list[NonEmpty128] = Field(
+        default_factory=list,
+        json_schema_extra={"default": [], "uniqueItems": True},
+    )
     query_intent: str = Field(default="required_import_documents", min_length=1, max_length=2000)
 
     @model_validator(mode="after")
@@ -72,54 +88,73 @@ class RetrieveRequest(ContractModel):
 
 
 class EvidenceError(ContractModel):
-    code: str
-    message: str
+    code: NonEmpty128
+    message: str = Field(min_length=1, max_length=2000)
     retryable: bool
 
 
 class Evidence(ContractModel):
-    evidence_id: str
-    source_record_id: str
+    evidence_id: EvidenceId
+    source_record_id: str = Field(min_length=1, max_length=512)
     source_type: Literal["law_article", "customs_requirement", "hsk_entry", "notice"]
-    item_id: str
-    title: str
-    text: str
-    law_id: str | None
-    law_name: str | None
-    article_no: str | None
-    source_uri: str
+    item_id: NonEmpty128
+    title: str = Field(min_length=1, max_length=1000)
+    text: str = Field(min_length=1)
+    law_id: NullableNonEmpty
+    law_name: NullableNonEmpty
+    article_no: NullableNonEmpty
+    source_uri: Annotated[AnyUrl, Field(min_length=1)]
     valid_from: date | None
     valid_to: date | None
-    version_hash: str
-    matched_hs_code: str | None
+    version_hash: VersionHash
+    matched_hs_code: MatchedHsCode | None
     trade_type: Literal["import", "export"]
-    required_document_code: str | None
-    required_document_name: str | None
-    agencies: list[str]
-    retrieval_methods: list[Literal["exact_hs", "dense", "bm25", "graph"]]
+    required_document_code: NullableNonEmpty
+    required_document_name: NullableNonEmpty
+    agencies: list[NonEmpty500] = Field(json_schema_extra={"uniqueItems": True})
+    retrieval_methods: list[
+        Literal["exact_hs", "dense", "bm25", "graph"]
+    ] = Field(min_length=1, json_schema_extra={"uniqueItems": True})
     eligibility: Literal["finding", "supporting", "blocked"]
-    score: float | None
+    score: float | None = Field(ge=0, le=1)
     raw_scores: dict[str, float]
+
+    @model_validator(mode="after")
+    def unique_list_values(self):
+        if len(self.agencies) != len(set(self.agencies)):
+            raise ValueError("agencies는 중복될 수 없음")
+        if len(self.retrieval_methods) != len(set(self.retrieval_methods)):
+            raise ValueError("retrieval_methods는 중복될 수 없음")
+        return self
 
 
 class ItemEvidenceResult(ContractModel):
-    item_id: str
+    item_id: NonEmpty128
     hs_resolution: Literal["exact", "unique_descendant", "ambiguous", "invalid", "missing"]
-    resolved_hsk10: str | None
-    candidate_hsk10s: list[str]
+    resolved_hsk10: Hsk10 | None
+    candidate_hsk10s: list[Hsk10] = Field(json_schema_extra={"uniqueItems": True})
     coverage: Literal["complete", "partial", "unknown"]
     requirements_found: bool
     evidence: list[Evidence]
     errors: list[EvidenceError]
 
+    @model_validator(mode="after")
+    def unique_candidate_hsk10s(self):
+        if len(self.candidate_hsk10s) != len(set(self.candidate_hsk10s)):
+            raise ValueError("candidate_hsk10s는 중복될 수 없음")
+        return self
+
 
 class RetrieveResponse(ContractModel):
-    schema_version: Literal["1.0"] = SCHEMA_VERSION
-    request_id: str
+    schema_version: Literal["1.0"]
+    request_id: NonEmpty128
     status: Literal["ok", "partial", "failed"]
-    knowledge_snapshot_id: str | None
-    results: list[ItemEvidenceResult]
-    errors: list[EvidenceError]
+    knowledge_snapshot_id: NullableNonEmpty
+    results: list[ItemEvidenceResult] = Field(max_length=100)
+    errors: list[EvidenceError] = Field(
+        default_factory=list,
+        json_schema_extra={"default": []},
+    )
 
 
 @dataclass(frozen=True)
@@ -558,6 +593,7 @@ def retrieve_evidence(
         )
         err = _error(code, str(exc), retryable=True)
         return RetrieveResponse(
+            schema_version=SCHEMA_VERSION,
             request_id=request.request_id,
             status="failed",
             knowledge_snapshot_id=None,
@@ -567,6 +603,7 @@ def retrieve_evidence(
     if not snapshot_id:
         err = _error("KNOWLEDGE_SNAPSHOT_MISSING", "현행 CCCT knowledge snapshot이 없음")
         return RetrieveResponse(
+            schema_version=SCHEMA_VERSION,
             request_id=request.request_id,
             status="failed",
             knowledge_snapshot_id=None,
@@ -579,6 +616,7 @@ def retrieve_evidence(
     except Exception as exc:
         err = _error("KNOWLEDGE_SNAPSHOT_METADATA_UNAVAILABLE", str(exc), retryable=True)
         return RetrieveResponse(
+            schema_version=SCHEMA_VERSION,
             request_id=request.request_id,
             status="failed",
             knowledge_snapshot_id=snapshot_id,
@@ -595,6 +633,7 @@ def retrieve_evidence(
             retryable=False,
         )
         return RetrieveResponse(
+            schema_version=SCHEMA_VERSION,
             request_id=request.request_id,
             status="failed",
             knowledge_snapshot_id=snapshot_id,
@@ -728,6 +767,7 @@ def retrieve_evidence(
         if partial else []
     )
     return RetrieveResponse(
+        schema_version=SCHEMA_VERSION,
         request_id=request.request_id,
         status="partial" if partial else "ok",
         knowledge_snapshot_id=snapshot_id,

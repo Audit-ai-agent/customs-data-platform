@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     neo4j_password: str = "change_me"
 
     # 외부 API
-    law_api_oc: str = "alfinekey"
+    law_api_oc: str = ""
     data_go_kr_service_key: str = ""
 
     @property

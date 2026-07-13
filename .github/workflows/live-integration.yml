@@ -1,0 +1,63 @@
+name: data-platform-live-integration
+
+on:
+  workflow_dispatch:
+    inputs:
+      delta_since:
+        description: "공식 법령 변경이력을 조회할 시작일(YYYYMMDD)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  live-three-store:
+    # 법제처 접근이 가능한 한국 IP의 격리된 self-hosted runner에서만 수동 실행한다.
+    runs-on: self-hosted
+    timeout-minutes: 90
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: trade_doc
+      POSTGRES_USER: trade
+      POSTGRES_PASSWORD: ${{ secrets.LIVE_POSTGRES_PASSWORD }}
+      QDRANT_URL: http://localhost:6333
+      QDRANT_API_KEY: ""
+      NEO4J_URI: bolt://localhost:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: ${{ secrets.LIVE_NEO4J_PASSWORD }}
+      LAW_API_OC: ${{ secrets.LAW_API_OC }}
+      DATA_GO_KR_SERVICE_KEY: ${{ secrets.DATA_GO_KR_SERVICE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.28"
+          enable-cache: true
+      - name: Install locked environment
+        run: uv sync --locked --group dev
+      - name: Start isolated knowledge stores
+        run: docker compose -f law_repository/docker-compose.yml up -d --wait
+      - name: Build the complete live knowledge snapshot
+        working-directory: law_repository
+        run: |
+          uv run --locked python scripts/migrate.py
+          uv run --locked python -m src.ingest.hsk
+          uv run --locked python -m src.ingest.laws
+          uv run --locked python -m src.ingest.ccct --load-only
+          uv run --locked python -m src.ingest.graph
+          uv run --locked python -m src.sync.delta --since "${{ inputs.delta_since }}"
+      - name: Run live suite and reject every skip
+        working-directory: law_repository
+        run: uv run --locked pytest -q --junitxml=../live.junit.xml tests
+      - name: Enforce Live Gate semantics
+        run: uv run --locked python tools/assert_no_skips.py live.junit.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: data-platform-live-junit
+          path: live.junit.xml
+      - name: Remove isolated stores
+        if: always()
+        run: docker compose -f law_repository/docker-compose.yml down -v

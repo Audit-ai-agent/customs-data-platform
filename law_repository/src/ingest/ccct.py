@@ -49,7 +49,7 @@ from src.db.postgres import connect
 from src.lawgo import as_list
 
 URL = "https://apis.data.go.kr/1220000/retrieveCcctLworCd/getRetrieveCcctLworCd"
-PROGRESS = Path("data/ccct_progress.jsonl")
+PROGRESS = Path(__file__).resolve().parents[2] / "data" / "ccct_progress.jsonl"
 TRADE_TYPES = {"1": "수출", "2": "수입"}
 WIRE_TRADE_TYPES = {"1": "export", "2": "import"}
 WORKERS = 8

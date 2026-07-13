@@ -1,0 +1,36 @@
+name: data-platform-ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.28"
+          enable-cache: true
+      - name: Install locked Python 3.11 environment
+        run: uv sync --locked --group dev
+      - name: Compile and lint
+        run: |
+          uv run --locked python -m compileall -q law_repository/src evals tools
+          uv run --locked ruff check law_repository/src law_repository/tests evals tools
+      - name: Check provider contract drift
+        run: uv run --locked python tools/check_contract_drift.py
+      - name: Run offline unit, contract, and evaluation gates
+        run: >-
+          uv run --locked pytest -q
+          evals/tests
+          law_repository/tests/test_provider_contract.py
+          law_repository/tests/test_evidence.py
+          law_repository/tests/test_ccct_p0.py
+          law_repository/tests/test_bm25.py
