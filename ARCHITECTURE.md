@@ -9,6 +9,7 @@
 3. 정확한 HSK10 또는 유일한 HSK10 descendant로 해소된 HS6만 finding 근거를 만들 수 있다.
 4. 장애·모호성·커버리지 누락은 `partial|failed`로 반환하며 “요건 없음”으로 바꾸지 않는다.
 5. Structured CCCT Requirement는 `top_k`로 자르지 않는다. Hybrid 법령 결과만 순위를 사용한다.
+6. 설정된 대상 법령 corpus가 일부만 적재되면 readiness와 Hybrid 법령 검색은 fail-closed 한다.
 
 ## 데이터 흐름
 

@@ -224,6 +224,41 @@ def test_webapp_exposes_versioned_internal_route():
     assert "/internal/rag/v1/health/ready" in paths
 
 
+def test_readiness_rejects_a_partially_loaded_target_law_corpus(monkeypatch):
+    from src.evidence import DatabaseEvidenceBackend
+    from src.ingest.laws import TARGET_LAWS
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, *_args):
+            return None
+
+        def fetchall(self):
+            return [(TARGET_LAWS[0]["law_id"],)]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    monkeypatch.setattr("src.evidence.connect", lambda: FakeConnection())
+    with pytest.raises(
+        RuntimeError,
+        match=rf"expected={len(TARGET_LAWS)}, loaded=1, missing={len(TARGET_LAWS) - 1}",
+    ):
+        DatabaseEvidenceBackend()._verify_target_law_coverage()
+
+
 def test_request_limits_match_central_wire_contract():
     request = _request(top_k=100)
     assert request.top_k == 100

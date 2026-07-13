@@ -296,6 +296,26 @@ class DatabaseEvidenceBackend:
             )
             return RequirementLookup(True, tuple(dict(row) for row in cur.fetchall()))
 
+    def _verify_target_law_coverage(self) -> dict[str, int]:
+        """Fail closed when the configured law corpus is only partially loaded."""
+        from src.ingest.laws import TARGET_LAWS
+
+        expected_ids = {law["law_id"] for law in TARGET_LAWS}
+        with connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT law_id FROM laws WHERE law_id = ANY(%s)",
+                (sorted(expected_ids),),
+            )
+            loaded_ids = {row[0] for row in cur.fetchall()}
+        missing = expected_ids - loaded_ids
+        if missing:
+            raise RuntimeError(
+                "law corpus incomplete: "
+                f"expected={len(expected_ids)}, loaded={len(loaded_ids)}, "
+                f"missing={len(missing)}"
+            )
+        return {"expected": len(expected_ids), "loaded": len(loaded_ids)}
+
     def _verify_law_index(self) -> dict[str, int]:
         """Fail closed when the current Qdrant projection is incomplete."""
         if self._law_index_verified:
@@ -338,6 +358,7 @@ class DatabaseEvidenceBackend:
             "status": "ready",
             "knowledge_snapshot_id": snapshot_id,
             "supported_review_as_of": self.snapshot_effective_date(snapshot_id),
+            "law_corpus": self._verify_target_law_coverage(),
             "law_index": self._verify_law_index(),
         }
 
@@ -345,6 +366,7 @@ class DatabaseEvidenceBackend:
         self, query: str, top_k: int, as_of: date
     ) -> tuple[LawArticleMatch, ...]:
         """Dense+BM25 RRF, lexical rerank, then one-hop graph expansion."""
+        self._verify_target_law_coverage()
         self._verify_law_index()
         recall = min(max(top_k * 2, 8), 40)
         dense_hits = repository.search(query, arm="dense", limit=recall, as_of=as_of)
