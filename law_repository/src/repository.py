@@ -15,8 +15,8 @@ Neo4j 그래프)를 잇지만 융합·rerank 는 하지 않는다 — 설계 §4
 - resolve_as_of(law_id, article_no, paragraph_no, as_of):
     반열림 시점 필터로 그 시점에 유효했던 딱 1버전.
 - hsk_requirements(code, trade_type, as_of):
-    설계 §4.3 — 직접(10자리 일치) + 상속(hs6/heading4/chapter2 상위 일치) 요건 +
-    조상 계층명(감사 설명용). 품목번호 6/10 혼입 → 10자리로 정규화.
+    HSK10 exact 또는 HS6의 단일 leaf만 해소해 Requirement 그래프를 조회.
+    HS6의 leaf가 여러 개면 ambiguous로 반환하고 임의 0 패딩을 하지 않는다.
 - expand_article(article_pk):
     Neo4j 조문 위임/인용(+확인법령 DETAILED_IN) 확장. 조문 그래프 미구축이면 [] (graceful).
 
@@ -27,6 +27,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import date
+from typing import Iterable, Literal
 
 from psycopg.rows import dict_row
 
@@ -138,21 +139,97 @@ def search(
 
 # --------------------------------------------------------------- HSK traverse
 
-def normalize_hsk(code: str) -> str:
-    """품목번호 6/10 혼입을 10자리로 정규화(설계 §4.3 매칭 정규화). 숫자만 남기고
-    10자리 초과는 앞 10자리, 미만은 우측 0 패딩."""
-    digits = re.sub(r"\D", "", code or "")
-    return digits[:10].ljust(10, "0")
+HsResolutionStatus = Literal["exact", "unique_descendant", "ambiguous", "invalid", "missing"]
+
+
+@dataclass(frozen=True)
+class HskResolution:
+    status: HsResolutionStatus
+    normalized_input: str | None
+    resolved_hsk10: str | None
+    candidate_hsk10s: tuple[str, ...] = ()
+
+
+def normalize_hsk(code: str | None) -> str | None:
+    """HS 표기를 6자리 또는 10자리로만 정규화한다.
+
+    공백·점·하이픈은 표기 구분자로 허용하지만 기타 문자, 자리 절단,
+    우측 0 패딩은 허용하지 않는다. 6자리는 HSK10이 아닌 HS6 입력이다.
+    """
+    if code is None or not str(code).strip():
+        return None
+    raw = str(code).strip()
+    if re.search(r"[^0-9.\-\s]", raw):
+        raise ValueError("HS Code는 숫자와 공백/./- 구분자만 허용")
+    digits = re.sub(r"[.\-\s]", "", raw)
+    if len(digits) not in (6, 10) or not digits.isdigit():
+        raise ValueError("HS Code는 숫자 6자리 또는 HSK 10자리여야 함")
+    return digits
+
+
+def resolve_hsk_candidates(code: str | None, leaf_codes: Iterable[str]) -> HskResolution:
+    """DB 없이 검증 가능한 HS6/HSK10 resolution 정책."""
+    try:
+        normalized = normalize_hsk(code)
+    except ValueError:
+        return HskResolution("invalid", None, None)
+    if normalized is None:
+        return HskResolution("missing", None, None)
+    leaves = tuple(sorted({c for c in leaf_codes if re.fullmatch(r"\d{10}", c or "")}))
+    if len(normalized) == 10:
+        if normalized in leaves:
+            return HskResolution("exact", normalized, normalized, (normalized,))
+        return HskResolution("invalid", normalized, None)
+    candidates = tuple(c for c in leaves if c.startswith(normalized))
+    if len(candidates) == 1:
+        return HskResolution("unique_descendant", normalized, candidates[0], candidates)
+    if len(candidates) > 1:
+        return HskResolution("ambiguous", normalized, None, candidates)
+    return HskResolution("invalid", normalized, None)
+
+
+def resolve_hsk(code: str | None) -> HskResolution:
+    """Neo4j HSK leaf 마스터를 기준으로 품목번호를 해소."""
+    try:
+        normalized = normalize_hsk(code)
+    except ValueError:
+        return HskResolution("invalid", None, None)
+    if normalized is None:
+        return HskResolution("missing", None, None)
+    prefix = normalized if len(normalized) == 6 else None
+    drv = make_driver()
+    try:
+        with drv.session() as s:
+            if prefix:
+                rows = s.run(
+                    "MATCH (h:HSK) WHERE h.code STARTS WITH $prefix "
+                    "RETURN h.code AS code ORDER BY code",
+                    prefix=prefix,
+                )
+            else:
+                rows = s.run(
+                    "MATCH (h:HSK {code: $code}) RETURN h.code AS code",
+                    code=normalized,
+                )
+            leaves = [r["code"] for r in rows]
+    finally:
+        drv.close()
+    return resolve_hsk_candidates(normalized, leaves)
 
 
 # 직접(10자리) + 상속(상위 자리) 요건. 요건은 leaf 뿐 아니라 상위 레벨 노드에 붙을 수
 # 있어(설계 §4.3 자릿수 상속) src.code 로 속성 매칭. 기관 다중이면 collect 로 묶는다.
 _REQ_CYPHER = """
-OPTIONAL MATCH (src)-[r:REQUIRES]->(law:Law)-[:APPROVED_BY]->(ag:Agency)
-WHERE src.code = $code10 OR src.code IN [$hs6, $heading4, $chapter2]
-RETURN src.code AS on_code, (src.code = $code10) AS direct,
-       r.trade_type AS trade_type, r.valid_from AS valid_from, r.document AS document,
-       law.code AS law_code, law.name AS law_name, collect(DISTINCT ag.name) AS agencies
+OPTIONAL MATCH (src:HSK {code: $code10})-[:HAS_REQUIREMENT]->(req:Requirement)
+OPTIONAL MATCH (req)-[:BASED_ON]->(law:Law)
+OPTIONAL MATCH (req)-[:APPROVED_BY]->(ag:Agency)
+OPTIONAL MATCH (req)-[:REQUIRES_DOCUMENT]->(cert:Certificate)
+RETURN req.id AS requirement_id, req.trade_type AS trade_type,
+       req.valid_from AS valid_from, req.valid_to AS valid_to,
+       req.version_hash AS version_hash, req.snapshot_id AS snapshot_id,
+       law.code AS law_code, law.name AS law_name,
+       ag.code AS agency_code, ag.name AS agency_name,
+       cert.code AS document_code, cert.name AS document
 """
 
 # 조상 계층명(감사 설명용) — 접두어로 레벨 노드 조회. 모두 OPTIONAL 이라 1행 보장.
@@ -169,20 +246,32 @@ RETURN h.name_ko AS name_ko, h.name_en AS name_en,
 def hsk_requirements(
     code: str, trade_type: str | None = None, as_of: date | None = None
 ) -> dict:
-    """HSK 필요 서류 관계(설계 §4.3): HSK → 확인법령 → 요건승인기관 + 서류.
+    """HSK 필요 서류: HSK → Requirement → 법령/기관/서류.
 
-    직접(hsk10 일치) + 상속(hs6/heading4/chapter2 상위 일치) 요건을 합쳐 반환하고,
-    조상 계층명을 함께 실어 감사 설명에 쓴다. 요건도 temporal — REQUIRES.valid_from 이
-    as_of 이후면(아직 미시행) 제외. trade_type 지정 시 해당 방향만.
+    요건은 valid_from/valid_to 기준일에 유효한 것만 반환하고, trade_type은
+    wire(import/export)와 기존 표시값(수입/수출)을 모두 받는다.
     """
-    code10 = normalize_hsk(code)
+    resolution = resolve_hsk(code)
+    code10 = resolution.resolved_hsk10
+    if code10 is None:
+        return {
+            "hs_resolution": resolution.status,
+            "resolved_hsk10": None,
+            "candidate_hsk10s": list(resolution.candidate_hsk10s),
+            "hsk10": None,
+            "name_ko": None,
+            "name_en": None,
+            "ancestors": {},
+            "requirements": [],
+        }
     params = {
         "code10": code10,
         "hs6": code10[:6],
         "heading4": code10[:4],
         "chapter2": code10[:2],
     }
-    as_of_str = (as_of or date.today()).strftime("%Y%m%d")
+    as_of_str = (as_of or date.today()).isoformat()
+    wire_trade_type = {"수입": "import", "수출": "export"}.get(trade_type, trade_type)
 
     drv = make_driver()
     try:
@@ -196,22 +285,33 @@ def hsk_requirements(
     for r in rows:
         if not r["law_name"]:  # OPTIONAL MATCH 무매칭 행
             continue
-        if trade_type and r["trade_type"] != trade_type:
+        if wire_trade_type and r["trade_type"] != wire_trade_type:
             continue
         if r["valid_from"] and r["valid_from"] > as_of_str:
             continue  # 아직 시행 전 요건 제외 (요건도 temporal)
+        if r["valid_to"] and r["valid_to"] < as_of_str:
+            continue
         requirements.append({
             "trade_type": r["trade_type"],
+            "requirement_id": r["requirement_id"],
             "law_code": r["law_code"],
             "law_name": r["law_name"],
             "document": r["document"],
-            "agencies": r["agencies"],
+            "document_code": r["document_code"],
+            "agencies": [r["agency_name"]] if r["agency_name"] else [],
+            "agency_codes": [r["agency_code"]] if r["agency_code"] else [],
             "valid_from": r["valid_from"],
-            "source": "direct" if r["direct"] else "inherited",
-            "level": len(r["on_code"]) if r["on_code"] else None,
+            "valid_to": r["valid_to"],
+            "version_hash": r["version_hash"],
+            "knowledge_snapshot_id": r["snapshot_id"],
+            "source": "direct",
+            "level": 10,
         })
 
     return {
+        "hs_resolution": resolution.status,
+        "resolved_hsk10": code10,
+        "candidate_hsk10s": list(resolution.candidate_hsk10s),
         "hsk10": code10,
         "name_ko": ident["name_ko"] if ident else None,
         "name_en": ident["name_en"] if ident else None,
@@ -266,7 +366,10 @@ def _demo() -> int:
 
     drv = make_driver()
     with drv.session() as s:
-        rec = s.run("MATCH (h:HSK)-[:REQUIRES]->() RETURN h.code AS c LIMIT 1").single()
+        rec = s.run(
+            "MATCH (h:HSK)-[:HAS_REQUIREMENT]->(:Requirement) "
+            "RETURN h.code AS c LIMIT 1"
+        ).single()
     drv.close()
     if rec:
         req = hsk_requirements(rec["c"])

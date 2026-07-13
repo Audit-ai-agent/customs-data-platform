@@ -276,7 +276,7 @@ def test_graph_edge_invariants(neo):
 # 코드, 예 010130)과 HS 체계 밖 행정코드(2424000000 이사화물)의 상위 명칭 행을
 # 아예 갖지 않는다 — leaf 3,395건의 hs6, 1건의 heading4 조상 노드 부재는 소스
 # 고유 특성이지 적재 누락이 아니다. 따라서 "모든 접두어 존재"가 아니라
-# ① 소스 무손실 적재  ② REQUIRES 가 repository 매칭으로 도달 가능  을 불변식으로 삼는다.
+# ① 소스 무손실 적재  ② HAS_REQUIREMENT가 repository 매칭으로 도달 가능을 불변식으로 삼는다.
 
 def test_hsnode_codes_lossless_vs_source(neo):
     """HSNode 코드 집합 == 소스 xlsx 코드 집합 — 적재 손실·유령 노드 0.
@@ -303,26 +303,25 @@ def test_hsk_label_iff_leaf_level10(neo):
         assert s.run(q).single()["bad"] == 0
 
 
-def test_requires_sources_reachable_by_repository(neo):
-    """REQUIRES 출발 노드는 repository 매칭이 닿는 레벨(10 직접 / 6·4·2 상속)에만.
-
-    5/7/8/9자리 노드에 요건이 붙으면 hsk_requirements 가 조용히 놓친다 —
-    그런 적재가 생기는 순간 이 테스트가 신호를 낸다. (현재 Phase 4 는 leaf 만 적재.)"""
+def test_requirement_sources_reachable_by_repository(neo):
+    """HAS_REQUIREMENT 출발은 HSK10 leaf로만 한정된다."""
     q = """
-    MATCH (s)-[:REQUIRES]->()
-    WHERE NOT s:HSNode OR NOT s.level IN [2, 4, 6, 10]
+    MATCH (s)-[:HAS_REQUIREMENT]->(:Requirement)
+    WHERE NOT s:HSK OR s.level <> 10
     RETURN count(*) AS bad
     """
     with neo.session() as s:
         assert s.run(q).single()["bad"] == 0
 
 
-def test_requires_law_has_agency(neo):
-    """모든 확인법령은 승인기관과 연결 — traverse 가 기관 없이 끊기지 않아야."""
+def test_requirement_has_law_agency_document(neo):
+    """모든 Requirement는 법령·승인기관·서류와 직접 연결된다."""
     q = """
-    MATCH ()-[:REQUIRES]->(law:Law)
-    WHERE NOT (law)-[:APPROVED_BY]->(:Agency)
-    RETURN count(DISTINCT law) AS orphan
+    MATCH (req:Requirement {source_type: 'ccct'})
+    WHERE NOT (req)-[:BASED_ON]->(:Law)
+       OR NOT (req)-[:APPROVED_BY]->(:Agency)
+       OR NOT (req)-[:REQUIRES_DOCUMENT]->(:Certificate)
+    RETURN count(req) AS orphan
     """
     with neo.session() as s:
         assert s.run(q).single()["orphan"] == 0
@@ -331,9 +330,12 @@ def test_requires_law_has_agency(neo):
 def test_hsk_inherited_traverse_functional(neo):
     """요건 걸린 leaf 하나로 end-to-end traverse — 직접 요건 + 조상 계층명 반환."""
     with neo.session() as s:
-        rec = s.run("MATCH (h:HSK)-[:REQUIRES]->() RETURN h.code AS c LIMIT 1").single()
+        rec = s.run(
+            "MATCH (h:HSK)-[:HAS_REQUIREMENT]->(:Requirement) "
+            "RETURN h.code AS c LIMIT 1"
+        ).single()
     if not rec:
-        pytest.skip("REQUIRES 미적재")
+        pytest.skip("Requirement 미적재")
     req = repo.hsk_requirements(rec["c"])
     assert any(q["source"] == "direct" for q in req["requirements"])
     assert req["ancestors"]["chapter2"]["name"], "조상 계층명 누락 (상속 경로 구멍)"

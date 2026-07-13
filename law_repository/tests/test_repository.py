@@ -28,11 +28,26 @@ def test_temporal_predicate_as_of_passthrough():
     assert params["as_of"] == d
 
 
-def test_normalize_hsk_pads_and_strips():
+def test_normalize_hsk_accepts_only_hs6_or_hsk10_without_padding():
     assert repo.normalize_hsk("0101 21 0000") == "0101210000"   # 공백 제거
-    assert repo.normalize_hsk("8542") == "8542000000"           # 우측 0 패딩
-    assert len(repo.normalize_hsk("123456789012345")) == 10     # 초과분 절단
+    assert repo.normalize_hsk("854231") == "854231"             # HS6는 HS6로 유지
+    with pytest.raises(ValueError):
+        repo.normalize_hsk("8542")                               # 우측 0 패딩 금지
+    with pytest.raises(ValueError):
+        repo.normalize_hsk("123456789012345")                    # 자리 절단 금지
     assert repo.normalize_hsk("0204100000")[0] == "0"           # 앞자리 0 보존
+
+
+def test_resolve_hsk_candidates_exact_unique_and_ambiguous():
+    leaves = ["7318151000", "7318159000", "0303540000"]
+    assert repo.resolve_hsk_candidates("0303540000", leaves).status == "exact"
+    unique = repo.resolve_hsk_candidates("030354", leaves)
+    assert unique.status == "unique_descendant"
+    assert unique.resolved_hsk10 == "0303540000"
+    ambiguous = repo.resolve_hsk_candidates("731815", leaves)
+    assert ambiguous.status == "ambiguous"
+    assert ambiguous.resolved_hsk10 is None
+    assert list(ambiguous.candidate_hsk10s) == ["7318151000", "7318159000"]
 
 
 def test_search_unknown_arm_raises():
@@ -82,10 +97,13 @@ def sample_hsk():
         drv.close()
         pytest.skip(f"Neo4j 접속 불가: {e}")
     with drv.session() as s:
-        rec = s.run("MATCH (h:HSK)-[:REQUIRES]->() RETURN h.code AS c LIMIT 1").single()
+        rec = s.run(
+            "MATCH (h:HSK)-[:HAS_REQUIREMENT]->(:Requirement) "
+            "RETURN h.code AS c LIMIT 1"
+        ).single()
     drv.close()
     if not rec:
-        pytest.skip("REQUIRES 미적재 (python -m src.ingest.ccct 필요)")
+        pytest.skip("Requirement 미적재 (python -m src.ingest.ccct 필요)")
     return rec["c"]
 
 
@@ -135,7 +153,7 @@ def test_hsk_requirements_shape(sample_hsk):
     assert req["requirements"], "요건 있는 leaf 인데 결과 없음"
     for q in req["requirements"]:
         assert q["law_name"] and q["agencies"]      # 확인법령 + 기관 완성
-        assert q["trade_type"] in ("수출", "수입")
+        assert q["trade_type"] in ("export", "import")
         assert q["source"] in ("direct", "inherited")
     # 조상 계층 접두어 정합(감사 설명용)
     assert req["ancestors"]["hs6"]["code"] == sample_hsk[:6]
@@ -145,7 +163,7 @@ def test_hsk_requirements_shape(sample_hsk):
 
 def test_hsk_trade_type_filter(sample_hsk):
     exp = repo.hsk_requirements(sample_hsk, trade_type="수입")
-    assert all(q["trade_type"] == "수입" for q in exp["requirements"])
+    assert all(q["trade_type"] == "import" for q in exp["requirements"])
 
 
 def test_hsk_requirements_direct_from_leaf(sample_hsk):

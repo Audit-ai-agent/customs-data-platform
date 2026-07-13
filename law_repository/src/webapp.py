@@ -25,6 +25,12 @@ from fastapi.responses import HTMLResponse
 from src import repository as repo
 from src.cli import LAW_ALIAS, LAW_NAME, _parse_article_no
 from src.db.qdrant import BM25_VECTOR, DENSE_VECTOR
+from src.evidence import (
+    DatabaseEvidenceBackend,
+    RetrieveRequest,
+    RetrieveResponse,
+    retrieve_evidence,
+)
 
 app = FastAPI(title="관세법령 저장소 데모")
 _encode_lock = threading.Lock()
@@ -34,7 +40,7 @@ _DEMO_TOKEN = os.environ.get("DEMO_TOKEN", "")
 
 @app.middleware("http")
 async def _token_guard(request: Request, call_next):
-    if _DEMO_TOKEN and request.url.path.startswith("/api"):
+    if _DEMO_TOKEN and request.url.path.startswith(("/api", "/internal")):
         supplied = request.query_params.get("token") or request.headers.get("x-demo-token")
         if supplied != _DEMO_TOKEN:
             from fastapi.responses import JSONResponse
@@ -75,6 +81,25 @@ def api_search(q: str, limit: int = 5, as_of: str | None = None) -> dict:
 @app.get("/api/hsk")
 def api_hsk(code: str, trade: str | None = None, as_of: str | None = None) -> dict:
     return repo.hsk_requirements(code, trade_type=trade or None, as_of=_as_of(as_of))
+
+
+@app.post("/internal/rag/v1/retrieve", response_model=RetrieveResponse)
+def internal_retrieve(payload: RetrieveRequest) -> RetrieveResponse:
+    """AI Agent와 Data/RAG 경계의 버전 고정 Evidence API."""
+    return retrieve_evidence(payload)
+
+
+@app.get("/internal/rag/v1/health/live")
+def internal_liveness() -> dict:
+    return {"status": "alive"}
+
+
+@app.get("/internal/rag/v1/health/ready")
+def internal_readiness() -> dict:
+    try:
+        return DatabaseEvidenceBackend().readiness()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.get("/api/article")

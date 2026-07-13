@@ -6,21 +6,33 @@
 from __future__ import annotations
 
 import numpy as np
+from threading import Lock
 
 _model = None
+_model_lock = Lock()
+_encode_lock = Lock()
 
 
 def _get_model():
     global _model
     if _model is None:
-        import torch
-        from FlagEmbedding import BGEM3FlagModel
+        with _model_lock:
+            if _model is None:
+                import torch
+                from FlagEmbedding import BGEM3FlagModel
 
-        _model = BGEM3FlagModel("BAAI/bge-m3", use_fp16=torch.cuda.is_available())
+                _model = BGEM3FlagModel(
+                    "BAAI/bge-m3", use_fp16=torch.cuda.is_available()
+                )
     return _model
 
 
 def encode(texts: list[str], batch_size: int = 8) -> np.ndarray:
     """(n, 1024) float32 dense 벡터."""
-    out = _get_model().encode(texts, batch_size=batch_size, max_length=8192)
+    # FastAPI executes sync handlers in a worker pool.  FlagEmbedding/PyTorch
+    # inference on the shared singleton is serialized to avoid concurrent
+    # mutation and unbounded CPU/RAM spikes; request-level parallelism remains
+    # available for PostgreSQL/Qdrant/Neo4j work.
+    with _encode_lock:
+        out = _get_model().encode(texts, batch_size=batch_size, max_length=8192)
     return np.asarray(out["dense_vecs"], dtype="float32")
