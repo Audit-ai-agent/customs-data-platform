@@ -1,9 +1,22 @@
 name: data-platform-ci
+run-name: data-platform-ci-${{ github.event_name }}-${{ github.run_id }}-${{ github.run_attempt }}
 
 on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Immutable Evidence API release to verify
+        required: true
+        type: choice
+        options:
+          - evidence-api-v1.0.0
+      request_id:
+        description: Unique TASK-0004 audit request ID
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -13,20 +26,97 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - name: Validate manual recovery request
+        id: request_guard
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          REQUESTED_RELEASE_TAG: ${{ inputs.release_tag }}
+          REQUEST_ID: ${{ inputs.request_id }}
+          EVENT_REF: ${{ github.ref }}
+          EXPECTED_RELEASE_TAG: evidence-api-v1.0.0
+          EXPECTED_EVENT_REF: refs/heads/main
+        run: |
+          set -euo pipefail
+          test "$REQUESTED_RELEASE_TAG" = "$EXPECTED_RELEASE_TAG"
+          [[ "$REQUEST_ID" =~ ^TASK-0004-[A-Za-z0-9._-]{1,64}$ ]]
+          test "$EVENT_REF" = "$EXPECTED_EVENT_REF"
+
+      - name: Checkout event or immutable recovery release
+        id: checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: >-
+            ${{ github.event_name == 'workflow_dispatch' &&
+            'refs/tags/evidence-api-v1.0.0' || github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Verify checked-out revision and release identity
+        id: revision
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SHA: ${{ github.sha }}
+          REQUESTED_RELEASE_TAG: ${{ inputs.release_tag }}
+          EXPECTED_RELEASE_TAG: evidence-api-v1.0.0
+          EXPECTED_TAG_OBJECT: b66b8faed8fbbe20bf64db292e9f18b43829eef1
+          EXPECTED_TARGET_SHA: a8935007262434523a84e2914271140c5e88489a
+          EXPECTED_SCHEMA_SHA256: 531b59ba4e86f78cef20a4fca052996efd8b88c48853ac12113ca76e69cdd69a
+        run: |
+          set -euo pipefail
+          actual_sha="$(git rev-parse HEAD)"
+          expected_sha="$EVENT_SHA"
+          tag_object=""
+          tag_target=""
+          schema_sha256=""
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            test "$REQUESTED_RELEASE_TAG" = "$EXPECTED_RELEASE_TAG"
+            test "$(git cat-file -t "refs/tags/$EXPECTED_RELEASE_TAG")" = "tag"
+            test "$(git cat-file -t "refs/tags/$EXPECTED_RELEASE_TAG^{}")" = "commit"
+            tag_object="$(git rev-parse "refs/tags/$EXPECTED_RELEASE_TAG")"
+            tag_target="$(git rev-parse "refs/tags/$EXPECTED_RELEASE_TAG^{}")"
+            schema_sha256="$(sha256sum contracts/evidence/v1/rag_retrieval_v1.schema.json | awk '{print $1}')"
+            expected_sha="$EXPECTED_TARGET_SHA"
+
+            test "$tag_object" = "$EXPECTED_TAG_OBJECT"
+            test "$tag_target" = "$EXPECTED_TARGET_SHA"
+            test "$schema_sha256" = "$EXPECTED_SCHEMA_SHA256"
+          fi
+
+          test "$actual_sha" = "$expected_sha"
+          {
+            echo "actual_sha=$actual_sha"
+            echo "tag_object=$tag_object"
+            echo "tag_target=$tag_target"
+            echo "schema_sha256=$schema_sha256"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up uv
+        id: setup_uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           version: "0.11.28"
           enable-cache: true
+
       - name: Install locked Python 3.11 environment
+        id: install
         run: uv sync --locked --group dev
+
       - name: Compile and lint
+        id: compile_lint
         run: |
           uv run --locked python -m compileall -q law_repository/src evals tools
           uv run --locked ruff check law_repository/src law_repository/tests evals tools
+
       - name: Check provider contract drift
+        id: contract_drift
         run: uv run --locked python tools/check_contract_drift.py
+
       - name: Run offline unit, contract, and evaluation gates
+        id: offline_tests
         run: >-
           uv run --locked pytest -q
           evals/tests
@@ -35,3 +125,115 @@ jobs:
           law_repository/tests/test_ccct_p0.py
           law_repository/tests/test_bm25.py
           law_repository/tests/test_hf_space_deploy.py
+
+      - name: Create exact-release provenance proof
+        id: create_proof
+        if: success() && github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          REQUEST_ID: ${{ inputs.request_id }}
+          REPOSITORY: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+          EVENT_SHA: ${{ github.sha }}
+          WORKFLOW_NAME: ${{ github.workflow }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          TESTED_SHA: ${{ steps.revision.outputs.actual_sha }}
+          TAG_OBJECT: ${{ steps.revision.outputs.tag_object }}
+          TAG_TARGET: ${{ steps.revision.outputs.tag_target }}
+          SCHEMA_SHA256: ${{ steps.revision.outputs.schema_sha256 }}
+          REQUEST_GUARD_OUTCOME: ${{ steps.request_guard.outcome }}
+          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
+          REVISION_OUTCOME: ${{ steps.revision.outcome }}
+          SETUP_UV_OUTCOME: ${{ steps.setup_uv.outcome }}
+          INSTALL_OUTCOME: ${{ steps.install.outcome }}
+          COMPILE_LINT_OUTCOME: ${{ steps.compile_lint.outcome }}
+          CONTRACT_DRIFT_OUTCOME: ${{ steps.contract_drift.outcome }}
+          OFFLINE_TESTS_OUTCOME: ${{ steps.offline_tests.outcome }}
+          EXPECTED_REPOSITORY: Audit-ai-agent/customs-data-platform
+          EXPECTED_RELEASE_TAG: evidence-api-v1.0.0
+          EXPECTED_TAG_OBJECT: b66b8faed8fbbe20bf64db292e9f18b43829eef1
+          EXPECTED_TARGET_SHA: a8935007262434523a84e2914271140c5e88489a
+          EXPECTED_SCHEMA_SHA256: 531b59ba4e86f78cef20a4fca052996efd8b88c48853ac12113ca76e69cdd69a
+        run: |
+          set -euo pipefail
+          mkdir -p ci-evidence
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          expected_target = os.environ["EXPECTED_TARGET_SHA"]
+          gates = {
+              "request_guard": os.environ["REQUEST_GUARD_OUTCOME"],
+              "checkout": os.environ["CHECKOUT_OUTCOME"],
+              "revision": os.environ["REVISION_OUTCOME"],
+              "setup_uv": os.environ["SETUP_UV_OUTCOME"],
+              "install": os.environ["INSTALL_OUTCOME"],
+              "compile_lint": os.environ["COMPILE_LINT_OUTCOME"],
+              "contract_drift": os.environ["CONTRACT_DRIFT_OUTCOME"],
+              "offline_tests": os.environ["OFFLINE_TESTS_OUTCOME"],
+          }
+          assertions = {
+              "request_id": bool(
+                  re.fullmatch(r"TASK-0004-[A-Za-z0-9._-]{1,64}", os.environ["REQUEST_ID"])
+              ),
+              "repository": os.environ["REPOSITORY"] == os.environ["EXPECTED_REPOSITORY"],
+              "event": os.environ["EVENT_NAME"] == "workflow_dispatch",
+              "event_ref": os.environ["EVENT_REF"] == "refs/heads/main",
+              "workflow_sha": bool(
+                  re.fullmatch(r"[0-9a-f]{40}", os.environ["WORKFLOW_SHA"])
+              ) and os.environ["WORKFLOW_SHA"] == os.environ["EVENT_SHA"],
+              "tested_sha": os.environ["TESTED_SHA"] == expected_target,
+              "tag_object": os.environ["TAG_OBJECT"] == os.environ["EXPECTED_TAG_OBJECT"],
+              "tag_target": os.environ["TAG_TARGET"] == expected_target,
+              "schema_sha256": (
+                  os.environ["SCHEMA_SHA256"] == os.environ["EXPECTED_SCHEMA_SHA256"]
+              ),
+              "gates": all(value == "success" for value in gates.values()),
+          }
+          failed = [name for name, passed in assertions.items() if not passed]
+          if failed:
+              raise SystemExit("provenance proof assertions failed: " + ", ".join(failed))
+
+          proof = {
+              "schema_version": "1.0",
+              "task_id": "TASK-0004",
+              "status": "PASS",
+              "request_id": os.environ["REQUEST_ID"],
+              "repository": os.environ["REPOSITORY"],
+              "event": os.environ["EVENT_NAME"],
+              "event_ref": os.environ["EVENT_REF"],
+              "event_sha": os.environ["EVENT_SHA"],
+              "workflow_name": os.environ["WORKFLOW_NAME"],
+              "workflow_ref": os.environ["WORKFLOW_REF"],
+              "workflow_sha": os.environ["WORKFLOW_SHA"],
+              "tested_sha": os.environ["TESTED_SHA"],
+              "release_tag": os.environ["EXPECTED_RELEASE_TAG"],
+              "tag_object": os.environ["TAG_OBJECT"],
+              "tag_target": os.environ["TAG_TARGET"],
+              "schema_sha256": os.environ["SCHEMA_SHA256"],
+              "run_id": int(os.environ["RUN_ID"]),
+              "run_attempt": int(os.environ["RUN_ATTEMPT"]),
+              "gates": gates,
+          }
+          Path("ci-evidence/data-release-provenance.json").write_text(
+              json.dumps(proof, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload exact-release provenance proof
+        id: upload_proof
+        if: success() && github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: data-release-provenance-${{ inputs.request_id }}
+          path: ci-evidence/data-release-provenance.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 30
