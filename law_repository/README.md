@@ -28,21 +28,21 @@
 전제: Docker Desktop, Python 3.11+
 
 ```bash
-git clone https://github.com/vector2967/trade-doc-auditor.git
-cd trade-doc-auditor/law_repository
+gh repo clone Audit-ai-agent/customs-data-platform
+cd customs-data-platform
+uv sync --locked --group dev --python 3.11
+cd law_repository
 
 cp .env.example .env        # 비밀번호 등 값 채우기 (기본값으로도 로컬 구동 가능)
-pip install -r requirements.txt
-
 docker compose up -d        # Postgres / Qdrant / Neo4j 기동
-python scripts/migrate.py   # 스키마 적용
+uv run --project .. --locked python scripts/migrate.py   # 스키마 적용
 
-python -m src.ingest.hsk            # ① HSK 마스터 (레포 내 xlsx, ~1분)
-python -m src.ingest.laws           # ② 조문 수집+임베딩 (~15분, CPU 임베딩)
-python -m src.ingest.ccct --load-only   # ③ 세관장확인 요건 (레포 내 스윕 결과 적재, ~1분)
-python -m src.ingest.graph          # ④ 조문 위임/인용 그래프 (~1분)
+uv run --project .. --locked python -m src.ingest.hsk
+uv run --project .. --locked python -m src.ingest.laws
+uv run --project .. --locked python -m src.ingest.ccct --load-only
+uv run --project .. --locked python -m src.ingest.graph
 
-pytest tests/               # 단위 + 3-store 통합 검증
+uv run --project .. --locked pytest tests/   # 단위 + 3-store 통합 검증
 ```
 
 - ③에서 `--load-only` 를 빼면 관세청 API 전수 재수집을 시도하는데, 일일 쿼터(1만건) 때문에
@@ -62,14 +62,15 @@ python -m src.webapp        # http://0.0.0.0:8010 — 팀원에게 내 IP 공유
 
 ## D. 상시 운영 — 서버리스 무료 조합 (노트북 안 켜둬도 됨)
 
-데이터를 무료 관리형 서비스에 올리고, 웹 데모는 HF Spaces, 매일 동기화는 GitHub Actions 가 한다:
+데이터를 관리형 서비스에 올리고, 웹 데모는 private HF Space, 매일 동기화는
+승인된 호스트 작업 스케줄러가 수행한다:
 
 | 구성요소 | 서비스 (무료 티어) | 준비물 |
 |---|---|---|
 | Postgres | [Neon](https://neon.tech) | 프로젝트 생성 → 접속정보 |
 | Qdrant | [Qdrant Cloud](https://cloud.qdrant.io) | free cluster → URL + API key |
 | Neo4j | [Neo4j AuraDB](https://neo4j.com/cloud/aura) | free instance → URI + 비밀번호 |
-| 웹서버+임베딩 | [HF Spaces](https://huggingface.co) Docker | `deploy/hf_space/` 두 파일 업로드 |
+| 웹서버+임베딩 | [HF Spaces](https://huggingface.co) Docker | commit 기반 allowlist context |
 | 델타 동기화 | 호스트 PC 작업 스케줄러 | `scripts/register_delta_task.ps1` 1회 실행 (아래 참고) |
 
 순서:
@@ -78,7 +79,8 @@ python -m src.webapp        # http://0.0.0.0:8010 — 팀원에게 내 IP 공유
 3. **정기 동기화 등록**: `powershell -File scripts\register_delta_task.ps1` (관리자 불필요, 1회).
    매일 09:30, PC 가 꺼져 있었으면 다음 부팅 때 밀린 만큼 따라잡는다 (`data/delta_cloud.log` 에 기록).
    ⚠️ GitHub Actions 크론은 못 쓴다 — 법제처가 해외 IP(깃허브 러너)를 차단함 (2026-07-06 실측).
-4. HF Space 생성 (`deploy/hf_space/README.md` 안내대로) → 팀원에게 `https://<space>/?token=<DEMO_TOKEN>` 공유
+4. clean commit에서 HF Space context 생성 후 private Space에 게시
+   (`deploy/hf_space/README.md`) → 팀원에게 `https://<space>/?token=<DEMO_TOKEN>` 공유
 
 ## 터미널 도구 (환경 구축한 사람용)
 

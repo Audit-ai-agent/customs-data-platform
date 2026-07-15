@@ -34,3 +34,4 @@ jobs:
           law_repository/tests/test_evidence.py
           law_repository/tests/test_ccct_p0.py
           law_repository/tests/test_bm25.py
+          law_repository/tests/test_hf_space_deploy.py

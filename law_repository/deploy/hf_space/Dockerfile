@@ -1,22 +1,19 @@
+# syntax=docker/dockerfile:1.7
 # HF Spaces (Docker Space) 용 — 관세법령 저장소 웹 데모
-# Space 저장소에 이 Dockerfile 과 README.md(메타데이터) 두 파일만 올리면 된다.
-# 코드는 빌드 시 GitHub 에서 clone — 코드 업데이트 반영은 Space 설정의 Factory rebuild.
+# Build context는 tools/build_hf_space_context.py가 committed source로 생성한 allowlist bundle이다.
 FROM python:3.11-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends git \
- && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /app
-# CODE_REV: 코드 리비전 표시 겸 도커 캐시 무효화 — GitHub 에 새 코드를 push 하면
-# 이 값을 그 커밋 SHA 로 바꿔서 Space 에 올려야 clone 레이어가 다시 돈다.
-# --branch main 필수: GitHub 기본 브랜치(upset_vector_db)는 뒤처져 있음.
-ARG CODE_REV=b5a610d
-RUN git clone --branch main --depth 1 https://github.com/vector2967/trade-doc-auditor.git repo
-WORKDIR /app/repo/law_repository
+ARG SOURCE_REV=unknown
+LABEL org.opencontainers.image.revision=$SOURCE_REV
+
+COPY law_repository/requirements.txt ./requirements.txt
 
 # torch 는 CPU 휠로 (기본 인덱스는 CUDA 포함이라 이미지가 수 GB 커짐)
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
  && pip install --no-cache-dir -r requirements.txt
+
+COPY law_repository/src ./src
 
 # bge-m3 + bge-reranker-v2-m3(A1 rerank) 를 이미지에 미리 다운로드 — 콜드스타트에서 모델 받는 시간 제거.
 # 익명 다운로드는 HF Hub rate limit 로 빌드가 죽을 수 있어(2026-07-13 실측 BUILD_ERROR)
