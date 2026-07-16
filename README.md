@@ -23,6 +23,8 @@ Copy-Item law_repository/.env.example law_repository/.env
 ```
 
 실제 API key와 DB 비밀번호는 `.env` 또는 secret manager에만 입력합니다. example 파일에는 비밀값을 넣지 않습니다.
+로컬 PostgreSQL host port 기본값은 다른 개발 stack과 충돌하지 않도록 `55432`이며,
+컨테이너 내부 포트는 계속 `5432`입니다. `.env`의 `POSTGRES_PORT`로 변경할 수 있습니다.
 
 ## 검증
 
@@ -36,7 +38,9 @@ uv run --locked pytest -q evals/tests law_repository/tests/test_provider_contrac
 3-store 통합 검증은 Docker 서비스를 기동하고 migration·ingestion을 완료한 별도 환경에서 실행합니다. 연결 실패나 미적재 상태의 skip은 Live Gate 통과가 아닙니다.
 
 ```powershell
+uv run --locked python tools/live_preflight.py --phase assets
 docker compose -f law_repository/docker-compose.yml up -d --wait
+uv run --locked python tools/live_preflight.py --phase services
 Set-Location law_repository
 uv run --locked python scripts/migrate.py
 uv run --locked python -m src.ingest.hsk
@@ -49,5 +53,15 @@ uv run --locked pytest -q --junitxml=../live.junit.xml tests
 Set-Location ..
 uv run --locked python tools/assert_no_skips.py live.junit.xml
 ```
+
+`--phase release`는 secret 값을 출력하지 않고 `LAW_API_OC`와
+`DATA_GO_KR_SERVICE_KEY`의 존재 여부와 58개 대상 법령 cache의 JSON 유효성을
+법령 ID별로 확인합니다. 이 단계의 실패나 불완전 corpus
+readiness 503을 offline PASS로 대체해서는 안 됩니다. 외부 수집 권한이 없는 경우에는
+보유 데이터로 진단까지만 수행하고 Release Gate는 실패 상태로 유지합니다.
+
+이 도구의 `PASS`는 자산·port·credential·cache **사전조건**만 의미합니다.
+TCP port에 올바른 제품이 뜨 있는지까지 증명하지 않으므로, Evidence
+`/health/ready`, 3-store Live suite, no-skip Gate를 모두 통과해야 Release PASS입니다.
 
 구조와 경계는 [ARCHITECTURE.md](ARCHITECTURE.md), 비밀·데이터 정책은 [docs/SECURITY.md](docs/SECURITY.md)를 참고합니다.

@@ -5,7 +5,7 @@
 
 | 저장소 | 역할 |
 |---|---|
-| Postgres (`:5432`) | 시간버전 법령 + CCCT 조회·raw item·Requirement 무손실 원장 |
+| Postgres (`:55432`, 설정 가능) | 시간버전 법령 + CCCT 조회·raw item·Requirement 무손실 원장 |
 | Qdrant (`:6333`) | 현행 조문 검색 인덱스 — 의미검색(bge-m3 dense) + 키워드(BM25) |
 | Neo4j (`:7474`/`:7687`) | 그래프 — 조문 위임/인용, HSK→Requirement→법령/서류/기관 |
 
@@ -35,6 +35,7 @@ cd law_repository
 
 cp .env.example .env        # 비밀번호 등 값 채우기 (기본값으로도 로컬 구동 가능)
 docker compose up -d        # Postgres / Qdrant / Neo4j 기동
+uv run --project .. --locked python ../tools/live_preflight.py --phase services
 uv run --project .. --locked python scripts/migrate.py   # 스키마 적용
 
 uv run --project .. --locked python -m src.ingest.hsk
@@ -44,6 +45,11 @@ uv run --project .. --locked python -m src.ingest.graph
 
 uv run --project .. --locked pytest tests/   # 단위 + 3-store 통합 검증
 ```
+
+로컬 host port는 `.env`의 `POSTGRES_PORT`, `QDRANT_HTTP_PORT`,
+`QDRANT_GRPC_PORT`, `NEO4J_HTTP_PORT`, `NEO4J_BOLT_PORT`로 변경할 수 있다.
+컨테이너 내부 표준 포트는 바뀌지 않는다. 다른 프로젝트가 `5432`를 사용 중이라도
+그 컨테이너를 중단하지 말고 기본 `55432` 또는 다른 빈 port를 사용한다.
 
 - ③에서 `--load-only` 를 빼면 관세청 API 전수 재수집을 시도하는데, 일일 쿼터(1만건) 때문에
   3일 걸린다. 레포에 커밋된 `data/ccct_progress.jsonl` 이 그 결과물이니 그대로 적재하면 된다.
