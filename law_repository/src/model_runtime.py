@@ -27,13 +27,18 @@ from src.process_ipc import (
     FileIdentity,
     close_and_unlink,
     file_identity,
+    read_bounded_path,
     read_bounded_response,
     write_bounded_response,
+    write_open_file,
 )
 from src.process_security import scrub_sensitive_environment
+from src.process_start import ProcessStartError, start_process_bounded
 
 _DENSE_VECTOR_SIZE = 1_024
+_MODEL_REQUEST_MAX_BYTES = 262_144
 _MODEL_RESPONSE_MAX_BYTES = 131_072
+_MODEL_CONTROL_MAX_BYTES = 2_048
 
 
 class ModelRuntimeError(RuntimeError):
@@ -63,24 +68,82 @@ def _dense_worker_main(connection: Any) -> None:
 
     try:
         while True:
-            message = connection.recv()
-            if message == ("close",):
-                return
-            if not isinstance(message, tuple) or len(message) != 6 or message[0] != "encode":
-                return
-            _, request_id, texts, response_path, response_identity, maximum_bytes = message
             try:
+                control_bytes = connection.recv_bytes(_MODEL_CONTROL_MAX_BYTES)
+                control = json.loads(control_bytes.decode("utf-8"))
+            except (EOFError, BrokenPipeError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+                return
+            request_id = control.get("request_id") if isinstance(control, dict) else None
+            request_path = control.get("request_path") if isinstance(control, dict) else None
+            request_identity_value = (
+                control.get("request_identity") if isinstance(control, dict) else None
+            )
+            response_path = control.get("response_path") if isinstance(control, dict) else None
+            response_identity_value = (
+                control.get("response_identity") if isinstance(control, dict) else None
+            )
+            if (
+                not isinstance(control, dict)
+                or set(control)
+                != {
+                    "command",
+                    "maximum_request_bytes",
+                    "maximum_response_bytes",
+                    "request_id",
+                    "request_identity",
+                    "request_path",
+                    "response_identity",
+                    "response_path",
+                }
+                or control.get("command") != "encode"
+                or not isinstance(request_id, str)
+                or len(request_id) != 32
+                or any(character not in "0123456789abcdef" for character in request_id)
+                or not isinstance(request_path, str)
+                or not isinstance(response_path, str)
+                or not isinstance(request_identity_value, list)
+                or len(request_identity_value) != 2
+                or not all(
+                    isinstance(value, int) and not isinstance(value, bool)
+                    for value in request_identity_value
+                )
+                or not isinstance(response_identity_value, list)
+                or len(response_identity_value) != 2
+                or not all(
+                    isinstance(value, int) and not isinstance(value, bool)
+                    for value in response_identity_value
+                )
+                or control.get("maximum_request_bytes") != _MODEL_REQUEST_MAX_BYTES
+                or control.get("maximum_response_bytes") != _MODEL_RESPONSE_MAX_BYTES
+            ):
+                return
+            request_identity: FileIdentity = (
+                request_identity_value[0],
+                request_identity_value[1],
+            )
+            response_identity: FileIdentity = (
+                response_identity_value[0],
+                response_identity_value[1],
+            )
+            try:
+                request_bytes = read_bounded_path(
+                    request_path,
+                    expected_identity=request_identity,
+                    maximum_bytes=_MODEL_REQUEST_MAX_BYTES,
+                )
+                request = json.loads(request_bytes.decode("utf-8"))
+                texts = request.get("texts") if isinstance(request, dict) else None
                 if (
-                    not isinstance(request_id, str)
-                    or not isinstance(texts, tuple)
-                    or not isinstance(response_path, str)
-                    or not isinstance(response_identity, tuple)
-                    or len(response_identity) != 2
-                    or not all(isinstance(value, int) for value in response_identity)
-                    or maximum_bytes != _MODEL_RESPONSE_MAX_BYTES
+                    not isinstance(request, dict)
+                    or set(request) != {"texts"}
+                    or not isinstance(texts, list)
+                    or len(texts) != 1
+                    or not isinstance(texts[0], str)
+                    or not texts[0]
+                    or len(texts[0]) > 32_768
                 ):
-                    raise ValueError("dense model request protocol is invalid")
-                result = encode(list(texts))
+                    raise ValueError("dense model input payload is invalid")
+                result = encode(texts)
                 if getattr(result, "shape", None) != (len(texts), _DENSE_VECTOR_SIZE):
                     raise ValueError("dense model output shape is invalid")
                 vectors = result.tolist()
@@ -167,33 +230,74 @@ class DenseModelSupervisor:
 
     def start(self) -> None:
         with self._lifecycle_lock:
-            if self._ready and self._process is not None and self._process.is_alive():
+            if self._ready and self._process is not None and self._is_alive(self._process):
                 return
             if self._broken:
                 raise ModelRuntimeError("model supervisor is failed closed")
-            parent, child = self._context.Pipe(duplex=True)
-            process = self._context.Process(
-                target=_run_dense_worker_scrubbed,
-                args=(self._worker_target, child),
-                name="customs-evidence-dense-model",
-                daemon=True,
-            )
-            self._process = process
-            self._connection = parent
-            process.start()
-            child.close()
-            if not parent.poll(self._startup_timeout):
-                self._terminate_locked()
-                raise ModelRuntimeError("model worker startup timed out")
+            startup_cutoff = time.monotonic() + self._startup_timeout
+            parent: Any | None = None
+            child: Any | None = None
             try:
-                message = parent.recv()
-            except (EOFError, BrokenPipeError, OSError) as exc:
+                parent, child = self._context.Pipe(duplex=True)
+                process = self._context.Process(
+                    target=_run_dense_worker_scrubbed,
+                    args=(self._worker_target, child),
+                    name="customs-evidence-dense-model",
+                    daemon=True,
+                )
+                self._process = process
+                self._connection = parent
+                remaining = startup_cutoff - time.monotonic()
+                if remaining < 0.001:
+                    raise ModelRuntimeError("model worker startup budget was exhausted")
+                start_process_bounded(
+                    process,
+                    timeout_seconds=remaining,
+                    thread_name="customs-evidence-model-launcher",
+                    fatal_exit=self._fatal_exit,
+                    fatal_exit_code=76,
+                )
+                child.close()
+                child = None
+                remaining = startup_cutoff - time.monotonic()
+                if remaining < 0.001 or not parent.poll(remaining):
+                    raise ModelRuntimeError("model worker startup timed out")
+                try:
+                    message = parent.recv()
+                except (EOFError, BrokenPipeError, OSError) as exc:
+                    raise ModelRuntimeError("model worker exited during startup") from exc
+                if (
+                    time.monotonic() >= startup_cutoff
+                    or message != ("ready",)
+                    or not self._is_alive(process)
+                ):
+                    raise ModelRuntimeError("model worker failed to initialize")
+                self._ready = True
+                # Ownership transferred to the supervisor fields.
+                parent = None
+            except ProcessStartError as exc:
                 self._terminate_locked()
-                raise ModelRuntimeError("model worker exited during startup") from exc
-            if message != ("ready",) or not process.is_alive():
+                raise ModelRuntimeError("model worker process failed to start") from exc
+            except ModelRuntimeError:
                 self._terminate_locked()
-                raise ModelRuntimeError("model worker failed to initialize")
-            self._ready = True
+                raise
+            except Exception as exc:
+                self._terminate_locked()
+                raise ModelRuntimeError("model worker startup failed") from exc
+            except BaseException:
+                self._terminate_locked()
+                raise
+            finally:
+                if child is not None:
+                    try:
+                        child.close()
+                    except (OSError, ValueError):
+                        pass
+                if parent is not None:
+                    try:
+                        parent.close()
+                    except (OSError, ValueError):
+                        pass
 
     def assert_ready(self) -> None:
         with self._lifecycle_lock:
@@ -201,9 +305,23 @@ class DenseModelSupervisor:
                 self._broken
                 or not self._ready
                 or self._process is None
-                or not self._process.is_alive()
+                or not self._is_alive(self._process)
             ):
                 raise ModelRuntimeError("model supervisor is unavailable")
+
+    @staticmethod
+    def _is_alive(process: Any) -> bool:
+        try:
+            return bool(process.is_alive())
+        except (AssertionError, ValueError):
+            return False
+
+    @staticmethod
+    def _inference_remaining(operation_cutoff: float) -> float:
+        remaining = operation_cutoff - time.monotonic()
+        if remaining < 0.001:
+            raise ModelInferenceTimeout("model inference operation deadline is exhausted")
+        return remaining
 
     @staticmethod
     def _validate_texts(texts: Sequence[str]) -> tuple[str, ...]:
@@ -222,105 +340,134 @@ class DenseModelSupervisor:
         normalized = self._validate_texts(texts)
         # Lock admission and inference share one sub-deadline.  A queued call
         # cannot wait for one full model cap and then receive a second cap.
-        operation_budget = self._inference_seconds(deadline)
-        operation_started = time.monotonic()
-        if not self._call_lock.acquire(timeout=operation_budget):
+        operation_cutoff = time.monotonic() + self._inference_seconds(deadline)
+        if not self._call_lock.acquire(timeout=max(0.0, operation_cutoff - time.monotonic())):
             raise ModelInferenceTimeout("model worker admission timed out")
+        request_fd: int | None = None
+        request_path: str | None = None
+        response_fd: int | None = None
+        response_path: str | None = None
+        worker_may_have_request = False
         try:
-            timeout = operation_budget - (time.monotonic() - operation_started)
-            if timeout < 0.001:
-                raise ModelInferenceTimeout("model worker admission consumed its deadline")
+            self._inference_remaining(operation_cutoff)
+            request_payload = json.dumps(
+                {"texts": list(normalized)},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            if len(request_payload) > _MODEL_REQUEST_MAX_BYTES:
+                raise ModelRuntimeError("model input exceeds the IPC byte limit")
+            request_fd, request_path = tempfile.mkstemp(
+                prefix="customs-evidence-model-request-",
+                suffix=".json",
+            )
+            request_identity: FileIdentity = file_identity(request_fd)
+            write_open_file(
+                request_fd,
+                expected_identity=request_identity,
+                payload=request_payload,
+                maximum_bytes=_MODEL_REQUEST_MAX_BYTES,
+            )
+            self._inference_remaining(operation_cutoff)
+            response_fd, response_path = tempfile.mkstemp(
+                prefix="customs-evidence-model-response-",
+                suffix=".json",
+            )
+            response_identity: FileIdentity = file_identity(response_fd)
+            request_id = uuid.uuid4().hex
+            control_payload = json.dumps(
+                {
+                    "command": "encode",
+                    "maximum_request_bytes": _MODEL_REQUEST_MAX_BYTES,
+                    "maximum_response_bytes": _MODEL_RESPONSE_MAX_BYTES,
+                    "request_id": request_id,
+                    "request_identity": list(request_identity),
+                    "request_path": request_path,
+                    "response_identity": list(response_identity),
+                    "response_path": response_path,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            if len(control_payload) > _MODEL_CONTROL_MAX_BYTES:
+                raise ModelRuntimeError("model control message exceeds the pipe byte limit")
+            self._inference_remaining(operation_cutoff)
             with self._lifecycle_lock:
                 if (
                     self._broken
                     or not self._ready
                     or self._process is None
                     or self._connection is None
-                    or not self._process.is_alive()
+                    or not self._is_alive(self._process)
                 ):
                     raise ModelRuntimeError("model supervisor is unavailable")
                 connection = self._connection
-                request_id = uuid.uuid4().hex
-                response_fd, response_path = tempfile.mkstemp(
-                    prefix="customs-evidence-model-",
-                    suffix=".json",
-                )
-                response_identity: FileIdentity = file_identity(response_fd)
+                self._inference_remaining(operation_cutoff)
+                worker_may_have_request = True
                 try:
-                    connection.send(
-                        (
-                            "encode",
-                            request_id,
-                            normalized,
-                            response_path,
-                            response_identity,
-                            _MODEL_RESPONSE_MAX_BYTES,
-                        ),
-                    )
+                    connection.send_bytes(control_payload)
                 except (BrokenPipeError, EOFError, OSError) as exc:
-                    close_and_unlink(response_fd, response_path)
-                    self._terminate_locked()
                     raise ModelRuntimeError("model worker request channel failed") from exc
 
+            if not connection.poll(self._inference_remaining(operation_cutoff)):
+                raise ModelInferenceTimeout("model inference exceeded its hard deadline")
             try:
-                if not connection.poll(timeout):
-                    self._break_worker()
-                    raise ModelInferenceTimeout("model inference exceeded its hard deadline")
-                try:
-                    message = connection.recv()
-                except (EOFError, BrokenPipeError, OSError) as exc:
-                    self._break_worker()
-                    raise ModelRuntimeError("model worker response channel failed") from exc
-                if message != ("result_ready", request_id):
-                    self._break_worker()
-                    raise ModelRuntimeError("model worker returned an invalid response")
-                raw_response = read_bounded_response(
-                    response_fd,
-                    expected_identity=response_identity,
-                    maximum_bytes=_MODEL_RESPONSE_MAX_BYTES,
-                )
-                payload = json.loads(raw_response.decode("utf-8"))
-                vectors = payload.get("vectors") if isinstance(payload, dict) else None
-                if (
-                    not isinstance(payload, dict)
-                    or set(payload) != {"status", "vectors"}
-                    or payload.get("status") != "result"
-                    or not isinstance(vectors, list)
-                    or len(vectors) != len(normalized)
+                message = connection.recv()
+            except (EOFError, BrokenPipeError, OSError) as exc:
+                raise ModelRuntimeError("model worker response channel failed") from exc
+            if time.monotonic() >= operation_cutoff:
+                raise ModelInferenceTimeout("model inference exceeded its hard deadline")
+            if message != ("result_ready", request_id):
+                raise ModelRuntimeError("model worker returned an invalid response")
+            raw_response = read_bounded_response(
+                response_fd,
+                expected_identity=response_identity,
+                maximum_bytes=_MODEL_RESPONSE_MAX_BYTES,
+            )
+            payload = json.loads(raw_response.decode("utf-8"))
+            vectors = payload.get("vectors") if isinstance(payload, dict) else None
+            if (
+                not isinstance(payload, dict)
+                or set(payload) != {"status", "vectors"}
+                or payload.get("status") != "result"
+                or not isinstance(vectors, list)
+                or len(vectors) != len(normalized)
+                or any(
+                    not isinstance(vector, list)
+                    or len(vector) != _DENSE_VECTOR_SIZE
                     or any(
-                        not isinstance(vector, list)
-                        or len(vector) != _DENSE_VECTOR_SIZE
-                        or any(
-                            isinstance(value, bool)
-                            or not isinstance(value, (int, float))
-                            or not math.isfinite(float(value))
-                            for value in vector
-                        )
-                        for vector in vectors
+                        isinstance(value, bool)
+                        or not isinstance(value, (int, float))
+                        or not math.isfinite(float(value))
+                        for value in vector
                     )
-                ):
-                    self._break_worker()
-                    raise ModelRuntimeError("model worker returned invalid vectors")
-                deadline.assert_work_allowed()
-                return [[float(value) for value in vector] for vector in vectors]
-            except ModelInferenceTimeout:
-                raise
-            except (
-                OSError,
-                UnicodeDecodeError,
-                json.JSONDecodeError,
-                ValueError,
-            ) as exc:
+                    for vector in vectors
+                )
+            ):
+                raise ModelRuntimeError("model worker returned invalid vectors")
+            if time.monotonic() >= operation_cutoff:
+                raise ModelInferenceTimeout("model response processing exceeded its hard deadline")
+            deadline.assert_work_allowed()
+            return [[float(value) for value in vector] for vector in vectors]
+        except ModelInferenceTimeout:
+            if worker_may_have_request:
                 self._break_worker()
-                raise ModelRuntimeError("model worker response failed") from exc
-            except RuntimeError as exc:
-                if isinstance(exc, ModelRuntimeError):
-                    raise
+            raise
+        except ModelRuntimeError:
+            if worker_may_have_request:
                 self._break_worker()
-                raise ModelRuntimeError("model worker response failed") from exc
-            finally:
-                close_and_unlink(response_fd, response_path)
+            raise
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            if worker_may_have_request:
+                self._break_worker()
+            raise ModelRuntimeError("model worker IPC failed") from exc
         finally:
+            if response_fd is not None and response_path is not None:
+                close_and_unlink(response_fd, response_path)
+            if request_fd is not None and request_path is not None:
+                close_and_unlink(request_fd, request_path)
             self._call_lock.release()
 
     def _inference_seconds(self, deadline: RequestDeadline) -> float:
@@ -345,15 +492,27 @@ class DenseModelSupervisor:
         if connection is not None:
             try:
                 connection.close()
-            except OSError:
+            except (OSError, ValueError):
                 pass
-        if process is not None and process.is_alive():
-            process.terminate()
-            process.join(self._termination_timeout)
-        if process is not None and process.is_alive():
-            process.kill()
-            process.join(self._termination_timeout)
-        if process is not None and process.is_alive():
+        if process is not None and self._is_alive(process):
+            try:
+                process.terminate()
+            except (AssertionError, OSError, ValueError):
+                pass
+            try:
+                process.join(self._termination_timeout)
+            except (AssertionError, OSError, ValueError):
+                pass
+        if process is not None and self._is_alive(process):
+            try:
+                process.kill()
+            except (AssertionError, OSError, ValueError):
+                pass
+            try:
+                process.join(self._termination_timeout)
+            except (AssertionError, OSError, ValueError):
+                pass
+        if process is not None and self._is_alive(process):
             self._fatal_exit(70)
         if process is not None:
             try:

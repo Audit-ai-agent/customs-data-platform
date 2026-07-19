@@ -28,10 +28,14 @@ def write_bounded_response(
 ) -> None:
     if not payload or len(payload) > maximum_bytes:
         raise ValueError("child response is outside the byte limit")
-    descriptor = os.open(path, os.O_WRONLY | os.O_TRUNC)
+    descriptor = os.open(
+        path,
+        os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+    )
     try:
         if file_identity(descriptor) != expected_identity:
             raise RuntimeError("child response file identity changed")
+        os.ftruncate(descriptor, 0)
         view = memoryview(payload)
         written = 0
         while written < len(view):
@@ -42,6 +46,31 @@ def write_bounded_response(
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def write_open_file(
+    descriptor: int,
+    *,
+    expected_identity: FileIdentity,
+    payload: bytes,
+    maximum_bytes: int,
+) -> None:
+    """Write bounded parent-owned request bytes to an already-open file."""
+
+    if not payload or len(payload) > maximum_bytes:
+        raise ValueError("parent request is outside the byte limit")
+    if file_identity(descriptor) != expected_identity:
+        raise RuntimeError("parent request file identity changed")
+    os.ftruncate(descriptor, 0)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    view = memoryview(payload)
+    written = 0
+    while written < len(view):
+        count = os.write(descriptor, view[written:])
+        if count <= 0:
+            raise OSError("parent request write made no progress")
+        written += count
+    os.fsync(descriptor)
 
 
 def read_bounded_response(
@@ -75,6 +104,28 @@ def read_bounded_response(
     return payload
 
 
+def read_bounded_path(
+    path: str,
+    *,
+    expected_identity: FileIdentity,
+    maximum_bytes: int,
+) -> bytes:
+    """Read one existing request path without following a symbolic link."""
+
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        return read_bounded_response(
+            descriptor,
+            expected_identity=expected_identity,
+            maximum_bytes=maximum_bytes,
+        )
+    finally:
+        os.close(descriptor)
+
+
 def close_and_unlink(descriptor: int, path: str) -> None:
     """Best-effort cleanup that never masks the original runtime result."""
 
@@ -92,6 +143,8 @@ __all__ = [
     "FileIdentity",
     "close_and_unlink",
     "file_identity",
+    "read_bounded_path",
     "read_bounded_response",
     "write_bounded_response",
+    "write_open_file",
 ]

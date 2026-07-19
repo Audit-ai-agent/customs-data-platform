@@ -61,12 +61,13 @@ def bounded_client(
     the shared request deadline after the operation.
     """
 
-    instance = client_factory(
-        timeout_seconds=deadline.store_operation_whole_seconds(),
-    )
+    client_timeout = deadline.store_operation_whole_seconds()
+    timer_join_timeout = deadline.completion_reserve_seconds
     state_lock = Lock()
     closed = False
     operation_expired = Event()
+    instance: Any | None = None
+    watchdog: Timer | None = None
 
     def close_once() -> None:
         nonlocal closed
@@ -74,7 +75,7 @@ def bounded_client(
             if closed:
                 return
             closed = True
-        close = getattr(instance, "close", None)
+        close = getattr(instance, "close", None) if instance is not None else None
         if callable(close):
             try:
                 close()
@@ -87,18 +88,27 @@ def bounded_client(
         operation_expired.set()
         close_once()
 
-    watchdog = Timer(deadline.store_operation_seconds(), expire_operation)
-    watchdog.daemon = True
-    watchdog.name = "customs-evidence-qdrant-deadline"
-    watchdog.start()
     try:
+        # The returned client is immediately owned by this cleanup boundary.
+        # Any later deadline calculation, Timer setup, or yield failure closes
+        # the partially constructed request transport.
+        instance = client_factory(timeout_seconds=client_timeout)
+        watchdog = Timer(deadline.store_operation_seconds(), expire_operation)
+        watchdog.daemon = True
+        watchdog.name = "customs-evidence-qdrant-deadline"
+        watchdog.start()
         yield instance
         if operation_expired.is_set():
             raise DeadlineExceeded("Qdrant operation exceeded its hard deadline")
         deadline.assert_work_allowed()
     finally:
-        watchdog.cancel()
-        watchdog.join(timeout=deadline.completion_reserve_seconds)
+        if watchdog is not None:
+            watchdog.cancel()
+            try:
+                watchdog.join(timeout=timer_join_timeout)
+            except RuntimeError:
+                # ``Timer.start`` may fail before the thread is registered.
+                pass
         close_once()
 
 

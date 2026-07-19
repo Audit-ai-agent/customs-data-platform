@@ -66,53 +66,64 @@ def connect(*, deadline: RequestDeadline | None = None) -> Iterator[psycopg.Conn
                 f"-c idle_in_transaction_session_timeout={statement_timeout_ms}"
             ),
         }
-    conn = psycopg.connect(settings.postgres_dsn, **connect_kwargs)
+    conn: psycopg.Connection | None = None
     abort_timer: Timer | None = None
-    operation_expired = Event()
     timer_join_timeout = 0.0
-    if deadline is not None:
-        deadline.assert_work_allowed()
-        timer_join_timeout = deadline.completion_reserve_seconds
-
-        def abort_at_request_cutoff() -> None:
-            operation_expired.set()
-            try:
-                conn.cancel_safe(
-                    timeout=min(0.5, deadline.completion_reserve_seconds),
-                )
-            # Closing the socket below is the mandatory fail-safe if the
-            # cancellation packet cannot reach the failed network path.
-            except Exception:  # noqa: S110  # nosec B110
-                pass
-            finally:
-                conn.close()
-
-        # Bound the whole transaction, not merely each statement.  This also
-        # prevents a sequence of individually fast statements from extending
-        # one dependency operation beyond its configured cap.
-        abort_timer = Timer(
-            deadline.store_operation_seconds(),
-            abort_at_request_cutoff,
-        )
-        abort_timer.daemon = True
-        abort_timer.name = "customs-evidence-postgres-deadline"
-        abort_timer.start()
     try:
-        yield conn
+        connected = psycopg.connect(settings.postgres_dsn, **connect_kwargs)
+        conn = connected
+        # Keep every allocation and deadline calculation after a successful
+        # connect inside this outer cleanup boundary.  Setup failures must not
+        # strand a live connection before the context manager yields it.
+        operation_expired = Event()
         if deadline is not None:
-            if operation_expired.is_set():
-                raise DeadlineExceeded("PostgreSQL operation exceeded its hard deadline")
             deadline.assert_work_allowed()
-        conn.commit()
-    except Exception:
-        if not conn.closed:
-            try:
-                conn.rollback()
-            except Exception:
-                conn.close()
-        raise
+            timer_join_timeout = deadline.completion_reserve_seconds
+
+            def abort_at_request_cutoff() -> None:
+                operation_expired.set()
+                try:
+                    connected.cancel_safe(
+                        timeout=min(0.5, deadline.completion_reserve_seconds),
+                    )
+                # Closing the socket below is the mandatory fail-safe if the
+                # cancellation packet cannot reach the failed network path.
+                except Exception:  # noqa: S110  # nosec B110
+                    pass
+                finally:
+                    connected.close()
+
+            # Bound the whole transaction, not merely each statement.  This
+            # also prevents a sequence of individually fast statements from
+            # extending one dependency operation beyond its configured cap.
+            abort_timer = Timer(
+                deadline.store_operation_seconds(),
+                abort_at_request_cutoff,
+            )
+            abort_timer.daemon = True
+            abort_timer.name = "customs-evidence-postgres-deadline"
+            abort_timer.start()
+        try:
+            yield connected
+            if deadline is not None:
+                if operation_expired.is_set():
+                    raise DeadlineExceeded("PostgreSQL operation exceeded its hard deadline")
+                deadline.assert_work_allowed()
+            connected.commit()
+        except Exception:
+            if not connected.closed:
+                try:
+                    connected.rollback()
+                except Exception:
+                    connected.close()
+            raise
     finally:
         if abort_timer is not None:
             abort_timer.cancel()
-            abort_timer.join(timeout=timer_join_timeout)
-        conn.close()
+            try:
+                abort_timer.join(timeout=timer_join_timeout)
+            except RuntimeError:
+                # ``Timer.start`` may fail before the thread is registered.
+                pass
+        if conn is not None:
+            conn.close()
