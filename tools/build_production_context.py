@@ -18,12 +18,14 @@ try:
     from tools.provider_build import (
         create_provider_build_document,
         create_runtime_provider_build_document,
+        create_runtime_provider_lock_document,
         serialized_document,
     )
 except ModuleNotFoundError:  # direct execution with tools/ as sys.path[0]
     from provider_build import (  # type: ignore[no-redef]
         create_provider_build_document,
         create_runtime_provider_build_document,
+        create_runtime_provider_lock_document,
         serialized_document,
     )
 
@@ -174,6 +176,18 @@ def build_context(repo: Path, output: Path) -> dict[str, object]:
     )
     (output / "provider-runtime-build.json").write_bytes(
         serialized_document(runtime_provider_build)
+    )
+    readiness_schema_bytes = (
+        output / "contracts/evidence/v2/readiness_v2.schema.json"
+    ).read_bytes()
+    runtime_provider_lock = create_runtime_provider_lock_document(
+        runtime_provider_build=runtime_provider_build,
+        retrieval_schema=schema_bytes,
+        readiness_schema=readiness_schema_bytes,
+        source_manifest=manifest_bytes,
+    )
+    (output / "provider-runtime-lock.json").write_bytes(
+        serialized_document(runtime_provider_lock)
     )
     return manifest
 

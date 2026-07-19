@@ -47,6 +47,14 @@ The release manifest records the Data commit, image digest, provider build SHA,
 retrieval schema SHA, model revisions, SBOM digests, scanner results, and
 rollback image digest. A tag by itself is not a release identity.
 
+The clean-context builder also emits `provider-runtime-lock.json`. This is the
+Data-owned, Agent-consumable `evidence-runtime-release-provider-lock` and
+contains only the exact provider release/revision/build, frozen retrieval
+schema, runtime readiness schema, and source-manifest digests derived from the
+same clean commit. It is a release output, not a checked-in placeholder. The
+Agent release process must copy and verify this file together with the exact
+two schema bytes; hand-authored hashes are not accepted.
+
 ## Transport and authentication
 
 TLS 1.2 or newer is mandatory at the approved ingress or service mesh. The

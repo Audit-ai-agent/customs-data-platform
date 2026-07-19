@@ -86,6 +86,7 @@ def test_production_context_exports_only_committed_runtime_allowlist(
         "law_repository/src/provider_identity.py",
         "provider-build.json",
         "provider-runtime-build.json",
+        "provider-runtime-lock.json",
         "pyproject.toml",
         "source-manifest.json",
         "uv.lock",
@@ -107,6 +108,33 @@ def test_production_context_exports_only_committed_runtime_allowlist(
     )
     assert runtime_identity["provider_release"] == "evidence-api-v1.2.0"
     assert runtime_identity["provider_revision"] == identity["provider_revision"]
+    runtime_lock = json.loads(
+        (output / "provider-runtime-lock.json").read_text(encoding="utf-8")
+    )
+    assert set(runtime_lock) == {
+        "contract",
+        "schema_version",
+        "provider_release",
+        "provider_revision",
+        "provider_build_sha256",
+        "retrieval_schema_sha256",
+        "readiness_schema_sha256",
+        "provider_source_manifest_sha256",
+    }
+    assert runtime_lock["contract"] == "evidence-runtime-release-provider-lock"
+    assert runtime_lock["provider_revision"] == _git(repo, "rev-parse", "HEAD")
+    assert runtime_lock["provider_build_sha256"] == runtime_identity[
+        "provider_build_sha256"
+    ]
+    assert runtime_lock["retrieval_schema_sha256"] == hashlib.sha256(
+        (output / "contracts/evidence/v1/rag_retrieval_v1.schema.json").read_bytes()
+    ).hexdigest()
+    assert runtime_lock["readiness_schema_sha256"] == hashlib.sha256(
+        (output / "contracts/evidence/v2/readiness_v2.schema.json").read_bytes()
+    ).hexdigest()
+    assert runtime_lock["provider_source_manifest_sha256"] == hashlib.sha256(
+        (output / "source-manifest.json").read_bytes()
+    ).hexdigest()
 
 
 def test_production_context_rejects_dirty_repo_and_in_repo_output(
