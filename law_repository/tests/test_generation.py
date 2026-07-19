@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 from typing import Any, Callable
 
 import pytest
@@ -10,8 +11,10 @@ from src.generation import (
     GenerationValidationError,
     SourceManifest,
     StoreAttestation,
+    VerifiedEvaluationBundle,
     build_seal_attestation,
     canonical_sha256,
+    load_verified_evaluation_bundle,
     release_model_manifest,
     validate_rag_evaluation_report,
     validate_store_attestations,
@@ -110,6 +113,22 @@ def test_hsk_baseline_binds_both_source_files_and_parser_counts(
         SourceManifest.from_mapping(count_tamper)
 
 
+def test_arbitrary_dataset_snapshot_and_index_config_are_rejected(
+    generation_manifest_factory: Callable[..., dict[str, Any]],
+    generation_spec: GenerationSpec,
+) -> None:
+    manifest = generation_manifest_factory()
+    manifest["datasets"][0]["snapshot_id"] = "operator-asserted-snapshot"
+    with pytest.raises(GenerationValidationError, match="pinned release baseline"):
+        SourceManifest.from_mapping(manifest)
+    with pytest.raises(GenerationValidationError, match="fields do not match"):
+        GenerationSpec(
+            source_manifest=generation_spec.source_manifest,
+            model_manifest=generation_spec.model_manifest,
+            index_config={**generation_spec.index_config, "unverified_option": True},
+        )
+
+
 def test_source_freshness_limitation_is_hashed_and_blocks_seal(
     generation_manifest_factory: Callable[..., dict[str, Any]],
 ) -> None:
@@ -119,6 +138,7 @@ def test_source_freshness_limitation_is_hashed_and_blocks_seal(
         "observed_at": "2026-07-06T00:00:00Z",
         "valid_through": "2026-07-06",
         "limitation": "No source changes after the tracked snapshot are represented.",
+        "approval_artifact_sha256": "a" * 64,
         "release_eligible": False,
     }
     manifest = SourceManifest.from_mapping(value)
@@ -210,6 +230,45 @@ def test_store_attestation_rejects_duplicate_or_missing_article_ids(
         )
 
 
+def test_store_projection_hash_is_sealed_but_observation_time_is_not(
+    generation_spec: GenerationSpec,
+) -> None:
+    first = StoreAttestation.from_article_records(
+        generation_id=generation_spec.generation_id,
+        store_name="qdrant",
+        records=_RECORDS,
+        model_manifest_sha256=generation_spec.model_manifest_sha256,
+        store_locator="generation/qdrant",
+        store_revision="qdrant-v1",
+        attested_at="2026-07-19T00:00:00Z",
+        projection={"payload": "exact"},
+    )
+    later = StoreAttestation.from_article_records(
+        generation_id=generation_spec.generation_id,
+        store_name="qdrant",
+        records=_RECORDS,
+        model_manifest_sha256=generation_spec.model_manifest_sha256,
+        store_locator="generation/qdrant",
+        store_revision="qdrant-v1",
+        attested_at="2026-07-19T01:00:00Z",
+        projection={"payload": "exact"},
+    )
+    tampered = StoreAttestation.from_article_records(
+        generation_id=generation_spec.generation_id,
+        store_name="qdrant",
+        records=_RECORDS,
+        model_manifest_sha256=generation_spec.model_manifest_sha256,
+        store_locator="generation/qdrant",
+        store_revision="qdrant-v1",
+        attested_at="2026-07-19T01:00:00Z",
+        projection={"payload": "tampered"},
+    )
+
+    assert first.sha256 != later.sha256
+    assert first.sealed_projection_sha256 == later.sealed_projection_sha256
+    assert first.sealed_projection_sha256 != tampered.sealed_projection_sha256
+
+
 def test_rag_release_report_and_seal_hash_are_canonical(
     generation_spec: GenerationSpec,
     generation_evaluation_factory: Callable[[str], dict[str, Any]],
@@ -234,9 +293,12 @@ def test_rag_release_report_and_seal_hash_are_canonical(
     ("path", "value", "message"),
     [
         (("gold", "human_reviewed"), False, "human-reviewed"),
-        (("gold", "law_coverage_count"), 57, "all target laws"),
-        (("hybrid", "ndcg_at_10"), 0.79, "at least 0.8"),
-        (("structured", "required_evidence_recall"), 0.99, "must equal 1.0"),
+        (("hybrid", "ndcg_at_10"), 0.79, "does not match case records"),
+        (
+            ("structured", "required_evidence_recall"),
+            0.99,
+            "does not match case records",
+        ),
         (("mock_count",), 1, "mock retrieval"),
         (("unexpected_skips",), 1, "cannot contain skips"),
     ],
@@ -254,6 +316,93 @@ def test_rag_release_report_fails_closed(
         target = target[segment]
     target[path[-1]] = value
     with pytest.raises(GenerationValidationError, match=message):
+        validate_rag_evaluation_report(
+            report,
+            generation_id=generation_spec.generation_id,
+        )
+
+
+def test_verified_evaluation_bundle_reads_and_binds_actual_bytes(
+    tmp_path: Path,
+    generation_spec: GenerationSpec,
+    generation_evaluation_bundle_factory: Callable[[str], VerifiedEvaluationBundle],
+) -> None:
+    bundle = generation_evaluation_bundle_factory(generation_spec.generation_id)
+    assert bundle.report["generation_id"] == generation_spec.generation_id
+
+    root = tmp_path / generation_spec.generation_id
+    (root / "runner.artifact").write_bytes(b"tampered-runner")
+    with pytest.raises(GenerationValidationError, match="artifact bytes do not match"):
+        load_verified_evaluation_bundle(
+            root,
+            generation_id=generation_spec.generation_id,
+        )
+
+
+def test_verified_evaluation_bundle_rejects_duplicate_json_and_manual_construction(
+    tmp_path: Path,
+    generation_spec: GenerationSpec,
+    generation_evaluation_bundle_factory: Callable[[str], VerifiedEvaluationBundle],
+) -> None:
+    bundle = generation_evaluation_bundle_factory(generation_spec.generation_id)
+    root = tmp_path / generation_spec.generation_id
+    (root / "cases.json").write_bytes(b'[{"case_id":"a","case_id":"b"}]')
+    with pytest.raises(GenerationValidationError, match="strict JSON"):
+        load_verified_evaluation_bundle(
+            root,
+            generation_id=generation_spec.generation_id,
+        )
+    with pytest.raises(GenerationValidationError, match="bundle loader"):
+        VerifiedEvaluationBundle(
+            report=bundle.report,
+            report_sha256=bundle.report_sha256,
+            approval_sha256=bundle.approval_sha256,
+            _marker=object(),
+        )
+
+
+def test_verified_evaluation_bundle_rejects_unbound_files(
+    tmp_path: Path,
+    generation_spec: GenerationSpec,
+    generation_evaluation_bundle_factory: Callable[[str], VerifiedEvaluationBundle],
+) -> None:
+    generation_evaluation_bundle_factory(generation_spec.generation_id)
+    root = tmp_path / generation_spec.generation_id
+    (root / "unreviewed-notes.txt").write_text("not part of the seal", encoding="utf-8")
+
+    with pytest.raises(GenerationValidationError, match="file inventory"):
+        load_verified_evaluation_bundle(
+            root,
+            generation_id=generation_spec.generation_id,
+        )
+
+
+def test_per_case_metrics_are_recomputed_before_thresholds(
+    generation_spec: GenerationSpec,
+    generation_evaluation_factory: Callable[[str], dict[str, Any]],
+) -> None:
+    report = generation_evaluation_factory(generation_spec.generation_id)
+    for case in report["cases"]:
+        if case["suite"] == "hybrid":
+            case["ndcg_at_10"] = 0.79
+    report["hybrid"]["ndcg_at_10"] = 0.79
+    report["artifacts"]["case_manifest_sha256"] = canonical_sha256(report["cases"])
+
+    with pytest.raises(GenerationValidationError, match="at least 0.8"):
+        validate_rag_evaluation_report(
+            report,
+            generation_id=generation_spec.generation_id,
+        )
+
+
+def test_gold_coverage_map_must_equal_case_records(
+    generation_spec: GenerationSpec,
+    generation_evaluation_factory: Callable[[str], dict[str, Any]],
+) -> None:
+    report = generation_evaluation_factory(generation_spec.generation_id)
+    law_id = next(iter(report["gold"]["law_coverage"]))
+    report["gold"]["law_coverage"][law_id] += 1
+    with pytest.raises(GenerationValidationError, match="does not match case records"):
         validate_rag_evaluation_report(
             report,
             generation_id=generation_spec.generation_id,

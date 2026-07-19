@@ -184,12 +184,22 @@ def test_generation_migration_is_additive_and_enforces_state_machine() -> None:
     assert "CREATE TABLE knowledge_generations" in migration.sql
     assert "knowledge_generation_active_pointer" in migration.sql
     assert "knowledge_generation_store_attestations" in migration.sql
+    assert "requires completed migrations 001..003" in migration.sql
+    assert "knowledge_generation_datasets" in migration.sql
+    assert "knowledge_generation_dataset_members" in migration.sql
+    assert "projection_sha256" in migration.sql
+    assert "11327" in migration.sql
+    assert "22654" in migration.sql
+    assert "events are append-only" in migration.sql
+    assert "CCCT snapshot linked to a release generation is immutable" in migration.sql
+    assert "validated generation law MST/article snapshots do not match manifest" in migration.sql
     assert "OLD.generation_id" in migration.sql
     assert "NEW.generation_id" in migration.sql
     assert "generation article snapshot does not match PostgreSQL ledger" in migration.sql
     assert "content         text NOT NULL" in migration.sql
     assert "pg_advisory" not in migration.sql
     assert "building" in migration.sql
+    assert "aborted" in migration.sql
     assert "validated" in migration.sql
     assert "sealed" in migration.sql
     assert "active" in migration.sql

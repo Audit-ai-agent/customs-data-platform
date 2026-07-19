@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 from src.generation import (
+    DatasetMember,
     GenerationSpec,
     GenerationState,
     StoreAttestation,
+    VerifiedEvaluationBundle,
     build_seal_attestation,
-    validate_rag_evaluation_report,
     validate_store_attestations,
 )
 from src.generation_repository import (
@@ -50,18 +52,47 @@ class GenerationCoordinator:
         self,
         spec: GenerationSpec,
         article_membership: Iterable[tuple[int, str]],
+        dataset_membership: Sequence[DatasetMember],
     ) -> str:
-        """Create immutable PostgreSQL identity and isolated external targets."""
+        """Create or idempotently resume one exact building generation."""
 
         with self._repository.writer_transaction() as tx:
-            tx.create(spec)
+            try:
+                state = tx.state(spec.generation_id)
+            except GenerationRepositoryError as exc:
+                if "unknown generation" not in str(exc):
+                    raise
+                tx.create(spec)
+            else:
+                if state is not GenerationState.BUILDING:
+                    raise GenerationRepositoryError(
+                        f"generation already exists in {state.value} state"
+                    )
+                if tx.load_spec(spec.generation_id).as_dict() != spec.as_dict():
+                    raise GenerationRepositoryError(
+                        "building generation identity does not match resume spec"
+                    )
             tx.replace_article_membership(spec.generation_id, article_membership)
+            tx.replace_dataset_membership(spec.generation_id, dataset_membership)
         # External creation is intentionally after the PostgreSQL building
         # record commits.  A failure leaves a non-readable building generation
         # that can be retried; it never changes the active pointer.
         for store in self._stores:
-            store.prepare_generation(spec.generation_id, spec.model_manifest_sha256)
+            store.prepare_generation(
+                spec.generation_id,
+                spec.source_manifest_sha256,
+                spec.model_manifest_sha256,
+                spec.index_config,
+            )
         return spec.generation_id
+
+    def generation_status(self, generation_id: str) -> GenerationState:
+        with self._repository.writer_transaction() as tx:
+            return tx.state(generation_id)
+
+    def abort_generation(self, generation_id: str, *, reason: str) -> None:
+        with self._repository.writer_transaction() as tx:
+            tx.abort(generation_id, reason=reason)
 
     def validate_generation(
         self,
@@ -75,19 +106,16 @@ class GenerationCoordinator:
             if tx.state(generation_id) is not GenerationState.BUILDING:
                 raise GenerationRepositoryError("generation is not building")
             spec = tx.load_spec(generation_id)
-            postgres = StoreAttestation.from_article_records(
-                generation_id=generation_id,
-                store_name="postgresql",
-                records=tx.article_membership(generation_id),
-                model_manifest_sha256=spec.model_manifest_sha256,
-                store_locator=f"generation/{generation_id}/postgresql",
-                store_revision="knowledge-generation-schema-v1",
+            postgres = tx.postgres_attestation(
+                generation_id,
                 attested_at=attested_at,
             )
             external = [
                 store.attest_generation(
                     generation_id,
+                    spec.source_manifest_sha256,
                     spec.model_manifest_sha256,
+                    spec.index_config,
                     attested_at=attested_at,
                 )
                 for store in self._stores
@@ -103,19 +131,23 @@ class GenerationCoordinator:
     def seal_generation(
         self,
         generation_id: str,
-        evaluation_report: Mapping[str, Any],
+        evaluation_bundle: VerifiedEvaluationBundle,
     ) -> str:
         """Seal only matching stores and human-reviewed Production RAG Gold."""
 
-        report, report_sha256 = validate_rag_evaluation_report(
-            evaluation_report,
-            generation_id=generation_id,
-        )
+        if not isinstance(evaluation_bundle, VerifiedEvaluationBundle):
+            raise TypeError("seal_generation requires a verified evaluation bundle")
+        report = evaluation_bundle.report
+        report_sha256 = evaluation_bundle.report_sha256
+        if report.get("generation_id") != generation_id:
+            raise GenerationRepositoryError("evaluation bundle generation does not match target")
         with self._repository.writer_transaction() as tx:
             if tx.state(generation_id) is not GenerationState.VALIDATED:
                 raise GenerationRepositoryError("generation is not validated")
             spec = tx.load_spec(generation_id)
-            spec.source_manifest.require_release_eligible_sources()
+            spec.source_manifest.require_release_eligible_sources(
+                as_of=str(report["generated_at"])[:10],
+            )
             attestations = validate_store_attestations(
                 generation_id,
                 spec.model_manifest_sha256,
@@ -142,7 +174,6 @@ class GenerationCoordinator:
 
     def _switch_active(self, generation_id: str, *, rollback: bool) -> None:
         previous: str | None = None
-        switched: list[ExternalGenerationStore] = []
         try:
             with self._repository.writer_transaction() as tx:
                 target_state = tx.state(generation_id)
@@ -151,9 +182,47 @@ class GenerationCoordinator:
                     raise GenerationRepositoryError(
                         f"target must be {required.value}, got {target_state.value}"
                     )
-                previous = tx.active_generation_id()
+                token = tx.active_generation_token()
+                previous = token.generation_id
                 if previous == generation_id:
                     raise GenerationRepositoryError("target generation is already active")
+                spec = tx.load_spec(generation_id)
+                sealed_attestations = validate_store_attestations(
+                    generation_id,
+                    spec.model_manifest_sha256,
+                    tx.stored_attestations(generation_id),
+                )
+                attested_at = (
+                    datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+                )
+                live_attestations = validate_store_attestations(
+                    generation_id,
+                    spec.model_manifest_sha256,
+                    (
+                        tx.postgres_attestation(
+                            generation_id,
+                            attested_at=attested_at,
+                        ),
+                        *(
+                            store.attest_generation(
+                                generation_id,
+                                spec.source_manifest_sha256,
+                                spec.model_manifest_sha256,
+                                spec.index_config,
+                                attested_at=attested_at,
+                            )
+                            for store in self._stores
+                        ),
+                    ),
+                )
+                sealed_projection = {
+                    item.store_name: item.sealed_projection_sha256 for item in sealed_attestations
+                }
+                live_projection = {
+                    item.store_name: item.sealed_projection_sha256 for item in live_attestations
+                }
+                if live_projection != sealed_projection:
+                    raise GenerationPromotionError("store projection changed after generation seal")
                 for store in self._stores:
                     observed = store.current_active_generation()
                     if observed != previous:
@@ -162,69 +231,68 @@ class GenerationCoordinator:
                         )
                 for store in self._stores:
                     store.set_active_generation(generation_id)
-                    switched.append(store)
                 # PostgreSQL is committed last.  Evidence readers that resolve
                 # from its O(1) pointer cannot observe the new generation
                 # before both external stores have switched successfully.
                 tx.activate(
                     generation_id,
                     expected_previous=previous,
+                    expected_epoch=token.epoch,
                     rollback=rollback,
                 )
         except Exception as exc:
-            compensation_errors: list[str] = []
-            for store in reversed(switched):
-                try:
-                    store.set_active_generation(previous)
-                except Exception as compensation_exc:  # pragma: no cover - rare dual failure
-                    compensation_errors.append(f"{store.name}:{type(compensation_exc).__name__}")
-            if compensation_errors:
+            try:
+                self._converge_external_to_postgres()
+            except Exception as compensation_exc:
                 raise GenerationCompensationError(
-                    "promotion failed and compensation was incomplete: "
-                    + ",".join(compensation_errors)
-                ) from exc
+                    "promotion failed and external stores could not converge to PostgreSQL"
+                ) from compensation_exc
             if isinstance(exc, (GenerationRepositoryError, GenerationPromotionError)):
                 raise
             raise GenerationPromotionError("generation promotion failed safely") from exc
 
+    def _converge_external_to_postgres(self) -> str | None:
+        with self._repository.writer_transaction() as tx:
+            token = tx.active_generation_token()
+            for store in self._stores:
+                if store.current_active_generation() != token.generation_id:
+                    store.set_active_generation(token.generation_id)
+            if tx.active_generation_token() != token:
+                raise GenerationChangedError("PostgreSQL active token changed during convergence")
+            return token.generation_id
+
     def reconcile_external_to_postgres(self) -> str | None:
         """Repair aliases after a process crash, using PostgreSQL as authority."""
 
-        authoritative = self._repository.active_generation_id()
-        previous_by_store = {
-            store.name: store.current_active_generation() for store in self._stores
-        }
-        changed: list[ExternalGenerationStore] = []
         try:
-            for store in self._stores:
-                if previous_by_store[store.name] != authoritative:
-                    store.set_active_generation(authoritative)
-                    changed.append(store)
-        except Exception as exc:
-            compensation_errors: list[str] = []
-            for store in reversed(changed):
-                try:
-                    store.set_active_generation(previous_by_store[store.name])
-                except Exception as compensation_exc:  # pragma: no cover
-                    compensation_errors.append(f"{store.name}:{type(compensation_exc).__name__}")
-            if compensation_errors:
-                raise GenerationCompensationError(
-                    "reconciliation compensation was incomplete: " + ",".join(compensation_errors)
-                ) from exc
-            raise GenerationPromotionError("external reconciliation failed safely") from exc
-        if authoritative is not None and changed:
             with self._repository.writer_transaction() as tx:
-                if tx.active_generation_id() != authoritative:
+                token = tx.active_generation_token()
+                authoritative = token.generation_id
+                previous_by_store = {
+                    store.name: store.current_active_generation() for store in self._stores
+                }
+                changed: list[ExternalGenerationStore] = []
+                for store in self._stores:
+                    if previous_by_store[store.name] != authoritative:
+                        store.set_active_generation(authoritative)
+                        changed.append(store)
+                if tx.active_generation_token() != token:
                     raise GenerationChangedError(
-                        "PostgreSQL active generation changed during reconciliation"
+                        "PostgreSQL active token changed during reconciliation"
                     )
-                tx.record_reconciled(
-                    authoritative,
-                    {
-                        "stores": [store.name for store in changed],
-                        "previous": previous_by_store,
-                    },
-                )
+                if authoritative is not None and changed:
+                    tx.record_reconciled(
+                        authoritative,
+                        {
+                            "epoch": token.epoch,
+                            "stores": [store.name for store in changed],
+                            "previous": previous_by_store,
+                        },
+                    )
+        except (GenerationChangedError, GenerationRepositoryError):
+            raise
+        except Exception as exc:
+            raise GenerationPromotionError("external reconciliation failed safely") from exc
         return authoritative
 
     def verify_active_alignment(self) -> str | None:
@@ -238,13 +306,13 @@ class GenerationCoordinator:
     def guarded_active_generation(self) -> Iterator[str]:
         """Detect a promotion crossing a multi-store read operation."""
 
-        before = self._repository.active_generation_id()
-        if before is None:
+        before = self._repository.active_generation_token()
+        if before.generation_id is None:
             raise GenerationRepositoryError("no active knowledge generation")
-        yield before
-        after = self._repository.active_generation_id()
+        yield before.generation_id
+        after = self._repository.active_generation_token()
         if after != before:
-            raise GenerationChangedError("active generation changed during read")
+            raise GenerationChangedError("active generation token changed during read")
 
 
 __all__ = [

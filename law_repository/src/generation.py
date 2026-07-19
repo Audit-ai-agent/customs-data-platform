@@ -14,6 +14,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from enum import StrEnum
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import urlsplit
 
@@ -35,7 +36,28 @@ _CUSTOMS_HOSTS = frozenset(
 )
 _STORE_NAMES = frozenset({"postgresql", "qdrant", "neo4j"})
 _DATASET_IDS = frozenset({"hsk", "ccct"})
+_DATASET_MEMBER_KINDS = frozenset(
+    {
+        "ccct_query",
+        "ccct_requirement",
+        "ccct_source_record",
+        "ccct_document",
+        "hsk_leaf",
+    }
+)
 _EXPECTED_LAWS = {str(item["law_id"]): str(item["name"]) for item in TARGET_LAWS}
+_INDEX_CONFIG_FIELDS = frozenset(
+    {
+        "schema_version",
+        "dense_vector_name",
+        "dense_vector_size",
+        "distance",
+        "sparse_vector_name",
+        "sparse_modifier",
+        "qdrant_collection_mode",
+        "neo4j_projection_mode",
+    }
+)
 CCCT_BASELINE_SNAPSHOT_ID = "ccct_212f4c459765d5a79f5a42e2eef77bcbe43bd7adb5c4d526a9ecc3588622e107"
 CCCT_BASELINE_SOURCE = {
     "name": "ccct_progress.jsonl",
@@ -72,6 +94,15 @@ HSK_BASELINE_METRICS = {
     "leaf_attribute_count": 11_327,
     "missing_leaf_attribute_count": 0,
 }
+_BASELINE_MEMBER_COUNTS = {
+    "ccct_query": CCCT_BASELINE_METRICS["query_count"],
+    "ccct_requirement": CCCT_BASELINE_METRICS["source_requirement_count"],
+    "ccct_source_record": CCCT_BASELINE_METRICS["source_requirement_count"],
+    "ccct_document": CCCT_BASELINE_METRICS["document_count"],
+    "hsk_leaf": HSK_BASELINE_METRICS["leaf_node_count"],
+}
+_EVALUATION_BUNDLE_MARKER = object()
+_EVALUATION_BUNDLE_MAX_FILE_BYTES = 64 * 1024 * 1024
 
 
 class GenerationValidationError(ValueError):
@@ -80,6 +111,7 @@ class GenerationValidationError(ValueError):
 
 class GenerationState(StrEnum):
     BUILDING = "building"
+    ABORTED = "aborted"
     VALIDATED = "validated"
     SEALED = "sealed"
     ACTIVE = "active"
@@ -299,6 +331,7 @@ class FreshnessEvidence:
     observed_at: str
     valid_through: str | None
     limitation: str | None
+    approval_artifact_sha256: str
     release_eligible: bool
 
     @classmethod
@@ -308,6 +341,7 @@ class FreshnessEvidence:
             "observed_at",
             "valid_through",
             "limitation",
+            "approval_artifact_sha256",
             "release_eligible",
         }:
             raise GenerationValidationError("freshness fields do not match schema")
@@ -324,7 +358,9 @@ class FreshnessEvidence:
                 "freshness.limitation",
                 maximum=1000,
             )
-        if status == "bounded_snapshot" and (valid_through is None or limitation is None):
+        if valid_through is None:
+            raise GenerationValidationError("freshness requires an explicit valid_through date")
+        if status == "bounded_snapshot" and limitation is None:
             raise GenerationValidationError(
                 "bounded_snapshot freshness requires valid_through and limitation"
             )
@@ -336,6 +372,10 @@ class FreshnessEvidence:
             observed_at=_parse_utc(value["observed_at"], "freshness.observed_at"),
             valid_through=valid_through,
             limitation=limitation,
+            approval_artifact_sha256=_require_sha256(
+                value["approval_artifact_sha256"],
+                "freshness.approval_artifact_sha256",
+            ),
             release_eligible=release_eligible,
         )
 
@@ -345,7 +385,101 @@ class FreshnessEvidence:
             "observed_at": self.observed_at,
             "valid_through": self.valid_through,
             "limitation": self.limitation,
+            "approval_artifact_sha256": self.approval_artifact_sha256,
             "release_eligible": self.release_eligible,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class LawCorpusBinding:
+    """Auditable binding to a locally verified official 58-law source root.
+
+    A hash by itself is not an approval.  The build path must independently
+    load and verify both the source root and the approval artifact whose hashes
+    are carried here before any generation row is created.
+    """
+
+    official_manifest_sha256: str
+    source_root_sha256: str
+    target_law_manifest_sha256: str
+    collector_revision: str
+    collected_at: str
+    collection_as_of: str
+    approval_artifact_sha256: str
+    approved_at: str
+    valid_through: str
+    schema_version: str = "1.0"
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> LawCorpusBinding:
+        required = {
+            "schema_version",
+            "official_manifest_sha256",
+            "source_root_sha256",
+            "target_law_manifest_sha256",
+            "collector_revision",
+            "collected_at",
+            "collection_as_of",
+            "approval_artifact_sha256",
+            "approved_at",
+            "valid_through",
+        }
+        if set(value) != required or value["schema_version"] != "1.0":
+            raise GenerationValidationError("law corpus binding fields do not match schema")
+        collector_revision = _require_non_empty(
+            value["collector_revision"],
+            "law_corpus.collector_revision",
+            maximum=40,
+        )
+        if _FULL_COMMIT.fullmatch(collector_revision) is None:
+            raise GenerationValidationError("law corpus collector revision must be a full commit")
+        collected_at = _parse_utc(value["collected_at"], "law_corpus.collected_at")
+        approved_at = _parse_utc(value["approved_at"], "law_corpus.approved_at")
+        collection_as_of = _parse_date(
+            value["collection_as_of"],
+            "law_corpus.collection_as_of",
+        )
+        valid_through = _parse_date(value["valid_through"], "law_corpus.valid_through")
+        if approved_at < collected_at:
+            raise GenerationValidationError("law corpus approval predates collection")
+        if valid_through < collection_as_of:
+            raise GenerationValidationError("law corpus validity predates collection")
+        return cls(
+            official_manifest_sha256=_require_sha256(
+                value["official_manifest_sha256"],
+                "law_corpus.official_manifest_sha256",
+            ),
+            source_root_sha256=_require_sha256(
+                value["source_root_sha256"],
+                "law_corpus.source_root_sha256",
+            ),
+            target_law_manifest_sha256=_require_sha256(
+                value["target_law_manifest_sha256"],
+                "law_corpus.target_law_manifest_sha256",
+            ),
+            collector_revision=collector_revision,
+            collected_at=collected_at,
+            collection_as_of=collection_as_of,
+            approval_artifact_sha256=_require_sha256(
+                value["approval_artifact_sha256"],
+                "law_corpus.approval_artifact_sha256",
+            ),
+            approved_at=approved_at,
+            valid_through=valid_through,
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "official_manifest_sha256": self.official_manifest_sha256,
+            "source_root_sha256": self.source_root_sha256,
+            "target_law_manifest_sha256": self.target_law_manifest_sha256,
+            "collector_revision": self.collector_revision,
+            "collected_at": self.collected_at,
+            "collection_as_of": self.collection_as_of,
+            "approval_artifact_sha256": self.approval_artifact_sha256,
+            "approved_at": self.approved_at,
+            "valid_through": self.valid_through,
         }
 
 
@@ -403,13 +537,17 @@ class DatasetSource:
         return item
 
     def _validate_pinned_baseline(self) -> None:
-        if self.dataset_id == "ccct" and self.snapshot_id == CCCT_BASELINE_SNAPSHOT_ID:
+        if self.dataset_id == "ccct":
+            if self.snapshot_id != CCCT_BASELINE_SNAPSHOT_ID:
+                raise GenerationValidationError("CCCT snapshot is not the pinned release baseline")
             expected_files = (CCCT_BASELINE_SOURCE,)
             if tuple(item.as_dict() for item in self.source_files) != expected_files:
                 raise GenerationValidationError("CCCT baseline source hash/size/revision mismatch")
             if dict(self.metrics) != CCCT_BASELINE_METRICS:
                 raise GenerationValidationError("CCCT baseline derived counts mismatch")
-        if self.dataset_id == "hsk" and self.snapshot_id == HSK_BASELINE_SNAPSHOT_ID:
+        if self.dataset_id == "hsk":
+            if self.snapshot_id != HSK_BASELINE_SNAPSHOT_ID:
+                raise GenerationValidationError("HSK snapshot is not the pinned release baseline")
             expected_files = tuple(sorted(HSK_BASELINE_SOURCES, key=lambda item: item["name"]))
             if tuple(item.as_dict() for item in self.source_files) != expected_files:
                 raise GenerationValidationError("HSK baseline source hashes/sizes mismatch")
@@ -428,15 +566,85 @@ class DatasetSource:
 
 
 @dataclass(frozen=True, slots=True)
+class DatasetMember:
+    """One immutable generation-scoped membership row."""
+
+    dataset_id: str
+    snapshot_id: str
+    member_kind: str
+    member_key: str
+    payload_sha256: str
+
+    def __post_init__(self) -> None:
+        if self.dataset_id not in _DATASET_IDS:
+            raise GenerationValidationError("dataset member dataset_id is invalid")
+        if self.member_kind not in _DATASET_MEMBER_KINDS:
+            raise GenerationValidationError("dataset member kind is invalid")
+        if self.member_kind.startswith("ccct_") != (self.dataset_id == "ccct"):
+            raise GenerationValidationError("dataset member kind does not match dataset")
+        _require_non_empty(self.snapshot_id, "dataset_member.snapshot_id", maximum=200)
+        _require_non_empty(self.member_key, "dataset_member.member_key", maximum=500)
+        _require_sha256(self.payload_sha256, "dataset_member.payload_sha256")
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "dataset_id": self.dataset_id,
+            "snapshot_id": self.snapshot_id,
+            "member_kind": self.member_kind,
+            "member_key": self.member_key,
+            "payload_sha256": self.payload_sha256,
+        }
+
+
+def validate_dataset_members(
+    manifest: SourceManifest,
+    members: Iterable[DatasetMember],
+) -> tuple[DatasetMember, ...]:
+    """Validate exact pinned CCCT/HSK membership before PostgreSQL insertion."""
+
+    normalized = tuple(
+        sorted(
+            members,
+            key=lambda item: (
+                item.dataset_id,
+                item.member_kind,
+                item.member_key,
+            ),
+        )
+    )
+    keys = [(item.dataset_id, item.member_kind, item.member_key) for item in normalized]
+    if len(keys) != len(set(keys)):
+        raise GenerationValidationError("dataset membership contains duplicate keys")
+    snapshot_by_dataset = {item.dataset_id: item.snapshot_id for item in manifest.datasets}
+    if any(item.snapshot_id != snapshot_by_dataset.get(item.dataset_id) for item in normalized):
+        raise GenerationValidationError("dataset membership snapshot does not match manifest")
+    counts = {kind: 0 for kind in _BASELINE_MEMBER_COUNTS}
+    for item in normalized:
+        counts[item.member_kind] += 1
+    if counts != _BASELINE_MEMBER_COUNTS:
+        raise GenerationValidationError(
+            f"dataset membership counts do not match pinned baselines: {counts}"
+        )
+    return normalized
+
+
+@dataclass(frozen=True, slots=True)
 class SourceManifest:
     generated_at: str
+    law_corpus: LawCorpusBinding
     laws: tuple[LawSource, ...]
     datasets: tuple[DatasetSource, ...]
     schema_version: str = "1.0"
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> SourceManifest:
-        if set(value) != {"schema_version", "generated_at", "laws", "datasets"}:
+        if set(value) != {
+            "schema_version",
+            "generated_at",
+            "law_corpus",
+            "laws",
+            "datasets",
+        }:
             raise GenerationValidationError("source manifest fields do not match schema")
         if value["schema_version"] != "1.0":
             raise GenerationValidationError("unsupported source manifest schema")
@@ -458,6 +666,7 @@ class SourceManifest:
             raise GenerationValidationError("datasets must contain sorted ccct and hsk entries")
         return cls(
             generated_at=_parse_utc(value["generated_at"], "generated_at"),
+            law_corpus=LawCorpusBinding.from_mapping(value["law_corpus"]),
             laws=laws,
             datasets=datasets,
         )
@@ -466,6 +675,7 @@ class SourceManifest:
         return {
             "schema_version": self.schema_version,
             "generated_at": self.generated_at,
+            "law_corpus": self.law_corpus.as_dict(),
             "laws": [item.as_dict() for item in self.laws],
             "datasets": [item.as_dict() for item in self.datasets],
         }
@@ -474,12 +684,26 @@ class SourceManifest:
     def sha256(self) -> str:
         return canonical_sha256(self.as_dict())
 
-    def require_release_eligible_sources(self) -> None:
+    def require_release_eligible_sources(self, *, as_of: str | None = None) -> None:
         blocked = [item.dataset_id for item in self.datasets if not item.freshness.release_eligible]
         if blocked:
             raise GenerationValidationError(
                 "source freshness is not release-eligible: " + ",".join(blocked)
             )
+        reference_date = _parse_date(
+            as_of or self.generated_at[:10],
+            "release_reference_date",
+        )
+        if self.law_corpus.valid_through < reference_date:
+            raise GenerationValidationError("official law corpus approval has expired")
+        expired = [
+            item.dataset_id
+            for item in self.datasets
+            if item.freshness.valid_through is not None
+            and item.freshness.valid_through < reference_date
+        ]
+        if expired:
+            raise GenerationValidationError("dataset freshness has expired: " + ",".join(expired))
 
 
 def release_model_manifest() -> dict[str, Any]:
@@ -531,6 +755,40 @@ def validate_model_manifest(value: Mapping[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def validate_index_config(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the only index layout supported by release schema 1.0.
+
+    Arbitrary JSON used to be accepted and was then hashed into a generation
+    identity even though neither Qdrant nor Neo4j proved that it was applied.
+    The strict schema makes every accepted field enforceable by store adapters.
+    """
+
+    normalized = _json_safe(value, "index_config")
+    if not isinstance(normalized, dict) or set(normalized) != _INDEX_CONFIG_FIELDS:
+        raise GenerationValidationError("index_config fields do not match schema 1.0")
+    expected_literals = {
+        "schema_version": "1.0",
+        "dense_vector_name": "dense",
+        "distance": "cosine",
+        "sparse_vector_name": "bm25",
+        "sparse_modifier": "idf",
+        "qdrant_collection_mode": "generation-isolated",
+        "neo4j_projection_mode": "generation-tagged",
+    }
+    for field, expected in expected_literals.items():
+        if normalized[field] != expected:
+            raise GenerationValidationError(f"index_config.{field} is unsupported")
+    dense_size = _require_int(
+        normalized["dense_vector_size"],
+        "index_config.dense_vector_size",
+        minimum=1,
+    )
+    if dense_size > 16_384:
+        raise GenerationValidationError("index_config.dense_vector_size is too large")
+    normalized["dense_vector_size"] = dense_size
+    return normalized
+
+
 @dataclass(frozen=True, slots=True)
 class GenerationSpec:
     source_manifest: SourceManifest
@@ -539,10 +797,7 @@ class GenerationSpec:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "model_manifest", validate_model_manifest(self.model_manifest))
-        normalized_config = _json_safe(self.index_config, "index_config")
-        if not isinstance(normalized_config, dict) or not normalized_config:
-            raise GenerationValidationError("index_config must be a non-empty JSON object")
-        object.__setattr__(self, "index_config", normalized_config)
+        object.__setattr__(self, "index_config", validate_index_config(self.index_config))
 
     @property
     def source_manifest_sha256(self) -> str:
@@ -586,6 +841,7 @@ class StoreAttestation:
     article_count: int
     article_id_set_sha256: str
     article_content_set_sha256: str
+    projection_sha256: str
     model_manifest_sha256: str
     store_locator: str
     store_revision: str
@@ -598,6 +854,7 @@ class StoreAttestation:
         _require_int(self.article_count, "article_count", minimum=1)
         _require_sha256(self.article_id_set_sha256, "article_id_set_sha256")
         _require_sha256(self.article_content_set_sha256, "article_content_set_sha256")
+        _require_sha256(self.projection_sha256, "projection_sha256")
         _require_sha256(self.model_manifest_sha256, "model_manifest_sha256")
         if (
             not isinstance(self.store_locator, str)
@@ -619,6 +876,7 @@ class StoreAttestation:
         store_locator: str,
         store_revision: str,
         attested_at: str,
+        projection: Any | None = None,
     ) -> StoreAttestation:
         normalized: list[tuple[str, str]] = []
         seen: set[str] = set()
@@ -640,17 +898,22 @@ class StoreAttestation:
         normalized.sort()
         if not normalized:
             raise GenerationValidationError("store attestation cannot be empty")
+        canonical_membership = [
+            {"article_id": article_id, "content_sha256": content_hash}
+            for article_id, content_hash in normalized
+        ]
+        projection_value = (
+            {"schema_version": "1.0", "article_membership": canonical_membership}
+            if projection is None
+            else projection
+        )
         return cls(
             generation_id=generation_id,
             store_name=store_name,
             article_count=len(normalized),
             article_id_set_sha256=canonical_sha256([item[0] for item in normalized]),
-            article_content_set_sha256=canonical_sha256(
-                [
-                    {"article_id": article_id, "content_sha256": content_hash}
-                    for article_id, content_hash in normalized
-                ]
-            ),
+            article_content_set_sha256=canonical_sha256(canonical_membership),
+            projection_sha256=canonical_sha256(projection_value),
             model_manifest_sha256=model_manifest_sha256,
             store_locator=store_locator,
             store_revision=store_revision,
@@ -665,6 +928,7 @@ class StoreAttestation:
             "article_count": self.article_count,
             "article_id_set_sha256": self.article_id_set_sha256,
             "article_content_set_sha256": self.article_content_set_sha256,
+            "projection_sha256": self.projection_sha256,
             "model_manifest_sha256": self.model_manifest_sha256,
             "store_locator": self.store_locator,
             "store_revision": self.store_revision,
@@ -674,6 +938,31 @@ class StoreAttestation:
     @property
     def sha256(self) -> str:
         return canonical_sha256(self.as_dict())
+
+    @property
+    def sealed_projection_sha256(self) -> str:
+        """Stable store identity used by the generation seal.
+
+        ``attested_at`` proves when an observation happened and therefore
+        changes on every mandatory pre-promotion re-attestation.  The sealed
+        projection excludes that observation time while binding every
+        immutable projection and store-configuration field.
+        """
+
+        return canonical_sha256(
+            {
+                "schema_version": "1.0",
+                "generation_id": self.generation_id,
+                "store_name": self.store_name,
+                "article_count": self.article_count,
+                "article_id_set_sha256": self.article_id_set_sha256,
+                "article_content_set_sha256": self.article_content_set_sha256,
+                "projection_sha256": self.projection_sha256,
+                "model_manifest_sha256": self.model_manifest_sha256,
+                "store_locator": self.store_locator,
+                "store_revision": self.store_revision,
+            }
+        )
 
 
 def validate_store_attestations(
@@ -706,7 +995,13 @@ def validate_rag_evaluation_report(
     *,
     generation_id: str,
 ) -> tuple[dict[str, Any], str]:
-    """Validate the production RAG release report and return its canonical hash."""
+    """Validate per-case Production RAG evidence and recompute every aggregate.
+
+    Release schema 2.0 intentionally rejects a metrics-only report.  An
+    immutable case manifest binds the runner, Gold, queries, code, exact case
+    IDs and reviewer approval.  Aggregate values are accepted only when they
+    are the exact result of the sealed case records.
+    """
 
     report = _json_safe(value, "evaluation_report")
     required = {
@@ -717,13 +1012,15 @@ def validate_rag_evaluation_report(
         "production_data",
         "mock_count",
         "unexpected_skips",
+        "artifacts",
         "gold",
+        "cases",
         "structured",
         "hybrid",
     }
     if not isinstance(report, dict) or set(report) != required:
         raise GenerationValidationError("evaluation report fields do not match schema")
-    if report["schema_version"] != "1.0" or report["generation_id"] != generation_id:
+    if report["schema_version"] != "2.0" or report["generation_id"] != generation_id:
         raise GenerationValidationError("evaluation report identity does not match generation")
     _require_non_empty(report["run_id"], "run_id", maximum=200)
     _parse_utc(report["generated_at"], "generated_at")
@@ -734,29 +1031,142 @@ def validate_rag_evaluation_report(
     if _require_int(report["unexpected_skips"], "unexpected_skips") != 0:
         raise GenerationValidationError("release evaluation cannot contain skips")
 
+    artifacts = report["artifacts"]
+    artifact_fields = {
+        "runner_sha256",
+        "gold_sha256",
+        "query_manifest_sha256",
+        "code_sha256",
+        "reviewer_approval_sha256",
+        "case_manifest_sha256",
+    }
+    if not isinstance(artifacts, dict) or set(artifacts) != artifact_fields:
+        raise GenerationValidationError("evaluation artifact fields do not match schema")
+    for key in sorted(artifact_fields):
+        _require_sha256(artifacts[key], f"artifacts.{key}")
+
     gold = report["gold"]
     gold_required = {
         "dataset_sha256",
         "human_reviewed",
         "reviewer_id",
         "reviewed_at",
-        "law_coverage_count",
+        "law_coverage",
         "positive_cases",
         "negative_cases",
         "ambiguous_cases",
     }
     if not isinstance(gold, dict) or set(gold) != gold_required:
         raise GenerationValidationError("Gold review fields do not match schema")
-    _require_sha256(gold["dataset_sha256"], "gold.dataset_sha256")
+    dataset_hash = _require_sha256(gold["dataset_sha256"], "gold.dataset_sha256")
+    if dataset_hash != artifacts["gold_sha256"]:
+        raise GenerationValidationError("Gold dataset and artifact hashes do not match")
     if gold["human_reviewed"] is not True:
         raise GenerationValidationError("human-reviewed Gold is required to seal")
     _require_non_empty(gold["reviewer_id"], "gold.reviewer_id", maximum=200)
     _parse_utc(gold["reviewed_at"], "gold.reviewed_at")
-    if _require_int(gold["law_coverage_count"], "gold.law_coverage_count") != len(_EXPECTED_LAWS):
+    law_coverage = gold["law_coverage"]
+    if not isinstance(law_coverage, dict) or set(law_coverage) != set(_EXPECTED_LAWS):
         raise GenerationValidationError("Gold must cover all target laws")
-    _require_int(gold["positive_cases"], "gold.positive_cases", minimum=len(_EXPECTED_LAWS))
-    _require_int(gold["negative_cases"], "gold.negative_cases", minimum=1)
-    _require_int(gold["ambiguous_cases"], "gold.ambiguous_cases", minimum=1)
+    normalized_coverage = {
+        law_id: _require_int(count, f"gold.law_coverage.{law_id}", minimum=1)
+        for law_id, count in law_coverage.items()
+    }
+
+    raw_cases = report["cases"]
+    if not isinstance(raw_cases, list) or not raw_cases:
+        raise GenerationValidationError("evaluation cases must be a non-empty array")
+    case_ids: list[str] = []
+    observed_coverage = {law_id: 0 for law_id in _EXPECTED_LAWS}
+    categories = {"positive": 0, "negative": 0, "ambiguous": 0}
+    structured_cases: list[dict[str, Any]] = []
+    hybrid_cases: list[dict[str, Any]] = []
+    common_fields = {"case_id", "suite", "law_ids", "category", "passed"}
+    structured_fields = common_fields | {
+        "contract_valid",
+        "hs_resolution_correct",
+        "requirements_found_correct",
+        "required_evidence_recall",
+        "evidence_metadata_complete",
+        "false_positive",
+    }
+    hybrid_fields = common_fields | {
+        "contract_valid",
+        "hit_at_5",
+        "recall_at_10",
+        "ndcg_at_10",
+        "citation_metadata_complete",
+    }
+    for index, case in enumerate(raw_cases):
+        if not isinstance(case, dict):
+            raise GenerationValidationError("evaluation case must be an object")
+        suite = case.get("suite")
+        expected_fields = structured_fields if suite == "structured" else hybrid_fields
+        if suite not in {"structured", "hybrid"} or set(case) != expected_fields:
+            raise GenerationValidationError("evaluation case fields do not match suite schema")
+        case_id = _require_non_empty(case["case_id"], f"cases[{index}].case_id", maximum=200)
+        case_ids.append(case_id)
+        law_ids = case["law_ids"]
+        if (
+            not isinstance(law_ids, list)
+            or not law_ids
+            or law_ids != sorted(law_ids)
+            or len(law_ids) != len(set(law_ids))
+            or any(law_id not in _EXPECTED_LAWS for law_id in law_ids)
+        ):
+            raise GenerationValidationError("case law_ids must be unique sorted target laws")
+        for law_id in law_ids:
+            observed_coverage[law_id] += 1
+        category = case["category"]
+        if category not in categories:
+            raise GenerationValidationError("case category is unsupported")
+        categories[category] += 1
+        for field in ("passed", "contract_valid"):
+            if not isinstance(case[field], bool):
+                raise GenerationValidationError(f"cases[{index}].{field} must be boolean")
+        if suite == "structured":
+            for field in (
+                "hs_resolution_correct",
+                "requirements_found_correct",
+                "evidence_metadata_complete",
+                "false_positive",
+            ):
+                if not isinstance(case[field], bool):
+                    raise GenerationValidationError(f"cases[{index}].{field} must be boolean")
+            recall = _require_number(
+                case["required_evidence_recall"],
+                f"cases[{index}].required_evidence_recall",
+            )
+            if not 0.0 <= recall <= 1.0:
+                raise GenerationValidationError("structured recall is outside [0,1]")
+            structured_cases.append(case)
+        else:
+            for field in ("hit_at_5", "recall_at_10", "ndcg_at_10"):
+                metric = _require_number(case[field], f"cases[{index}].{field}")
+                if not 0.0 <= metric <= 1.0:
+                    raise GenerationValidationError(f"hybrid {field} is outside [0,1]")
+            if not isinstance(case["citation_metadata_complete"], bool):
+                raise GenerationValidationError(
+                    f"cases[{index}].citation_metadata_complete must be boolean"
+                )
+            hybrid_cases.append(case)
+
+    if case_ids != sorted(case_ids) or len(case_ids) != len(set(case_ids)):
+        raise GenerationValidationError("evaluation case IDs must be unique and sorted")
+    if observed_coverage != normalized_coverage:
+        raise GenerationValidationError("Gold law coverage does not match case records")
+    if canonical_sha256(raw_cases) != artifacts["case_manifest_sha256"]:
+        raise GenerationValidationError("case manifest hash does not match case records")
+    for category, observed in categories.items():
+        if _require_int(gold[f"{category}_cases"], f"gold.{category}_cases") != observed:
+            raise GenerationValidationError("Gold category counts do not match case records")
+    if categories["positive"] < len(_EXPECTED_LAWS):
+        raise GenerationValidationError("Gold requires at least one positive case per target law")
+    if categories["negative"] < 1 or categories["ambiguous"] < 1:
+        raise GenerationValidationError("Gold requires negative and ambiguous cases")
+
+    def _mean(items: Sequence[dict[str, Any]], field: str) -> float:
+        return math.fsum(float(item[field]) for item in items) / len(items)
 
     structured = report["structured"]
     structured_required = {
@@ -770,11 +1180,38 @@ def validate_rag_evaluation_report(
         "evidence_metadata_completeness",
         "no_requirement_false_positive_rate",
     }
-    if not isinstance(structured, dict) or set(structured) != structured_required:
+    if (
+        not isinstance(structured, dict)
+        or set(structured) != structured_required
+        or len(structured_cases) < 5
+    ):
         raise GenerationValidationError("structured evaluation fields do not match schema")
-    structured_total = _require_int(structured["cases_total"], "structured.cases_total", minimum=5)
-    if _require_int(structured["cases_passed"], "structured.cases_passed") != structured_total:
-        raise GenerationValidationError("every structured case must pass")
+    recomputed_structured = {
+        "cases_total": len(structured_cases),
+        "cases_passed": sum(bool(item["passed"]) for item in structured_cases),
+        "case_pass_rate": _mean(structured_cases, "passed"),
+        "contract_valid_rate": _mean(structured_cases, "contract_valid"),
+        "hs_resolution_accuracy": _mean(structured_cases, "hs_resolution_correct"),
+        "requirements_found_accuracy": _mean(
+            structured_cases,
+            "requirements_found_correct",
+        ),
+        "required_evidence_recall": _mean(
+            structured_cases,
+            "required_evidence_recall",
+        ),
+        "evidence_metadata_completeness": _mean(
+            structured_cases,
+            "evidence_metadata_complete",
+        ),
+        "no_requirement_false_positive_rate": _mean(
+            structured_cases,
+            "false_positive",
+        ),
+    }
+    for field, expected in recomputed_structured.items():
+        if _require_number(structured[field], f"structured.{field}") != expected:
+            raise GenerationValidationError(f"structured.{field} does not match case records")
     for metric in (
         "case_pass_rate",
         "contract_valid_rate",
@@ -783,15 +1220,9 @@ def validate_rag_evaluation_report(
         "required_evidence_recall",
         "evidence_metadata_completeness",
     ):
-        if _require_number(structured[metric], f"structured.{metric}") != 1.0:
+        if recomputed_structured[metric] != 1.0:
             raise GenerationValidationError(f"structured.{metric} must equal 1.0")
-    if (
-        _require_number(
-            structured["no_requirement_false_positive_rate"],
-            "structured.no_requirement_false_positive_rate",
-        )
-        != 0.0
-    ):
+    if recomputed_structured["no_requirement_false_positive_rate"] != 0.0:
         raise GenerationValidationError("structured false-positive rate must equal zero")
 
     hybrid = report["hybrid"]
@@ -804,22 +1235,217 @@ def validate_rag_evaluation_report(
         "ndcg_at_10",
         "citation_metadata_completeness",
     }
-    if not isinstance(hybrid, dict) or set(hybrid) != hybrid_required:
+    if (
+        not isinstance(hybrid, dict)
+        or set(hybrid) != hybrid_required
+        or len(hybrid_cases) < len(_EXPECTED_LAWS)
+    ):
         raise GenerationValidationError("hybrid evaluation fields do not match schema")
-    hybrid_total = _require_int(hybrid["cases_total"], "hybrid.cases_total", minimum=5)
-    if _require_int(hybrid["cases_passed"], "hybrid.cases_passed") != hybrid_total:
-        raise GenerationValidationError("every hybrid case must pass")
+    recomputed_hybrid = {
+        "cases_total": len(hybrid_cases),
+        "cases_passed": sum(bool(item["passed"]) for item in hybrid_cases),
+        "contract_valid_rate": _mean(hybrid_cases, "contract_valid"),
+        "hit_at_5": _mean(hybrid_cases, "hit_at_5"),
+        "recall_at_10": _mean(hybrid_cases, "recall_at_10"),
+        "ndcg_at_10": _mean(hybrid_cases, "ndcg_at_10"),
+        "citation_metadata_completeness": _mean(
+            hybrid_cases,
+            "citation_metadata_complete",
+        ),
+    }
+    for field, expected in recomputed_hybrid.items():
+        if _require_number(hybrid[field], f"hybrid.{field}") != expected:
+            raise GenerationValidationError(f"hybrid.{field} does not match case records")
     for metric in (
         "contract_valid_rate",
         "hit_at_5",
         "recall_at_10",
         "citation_metadata_completeness",
     ):
-        if _require_number(hybrid[metric], f"hybrid.{metric}") != 1.0:
+        if recomputed_hybrid[metric] != 1.0:
             raise GenerationValidationError(f"hybrid.{metric} must equal 1.0")
-    if _require_number(hybrid["ndcg_at_10"], "hybrid.ndcg_at_10") < 0.8:
+    if recomputed_hybrid["ndcg_at_10"] < 0.8:
         raise GenerationValidationError("hybrid.ndcg_at_10 must be at least 0.8")
     return report, canonical_sha256(report)
+
+
+def evaluation_review_subject_sha256(report: Mapping[str, Any]) -> str:
+    """Hash the complete evaluation subject without its non-circular approval hash."""
+
+    normalized = _json_safe(report, "evaluation_report")
+    if not isinstance(normalized, dict):
+        raise GenerationValidationError("evaluation report must be an object")
+    try:
+        artifacts = dict(normalized["artifacts"])
+        artifacts.pop("reviewer_approval_sha256")
+    except (KeyError, TypeError):
+        raise GenerationValidationError("evaluation artifact manifest is invalid") from None
+    normalized = dict(normalized)
+    normalized["artifacts"] = artifacts
+    return canonical_sha256(normalized)
+
+
+def _strict_json_document(data: bytes, field: str) -> Any:
+    if not data or len(data) > _EVALUATION_BUNDLE_MAX_FILE_BYTES:
+        raise GenerationValidationError(f"{field} size is invalid")
+
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-finite JSON constant: {value}")
+
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
+    try:
+        return json.loads(
+            data.decode("utf-8"),
+            object_pairs_hook=unique_object,
+            parse_constant=reject_constant,
+        )
+    except (UnicodeError, json.JSONDecodeError, ValueError):
+        raise GenerationValidationError(f"{field} is not strict JSON") from None
+
+
+def _bundle_file(root: Path, filename: str) -> bytes:
+    candidate = root / filename
+    if candidate.is_symlink():
+        raise GenerationValidationError("evaluation bundle path is invalid")
+    try:
+        path = candidate.resolve(strict=True)
+    except OSError:
+        raise GenerationValidationError("evaluation bundle file is unavailable") from None
+    if path.parent != root or path.is_symlink() or not path.is_file():
+        raise GenerationValidationError("evaluation bundle path is invalid")
+    try:
+        size = path.stat().st_size
+        if size <= 0 or size > _EVALUATION_BUNDLE_MAX_FILE_BYTES:
+            raise GenerationValidationError("evaluation bundle file size is invalid")
+        data = path.read_bytes()
+    except OSError:
+        raise GenerationValidationError("evaluation bundle file is unavailable") from None
+    if len(data) != size:
+        raise GenerationValidationError("evaluation bundle file changed during read")
+    return data
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedEvaluationBundle:
+    """Opaque proof that evaluation artifacts were read and cross-verified."""
+
+    report: Mapping[str, Any]
+    report_sha256: str
+    approval_sha256: str
+    _marker: object
+
+    def __post_init__(self) -> None:
+        if self._marker is not _EVALUATION_BUNDLE_MARKER:
+            raise GenerationValidationError(
+                "VerifiedEvaluationBundle must be created by the bundle loader"
+            )
+        _require_sha256(self.report_sha256, "evaluation_report_sha256")
+        _require_sha256(self.approval_sha256, "evaluation_approval_sha256")
+
+
+def load_verified_evaluation_bundle(
+    root: Path,
+    *,
+    generation_id: str,
+) -> VerifiedEvaluationBundle:
+    """Load conventional immutable artifact files and verify all bindings.
+
+    Required files are ``report.json``, ``runner.artifact``, ``gold.artifact``,
+    ``queries.artifact``, ``code.artifact``, ``cases.json`` and
+    ``approval.json``.  Only hashes and bounded strict JSON are exposed; raw
+    artifact bytes never enter the generation row.
+    """
+
+    if root.is_symlink():
+        raise GenerationValidationError("evaluation bundle root is invalid")
+    try:
+        resolved_root = root.resolve(strict=True)
+    except OSError:
+        raise GenerationValidationError("evaluation bundle root is unavailable") from None
+    if not resolved_root.is_dir():
+        raise GenerationValidationError("evaluation bundle root is invalid")
+    expected_filenames = {
+        "report.json",
+        "runner.artifact",
+        "gold.artifact",
+        "queries.artifact",
+        "code.artifact",
+        "cases.json",
+        "approval.json",
+    }
+    try:
+        observed_filenames = {item.name for item in resolved_root.iterdir()}
+    except OSError:
+        raise GenerationValidationError("evaluation bundle root is unavailable") from None
+    if observed_filenames != expected_filenames:
+        raise GenerationValidationError("evaluation bundle file inventory does not match schema")
+    report_bytes = _bundle_file(resolved_root, "report.json")
+    runner_bytes = _bundle_file(resolved_root, "runner.artifact")
+    gold_bytes = _bundle_file(resolved_root, "gold.artifact")
+    query_bytes = _bundle_file(resolved_root, "queries.artifact")
+    code_bytes = _bundle_file(resolved_root, "code.artifact")
+    cases_bytes = _bundle_file(resolved_root, "cases.json")
+    approval_bytes = _bundle_file(resolved_root, "approval.json")
+
+    report_value = _strict_json_document(report_bytes, "report.json")
+    if not isinstance(report_value, Mapping):
+        raise GenerationValidationError("report.json must contain an object")
+    report, report_sha256 = validate_rag_evaluation_report(
+        report_value,
+        generation_id=generation_id,
+    )
+    cases = _strict_json_document(cases_bytes, "cases.json")
+    approval = _strict_json_document(approval_bytes, "approval.json")
+    if cases != report["cases"]:
+        raise GenerationValidationError("case artifact does not match evaluation report")
+    artifacts = report["artifacts"]
+    observed_hashes = {
+        "runner_sha256": hashlib.sha256(runner_bytes).hexdigest(),
+        "gold_sha256": hashlib.sha256(gold_bytes).hexdigest(),
+        "query_manifest_sha256": hashlib.sha256(query_bytes).hexdigest(),
+        "code_sha256": hashlib.sha256(code_bytes).hexdigest(),
+        "case_manifest_sha256": canonical_sha256(cases),
+        "reviewer_approval_sha256": hashlib.sha256(approval_bytes).hexdigest(),
+    }
+    if artifacts != observed_hashes:
+        raise GenerationValidationError("evaluation artifact bytes do not match manifest")
+    approval_fields = {
+        "schema_version",
+        "purpose",
+        "generation_id",
+        "evaluation_subject_sha256",
+        "gold_sha256",
+        "case_manifest_sha256",
+        "reviewer_id",
+        "approved_at",
+    }
+    if not isinstance(approval, dict) or set(approval) != approval_fields:
+        raise GenerationValidationError("evaluation approval fields do not match schema")
+    expected_approval = {
+        "schema_version": "1.0",
+        "purpose": "production-rag-generation-seal",
+        "generation_id": generation_id,
+        "evaluation_subject_sha256": evaluation_review_subject_sha256(report),
+        "gold_sha256": artifacts["gold_sha256"],
+        "case_manifest_sha256": artifacts["case_manifest_sha256"],
+        "reviewer_id": report["gold"]["reviewer_id"],
+        "approved_at": report["gold"]["reviewed_at"],
+    }
+    if approval != expected_approval:
+        raise GenerationValidationError("evaluation approval does not bind exact artifacts")
+    return VerifiedEvaluationBundle(
+        report=report,
+        report_sha256=report_sha256,
+        approval_sha256=observed_hashes["reviewer_approval_sha256"],
+        _marker=_EVALUATION_BUNDLE_MARKER,
+    )
 
 
 def build_seal_attestation(
@@ -842,7 +1468,9 @@ def build_seal_attestation(
             evaluation_report_sha256,
             "evaluation_report_sha256",
         ),
-        "store_attestation_sha256": {item.store_name: item.sha256 for item in ordered},
+        "store_projection_sha256": {
+            item.store_name: item.sealed_projection_sha256 for item in ordered
+        },
     }
     return payload, canonical_sha256(payload)
 
@@ -852,6 +1480,7 @@ __all__ = [
     "CCCT_BASELINE_SNAPSHOT_ID",
     "CCCT_BASELINE_SOURCE",
     "DatasetSource",
+    "DatasetMember",
     "FreshnessEvidence",
     "GenerationSpec",
     "GenerationState",
@@ -859,15 +1488,21 @@ __all__ = [
     "HSK_BASELINE_METRICS",
     "HSK_BASELINE_SNAPSHOT_ID",
     "HSK_BASELINE_SOURCES",
+    "LawCorpusBinding",
     "LawSource",
     "SourceFile",
     "SourceManifest",
     "StoreAttestation",
+    "VerifiedEvaluationBundle",
     "build_seal_attestation",
     "canonical_json_bytes",
     "canonical_sha256",
+    "evaluation_review_subject_sha256",
+    "load_verified_evaluation_bundle",
     "release_model_manifest",
     "validate_model_manifest",
+    "validate_index_config",
+    "validate_dataset_members",
     "validate_rag_evaluation_report",
     "validate_store_attestations",
 ]

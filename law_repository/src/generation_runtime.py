@@ -69,6 +69,7 @@ def _store_attestation(payload: Mapping[str, Any], stored_sha256: str) -> StoreA
             article_count=payload["article_count"],
             article_id_set_sha256=payload["article_id_set_sha256"],
             article_content_set_sha256=payload["article_content_set_sha256"],
+            projection_sha256=payload["projection_sha256"],
             model_manifest_sha256=payload["model_manifest_sha256"],
             store_locator=payload["store_locator"],
             store_revision=payload["store_revision"],

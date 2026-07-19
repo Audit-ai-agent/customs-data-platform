@@ -12,6 +12,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -23,6 +24,7 @@ from src.generation import (
     GenerationValidationError,
     SourceManifest,
     canonical_json_bytes,
+    load_verified_evaluation_bundle,
     release_model_manifest,
 )
 from src.generation_builder import (
@@ -110,16 +112,21 @@ def _spec(args: argparse.Namespace) -> GenerationSpec:
 
 def _cmd_manifest(args: argparse.Namespace) -> int:
     articles = PostgresGenerationArticleSource().load()
+    dataset_approval = Path(args.dataset_approval_artifact).read_bytes()
     freshness = {
         "status": args.freshness_status,
         "observed_at": args.observed_at,
         "valid_through": args.valid_through,
         "limitation": args.limitation,
-        "release_eligible": args.release_eligible,
+        "approval_artifact_sha256": hashlib.sha256(dataset_approval).hexdigest(),
+        "release_eligible": args.valid_through >= args.generated_at[:10],
     }
     manifest = build_verified_baseline_manifest(
         articles,
         data_directory=Path(args.data_directory),
+        official_law_source_root=Path(args.official_law_source_root),
+        approval_artifact=Path(args.approval_artifact),
+        dataset_approval_artifact=Path(args.dataset_approval_artifact),
         generated_at=args.generated_at,
         freshness=freshness,
     )
@@ -156,6 +163,9 @@ def _cmd_build(args: argparse.Namespace) -> int:
     generation_id = builder.build(
         spec,
         source_root=Path(args.source_root),
+        official_law_source_root=Path(args.official_law_source_root),
+        approval_artifact=Path(args.approval_artifact),
+        dataset_approval_artifact=Path(args.dataset_approval_artifact),
         batch_size=args.batch_size,
     )
     print(
@@ -194,7 +204,10 @@ def _cmd_seal(args: argparse.Namespace) -> int:
     coordinator, _qdrant, _neo4j = _coordinator(args)
     seal_sha256 = coordinator.seal_generation(
         args.generation_id,
-        _load_json_object(Path(args.report)),
+        load_verified_evaluation_bundle(
+            Path(args.bundle),
+            generation_id=args.generation_id,
+        ),
     )
     print(
         json.dumps(
@@ -278,6 +291,9 @@ def build_parser() -> argparse.ArgumentParser:
     manifest = subparsers.add_parser("manifest", help="Build verified 58-law/CCCT/HSK manifest")
     manifest.add_argument("--output", required=True)
     manifest.add_argument("--data-directory", required=True)
+    manifest.add_argument("--official-law-source-root", required=True)
+    manifest.add_argument("--approval-artifact", required=True)
+    manifest.add_argument("--dataset-approval-artifact", required=True)
     manifest.add_argument("--generated-at", required=True)
     manifest.add_argument(
         "--freshness-status",
@@ -285,9 +301,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("verified_current", "bounded_snapshot"),
     )
     manifest.add_argument("--observed-at", required=True)
-    manifest.add_argument("--valid-through")
+    manifest.add_argument("--valid-through", required=True)
     manifest.add_argument("--limitation")
-    manifest.add_argument("--release-eligible", action="store_true")
     manifest.add_argument("--overwrite", action="store_true")
     manifest.set_defaults(handler=_cmd_manifest)
 
@@ -295,6 +310,9 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--source-manifest", required=True)
     build.add_argument("--index-config", required=True)
     build.add_argument("--source-root", required=True)
+    build.add_argument("--official-law-source-root", required=True)
+    build.add_argument("--approval-artifact", required=True)
+    build.add_argument("--dataset-approval-artifact", required=True)
     build.add_argument("--batch-size", type=int, default=64)
     _add_store_options(build)
     build.set_defaults(handler=_cmd_build)
@@ -307,7 +325,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     seal = subparsers.add_parser("seal", help="Seal validated generation with RAG evidence")
     seal.add_argument("generation_id")
-    seal.add_argument("--report", required=True)
+    seal.add_argument("--bundle", required=True)
     _add_store_options(seal)
     seal.set_defaults(handler=_cmd_seal)
 

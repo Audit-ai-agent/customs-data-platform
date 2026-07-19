@@ -9,17 +9,21 @@ readers that resolve through PostgreSQL.
 from __future__ import annotations
 
 from contextlib import AbstractContextManager, contextmanager
+from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Iterator, Mapping, Protocol, Sequence
 
 from psycopg.types.json import Jsonb
 
 from src.db.postgres import connect
 from src.generation import (
+    DatasetMember,
     GenerationSpec,
     GenerationState,
     GenerationValidationError,
     SourceManifest,
     StoreAttestation,
+    canonical_sha256,
+    validate_dataset_members,
 )
 
 # Stable application-level lock key.  This lock is transaction-scoped so it is
@@ -35,12 +39,20 @@ class GenerationRepositoryError(RuntimeError):
     """Persisted generation state violates the coordinator contract."""
 
 
+@dataclass(frozen=True, slots=True)
+class ActiveGenerationToken:
+    generation_id: str | None
+    epoch: int
+
+
 class GenerationTransaction(Protocol):
     def create(self, spec: GenerationSpec) -> None: ...
 
     def state(self, generation_id: str) -> GenerationState: ...
 
     def active_generation_id(self) -> str | None: ...
+
+    def active_generation_token(self) -> ActiveGenerationToken: ...
 
     def load_spec(self, generation_id: str) -> GenerationSpec: ...
 
@@ -51,6 +63,21 @@ class GenerationTransaction(Protocol):
     ) -> None: ...
 
     def article_membership(self, generation_id: str) -> tuple[tuple[int, str], ...]: ...
+
+    def replace_dataset_membership(
+        self,
+        generation_id: str,
+        members: Sequence[DatasetMember],
+    ) -> None: ...
+
+    def dataset_membership(self, generation_id: str) -> tuple[DatasetMember, ...]: ...
+
+    def postgres_attestation(
+        self,
+        generation_id: str,
+        *,
+        attested_at: str,
+    ) -> StoreAttestation: ...
 
     def validate(
         self,
@@ -74,6 +101,7 @@ class GenerationTransaction(Protocol):
         generation_id: str,
         *,
         expected_previous: str | None,
+        expected_epoch: int,
         rollback: bool,
     ) -> None: ...
 
@@ -83,11 +111,15 @@ class GenerationTransaction(Protocol):
         payload: Mapping[str, Any],
     ) -> None: ...
 
+    def abort(self, generation_id: str, *, reason: str) -> None: ...
+
 
 class GenerationRepository(Protocol):
     def writer_transaction(self) -> AbstractContextManager[GenerationTransaction]: ...
 
     def active_generation_id(self) -> str | None: ...
+
+    def active_generation_token(self) -> ActiveGenerationToken: ...
 
 
 class _PostgresGenerationTransaction:
@@ -159,6 +191,27 @@ class _PostgresGenerationTransaction:
                         item.current_article_count,
                     )
                     for item in spec.source_manifest.laws
+                ],
+            )
+            cur.executemany(
+                """
+                INSERT INTO knowledge_generation_datasets (
+                  generation_id,
+                  dataset_id,
+                  snapshot_id,
+                  source_definition,
+                  source_definition_sha256
+                ) VALUES (%s, %s, %s, %s, %s)
+                """,
+                [
+                    (
+                        spec.generation_id,
+                        item.dataset_id,
+                        item.snapshot_id,
+                        Jsonb(item.as_dict()),
+                        canonical_sha256(item.as_dict()),
+                    )
+                    for item in spec.source_manifest.datasets
                 ],
             )
             self._insert_event(
@@ -292,6 +345,246 @@ class _PostgresGenerationTransaction:
             rows = cur.fetchall()
         return tuple((int(row[0]), str(row[1])) for row in rows)
 
+    def replace_dataset_membership(
+        self,
+        generation_id: str,
+        members: Sequence[DatasetMember],
+    ) -> None:
+        if self._fetch_state(generation_id) is not GenerationState.BUILDING:
+            raise GenerationRepositoryError("dataset membership can only change while building")
+        spec = self.load_spec(generation_id)
+        normalized = validate_dataset_members(spec.source_manifest, members)
+        ccct_snapshot = next(
+            item.snapshot_id for item in spec.source_manifest.datasets if item.dataset_id == "ccct"
+        )
+        expected_ccct = self._ccct_ledger_members(ccct_snapshot)
+        actual_ccct = tuple(item for item in normalized if item.dataset_id == "ccct")
+        if actual_ccct != expected_ccct:
+            raise GenerationRepositoryError(
+                "CCCT generation membership does not exactly match PostgreSQL snapshot"
+            )
+        with self._connection.cursor() as cur:
+            cur.execute(
+                "DELETE FROM knowledge_generation_dataset_members WHERE generation_id=%s",
+                (generation_id,),
+            )
+            cur.executemany(
+                """
+                INSERT INTO knowledge_generation_dataset_members (
+                  generation_id,
+                  dataset_id,
+                  snapshot_id,
+                  member_kind,
+                  member_key,
+                  payload_sha256
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                [
+                    (
+                        generation_id,
+                        item.dataset_id,
+                        item.snapshot_id,
+                        item.member_kind,
+                        item.member_key,
+                        item.payload_sha256,
+                    )
+                    for item in normalized
+                ],
+            )
+
+    def _ccct_ledger_members(self, snapshot_id: str) -> tuple[DatasetMember, ...]:
+        members: list[DatasetMember] = []
+
+        def add(kind: str, key: str, payload: Mapping[str, Any]) -> None:
+            members.append(
+                DatasetMember(
+                    dataset_id="ccct",
+                    snapshot_id=snapshot_id,
+                    member_kind=kind,
+                    member_key=key,
+                    payload_sha256=canonical_sha256(payload),
+                )
+            )
+
+        with self._connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT hsk10::text, trade_type, source_uri, item_count,
+                       query_hash, raw_response
+                FROM ccct_queries
+                WHERE snapshot_id=%s
+                ORDER BY hsk10, trade_type
+                """,
+                (snapshot_id,),
+            )
+            for row in cur.fetchall():
+                payload = {
+                    "hsk10": str(row[0]),
+                    "trade_type": str(row[1]),
+                    "source_uri": str(row[2]),
+                    "item_count": int(row[3]),
+                    "query_hash": str(row[4]),
+                    "raw_response": row[5],
+                }
+                add("ccct_query", f"{row[0]}:{row[1]}", payload)
+            cur.execute(
+                """
+                SELECT requirement_id, hsk10::text, trade_type, law_code,
+                       law_name, agency_code, agency_name, document_code,
+                       document_name, valid_from::text, valid_to::text,
+                       rtm_tpcd, requirement_version_hash
+                FROM ccct_requirements
+                WHERE snapshot_id=%s
+                ORDER BY requirement_id
+                """,
+                (snapshot_id,),
+            )
+            for row in cur.fetchall():
+                payload = {
+                    "requirement_id": str(row[0]),
+                    "hsk10": str(row[1]),
+                    "trade_type": str(row[2]),
+                    "law_code": str(row[3]),
+                    "law_name": str(row[4]),
+                    "agency_code": str(row[5]),
+                    "agency_name": str(row[6]),
+                    "document_code": str(row[7]),
+                    "document_name": str(row[8]),
+                    "valid_from": str(row[9]) if row[9] is not None else None,
+                    "valid_to": str(row[10]) if row[10] is not None else None,
+                    "rtm_tpcd": str(row[11]),
+                    "requirement_version_hash": str(row[12]),
+                }
+                add("ccct_requirement", str(row[0]), payload)
+            cur.execute(
+                """
+                SELECT source_record_id, requirement_id, hsk10::text,
+                       trade_type, source_item_index, source_uri,
+                       raw_record_hash, raw_record
+                FROM ccct_source_records
+                WHERE snapshot_id=%s
+                ORDER BY source_record_id
+                """,
+                (snapshot_id,),
+            )
+            for row in cur.fetchall():
+                payload = {
+                    "source_record_id": str(row[0]),
+                    "requirement_id": str(row[1]),
+                    "hsk10": str(row[2]),
+                    "trade_type": str(row[3]),
+                    "source_item_index": int(row[4]),
+                    "source_uri": str(row[5]),
+                    "raw_record_hash": str(row[6]),
+                    "raw_record": row[7],
+                }
+                add("ccct_source_record", str(row[0]), payload)
+            cur.execute(
+                """
+                SELECT DISTINCT d.document_code, d.display_name, d.normalized_name
+                FROM ccct_requirement_documents d
+                JOIN ccct_requirements r USING (document_code)
+                WHERE r.snapshot_id=%s
+                ORDER BY d.document_code
+                """,
+                (snapshot_id,),
+            )
+            for row in cur.fetchall():
+                payload = {
+                    "document_code": str(row[0]),
+                    "display_name": str(row[1]),
+                    "normalized_name": str(row[2]),
+                }
+                add("ccct_document", str(row[0]), payload)
+        return tuple(
+            sorted(
+                members,
+                key=lambda item: (
+                    item.dataset_id,
+                    item.member_kind,
+                    item.member_key,
+                ),
+            )
+        )
+
+    def dataset_membership(self, generation_id: str) -> tuple[DatasetMember, ...]:
+        with self._connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT dataset_id, snapshot_id, member_kind, member_key, payload_sha256
+                FROM knowledge_generation_dataset_members
+                WHERE generation_id=%s
+                ORDER BY dataset_id, member_kind, member_key
+                """,
+                (generation_id,),
+            )
+            rows = cur.fetchall()
+        return tuple(
+            DatasetMember(
+                dataset_id=str(row[0]),
+                snapshot_id=str(row[1]),
+                member_kind=str(row[2]),
+                member_key=str(row[3]),
+                payload_sha256=str(row[4]),
+            )
+            for row in rows
+        )
+
+    def postgres_attestation(
+        self,
+        generation_id: str,
+        *,
+        attested_at: str,
+    ) -> StoreAttestation:
+        spec = self.load_spec(generation_id)
+        records = self.article_membership(generation_id)
+        members = validate_dataset_members(
+            spec.source_manifest,
+            self.dataset_membership(generation_id),
+        )
+        with self._connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT article_pk, law_id, article_no, paragraph_no, item_no,
+                       title, version_mst, valid_from::text, content,
+                       content_sha256
+                FROM knowledge_generation_articles
+                WHERE generation_id=%s
+                ORDER BY article_pk
+                """,
+                (generation_id,),
+            )
+            article_rows = [
+                {
+                    "article_pk": int(row[0]),
+                    "law_id": str(row[1]),
+                    "article_no": int(row[2]),
+                    "paragraph_no": int(row[3]) if row[3] is not None else None,
+                    "item_no": int(row[4]) if row[4] is not None else None,
+                    "title": str(row[5]) if row[5] is not None else None,
+                    "version_mst": str(row[6]),
+                    "valid_from": str(row[7]),
+                    "content": str(row[8]),
+                    "content_sha256": str(row[9]),
+                }
+                for row in cur.fetchall()
+            ]
+        return StoreAttestation.from_article_records(
+            generation_id=generation_id,
+            store_name="postgresql",
+            records=records,
+            model_manifest_sha256=spec.model_manifest_sha256,
+            store_locator=f"generation/{generation_id}/postgresql",
+            store_revision="knowledge-generation-schema-v2",
+            attested_at=attested_at,
+            projection={
+                "schema_version": "2.0",
+                "articles": article_rows,
+                "datasets": [item.as_dict() for item in members],
+                "index_config": spec.index_config,
+            },
+        )
+
     def validate(
         self,
         generation_id: str,
@@ -301,6 +594,11 @@ class _PostgresGenerationTransaction:
             raise GenerationRepositoryError("only a building generation can be validated")
         if not self.article_membership(generation_id):
             raise GenerationRepositoryError("PostgreSQL article membership is empty")
+        spec = self.load_spec(generation_id)
+        validate_dataset_members(
+            spec.source_manifest,
+            self.dataset_membership(generation_id),
+        )
         with self._connection.cursor() as cur:
             cur.executemany(
                 """
@@ -310,17 +608,19 @@ class _PostgresGenerationTransaction:
                   article_count,
                   article_id_set_sha256,
                   article_content_set_sha256,
+                  projection_sha256,
                   model_manifest_sha256,
                   store_locator,
                   store_revision,
                   attestation,
                   attestation_sha256,
                   attested_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (generation_id, store_name) DO UPDATE SET
                   article_count=EXCLUDED.article_count,
                   article_id_set_sha256=EXCLUDED.article_id_set_sha256,
                   article_content_set_sha256=EXCLUDED.article_content_set_sha256,
+                  projection_sha256=EXCLUDED.projection_sha256,
                   model_manifest_sha256=EXCLUDED.model_manifest_sha256,
                   store_locator=EXCLUDED.store_locator,
                   store_revision=EXCLUDED.store_revision,
@@ -335,6 +635,7 @@ class _PostgresGenerationTransaction:
                         item.article_count,
                         item.article_id_set_sha256,
                         item.article_content_set_sha256,
+                        item.projection_sha256,
                         item.model_manifest_sha256,
                         item.store_locator,
                         item.store_revision,
@@ -385,6 +686,7 @@ class _PostgresGenerationTransaction:
                     article_count=payload["article_count"],
                     article_id_set_sha256=payload["article_id_set_sha256"],
                     article_content_set_sha256=payload["article_content_set_sha256"],
+                    projection_sha256=payload["projection_sha256"],
                     model_manifest_sha256=payload["model_manifest_sha256"],
                     store_locator=payload["store_locator"],
                     store_revision=payload["store_revision"],
@@ -453,15 +755,35 @@ class _PostgresGenerationTransaction:
             row = cur.fetchone()
         return str(row[0]) if row else None
 
+    def active_generation_token(self) -> ActiveGenerationToken:
+        with self._connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT p.generation_id, p.epoch
+                FROM knowledge_generation_active_pointer p
+                JOIN knowledge_generations g ON g.generation_id=p.generation_id
+                WHERE p.singleton AND g.state='active'
+                """
+            )
+            row = cur.fetchone()
+        if row is None:
+            return ActiveGenerationToken(None, 0)
+        epoch = int(row[1])
+        if epoch <= 0:
+            raise GenerationRepositoryError("active generation epoch is invalid")
+        return ActiveGenerationToken(str(row[0]), epoch)
+
     def activate(
         self,
         generation_id: str,
         *,
         expected_previous: str | None,
+        expected_epoch: int,
         rollback: bool,
     ) -> None:
-        current = self.active_generation_id()
-        if current != expected_previous:
+        token = self.active_generation_token()
+        current = token.generation_id
+        if current != expected_previous or token.epoch != expected_epoch:
             raise GenerationRepositoryError("active generation changed during promotion")
         target_state = self._fetch_state(generation_id)
         expected_state = GenerationState.RETIRED if rollback else GenerationState.SEALED
@@ -542,6 +864,31 @@ class _PostgresGenerationTransaction:
                 active_generation_id=self.active_generation_id(),
             )
 
+    def abort(self, generation_id: str, *, reason: str) -> None:
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 1000:
+            raise GenerationRepositoryError("abort reason is invalid")
+        if self._fetch_state(generation_id) is not GenerationState.BUILDING:
+            raise GenerationRepositoryError("only a building generation can be aborted")
+        with self._connection.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE knowledge_generations
+                SET state='aborted', aborted_at=now()
+                WHERE generation_id=%s AND state='building'
+                """,
+                (generation_id,),
+            )
+            if cur.rowcount != 1:
+                raise GenerationRepositoryError("generation abort transition failed")
+            self._insert_event(
+                cur,
+                generation_id,
+                "aborted",
+                GenerationState.BUILDING,
+                GenerationState.ABORTED,
+                {"reason": reason.strip()},
+            )
+
     @staticmethod
     def _insert_event(
         cur: Any,
@@ -601,9 +948,14 @@ class PostgresGenerationRepository:
         with self._connection_factory() as connection:
             return _PostgresGenerationTransaction(connection).active_generation_id()
 
+    def active_generation_token(self) -> ActiveGenerationToken:
+        with self._connection_factory() as connection:
+            return _PostgresGenerationTransaction(connection).active_generation_token()
+
 
 __all__ = [
     "GENERATION_WRITER_LOCK_KEY",
+    "ActiveGenerationToken",
     "GenerationBusyError",
     "GenerationRepository",
     "GenerationRepositoryError",
