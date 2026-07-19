@@ -8,10 +8,26 @@ import json
 import subprocess
 from pathlib import Path
 
+try:
+    from tools.provider_build import (
+        create_provider_build_document,
+        serialized_document,
+    )
+except ModuleNotFoundError:  # direct execution with tools/ as sys.path[0]
+    from provider_build import (  # type: ignore[no-redef]
+        create_provider_build_document,
+        serialized_document,
+    )
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 FIXED_FILES = {
     ".dockerignore": ".dockerignore",
+    "contracts/evidence/v1/rag_retrieval_v1.schema.json": (
+        "contracts/evidence/v1/rag_retrieval_v1.schema.json"
+    ),
+    "contracts/evidence/v1/readiness_v1.schema.json": (
+        "contracts/evidence/v1/readiness_v1.schema.json"
+    ),
     "law_repository/deploy/hf_space/Dockerfile": "Dockerfile",
     "law_repository/deploy/hf_space/README.md": "README.md",
     "law_repository/requirements.txt": "law_repository/requirements.txt",
@@ -103,11 +119,18 @@ def build_context(repo: Path, output: Path) -> dict[str, object]:
         "source_commit": source_commit,
         "files": manifest_files,
     }
-    (output / "source-manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-        newline="\n",
+    manifest_bytes = (
+        json.dumps(manifest, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+    ).encode("utf-8")
+    (output / "source-manifest.json").write_bytes(manifest_bytes)
+    provider_build = create_provider_build_document(
+        provider_revision=source_commit,
+        retrieval_schema=(output / FIXED_FILES[
+            "contracts/evidence/v1/rag_retrieval_v1.schema.json"
+        ]).read_bytes(),
+        source_manifest=manifest_bytes,
     )
+    (output / "provider-build.json").write_bytes(serialized_document(provider_build))
     return manifest
 
 

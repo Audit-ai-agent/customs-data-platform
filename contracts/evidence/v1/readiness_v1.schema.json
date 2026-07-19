@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://customs-data-platform.invalid/contracts/evidence/v1/readiness_v1.schema.json",
+  "title": "Evidence API Readiness v1",
+  "$ref": "#/$defs/ReadinessResponse",
+  "$defs": {
+    "ProviderBuildIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "schema_version",
+        "provider_release",
+        "provider_revision",
+        "schema_sha256",
+        "source_manifest_sha256",
+        "provider_build_sha256"
+      ],
+      "properties": {
+        "contract": {
+          "const": "evidence-retrieval"
+        },
+        "schema_version": {
+          "const": "1.0"
+        },
+        "provider_release": {
+          "const": "evidence-api-v1.1.0"
+        },
+        "provider_revision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "schema_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "provider_build_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "LawCorpusReadiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected",
+        "loaded",
+        "article_backed"
+      ],
+      "properties": {
+        "expected": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "loaded": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "article_backed": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "LawIndexReadiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected",
+        "postgres_indexed",
+        "qdrant",
+        "postgres_graph_articles",
+        "neo4j",
+        "neo4j_missing",
+        "neo4j_orphaned"
+      ],
+      "properties": {
+        "expected": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "postgres_indexed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "qdrant": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "postgres_graph_articles": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "neo4j": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "neo4j_missing": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "neo4j_orphaned": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "ReadinessResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "knowledge_snapshot_id",
+        "supported_review_as_of",
+        "evidence_contract",
+        "law_corpus",
+        "law_index"
+      ],
+      "properties": {
+        "status": {
+          "const": "ready"
+        },
+        "knowledge_snapshot_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "supported_review_as_of": {
+          "type": "string",
+          "format": "date"
+        },
+        "evidence_contract": {
+          "$ref": "#/$defs/ProviderBuildIdentity"
+        },
+        "law_corpus": {
+          "$ref": "#/$defs/LawCorpusReadiness"
+        },
+        "law_index": {
+          "$ref": "#/$defs/LawIndexReadiness"
+        }
+      }
+    }
+  }
+}

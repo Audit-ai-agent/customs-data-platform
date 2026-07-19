@@ -4,7 +4,11 @@ import hashlib
 import json
 from pathlib import Path
 
-from tools.check_contract_drift import SCHEMA_PATH, check_contract_drift
+from tools.check_contract_drift import (
+    READINESS_SCHEMA_PATH,
+    SCHEMA_PATH,
+    check_contract_drift,
+)
 
 
 EXPECTED_V1_SHA256 = "531b59ba4e86f78cef20a4fca052996efd8b88c48853ac12113ca76e69cdd69a"
@@ -26,3 +30,22 @@ def test_fastapi_openapi_has_no_evidence_v1_contract_drift():
 def test_schema_path_is_provider_owned_not_a_sibling_repository():
     repo_root = Path(__file__).resolve().parents[2]
     assert SCHEMA_PATH.is_relative_to(repo_root)
+    assert READINESS_SCHEMA_PATH.is_relative_to(repo_root)
+
+
+def test_readiness_schema_owns_exact_provider_identity_fields():
+    schema = json.loads(READINESS_SCHEMA_PATH.read_text(encoding="utf-8"))
+    identity = schema["$defs"]["ProviderBuildIdentity"]
+    assert set(identity["properties"]) == {
+        "contract",
+        "schema_version",
+        "provider_release",
+        "provider_revision",
+        "schema_sha256",
+        "source_manifest_sha256",
+        "provider_build_sha256",
+    }
+    assert set(identity["required"]) == set(identity["properties"])
+    assert identity["properties"]["provider_release"] == {
+        "const": "evidence-api-v1.1.0"
+    }

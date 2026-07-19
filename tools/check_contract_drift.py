@@ -17,6 +17,9 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 LAW_REPOSITORY = ROOT / "law_repository"
 SCHEMA_PATH = ROOT / "contracts" / "evidence" / "v1" / "rag_retrieval_v1.schema.json"
+READINESS_SCHEMA_PATH = (
+    ROOT / "contracts" / "evidence" / "v1" / "readiness_v1.schema.json"
+)
 sys.path.insert(0, str(LAW_REPOSITORY))
 
 from src.webapp import app  # noqa: E402
@@ -29,6 +32,12 @@ COMPONENTS = {
     "Evidence": "Evidence",
     "RetrieveResult": "ItemEvidenceResult",
     "RetrieveResponse": "RetrieveResponse",
+}
+READINESS_COMPONENTS = {
+    "ProviderBuildIdentity": "ProviderBuildIdentity",
+    "LawCorpusReadiness": "LawCorpusReadiness",
+    "LawIndexReadiness": "LawIndexReadiness",
+    "ReadinessResponse": "ReadinessResponse",
 }
 
 WIRE_KEYWORDS = {
@@ -96,13 +105,16 @@ def _signature(rule: Any, root: dict[str, Any]) -> Any:
     return signature
 
 
-def check_contract_drift() -> list[str]:
-    canonical = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
-    openapi = app.openapi()
+def _compare_components(
+    *,
+    canonical_path: Path,
+    canonical: dict[str, Any],
+    openapi: dict[str, Any],
+    component_mapping: dict[str, str],
+) -> list[str]:
     components = openapi["components"]["schemas"]
     errors: list[str] = []
-
-    for canonical_name, openapi_name in COMPONENTS.items():
+    for canonical_name, openapi_name in component_mapping.items():
         expected = _signature(canonical["$defs"][canonical_name], canonical)
         actual = _signature(components[openapi_name], openapi)
         if expected == actual:
@@ -113,7 +125,7 @@ def check_contract_drift() -> list[str]:
             difflib.unified_diff(
                 expected_text.splitlines(),
                 actual_text.splitlines(),
-                fromfile=f"canonical:{canonical_name}",
+                fromfile=f"canonical:{canonical_path.name}:{canonical_name}",
                 tofile=f"openapi:{openapi_name}",
                 lineterm="",
             )
@@ -122,12 +134,33 @@ def check_contract_drift() -> list[str]:
     return errors
 
 
+def check_contract_drift() -> list[str]:
+    openapi = app.openapi()
+    checks = (
+        (SCHEMA_PATH, COMPONENTS),
+        (READINESS_SCHEMA_PATH, READINESS_COMPONENTS),
+    )
+    errors: list[str] = []
+    for path, mapping in checks:
+        canonical = json.loads(path.read_text(encoding="utf-8"))
+        errors.extend(_compare_components(
+            canonical_path=path,
+            canonical=canonical,
+            openapi=openapi,
+            component_mapping=mapping,
+        ))
+    return errors
+
+
 def main() -> int:
     errors = check_contract_drift()
     if errors:
         print("Evidence v1 contract drift detected:\n" + "\n\n".join(errors))
         return 1
-    print(f"Evidence v1 contract matches OpenAPI: {SCHEMA_PATH.relative_to(ROOT)}")
+    print(
+        "Evidence contracts match OpenAPI: "
+        f"{SCHEMA_PATH.relative_to(ROOT)}, {READINESS_SCHEMA_PATH.relative_to(ROOT)}"
+    )
     return 0
 
 

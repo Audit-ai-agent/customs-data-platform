@@ -215,11 +215,8 @@ def test_evidence_id_is_stable_across_requests_and_items():
 def test_webapp_exposes_versioned_internal_route():
     from src.webapp import app
 
-    assert any(
-        route.path == "/internal/rag/v1/retrieve" and "POST" in route.methods
-        for route in app.routes
-    )
-    paths = {route.path for route in app.routes}
+    paths = app.openapi()["paths"]
+    assert "post" in paths["/internal/rag/v1/retrieve"]
     assert "/internal/rag/v1/health/live" in paths
     assert "/internal/rag/v1/health/ready" in paths
 
@@ -239,7 +236,7 @@ def test_readiness_rejects_a_partially_loaded_target_law_corpus(monkeypatch):
             return None
 
         def fetchall(self):
-            return [(TARGET_LAWS[0]["law_id"],)]
+            return [(TARGET_LAWS[0]["law_id"], 1)]
 
     class FakeConnection:
         def __enter__(self):
@@ -254,9 +251,130 @@ def test_readiness_rejects_a_partially_loaded_target_law_corpus(monkeypatch):
     monkeypatch.setattr("src.evidence.connect", lambda: FakeConnection())
     with pytest.raises(
         RuntimeError,
-        match=rf"expected={len(TARGET_LAWS)}, loaded=1, missing={len(TARGET_LAWS) - 1}",
+        match=(
+            rf"expected={len(TARGET_LAWS)}, loaded=1, article_backed=1, "
+            rf"missing={len(TARGET_LAWS) - 1}, without_current_articles=0"
+        ),
     ):
         DatabaseEvidenceBackend()._verify_target_law_coverage()
+
+
+def test_readiness_rejects_target_law_with_no_verified_current_article(monkeypatch):
+    from src.evidence import DatabaseEvidenceBackend
+    from src.ingest.laws import TARGET_LAWS
+
+    assert len(TARGET_LAWS) == 58
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, query, *_args):
+            assert "btrim(a.content) <> ''" in query
+            assert "a.content_hash ~ '^[0-9a-f]{64}$'" in query
+            assert "FROM law_versions v" in query
+
+        def fetchall(self):
+            return [
+                (law["law_id"], 0 if index == 0 else 1)
+                for index, law in enumerate(TARGET_LAWS)
+            ]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    monkeypatch.setattr("src.evidence.connect", lambda: FakeConnection())
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            r"expected=58, loaded=58, article_backed=57, "
+            r"missing=0, without_current_articles=1"
+        ),
+    ):
+        DatabaseEvidenceBackend()._verify_target_law_coverage()
+
+
+def test_law_graph_readiness_detects_equal_count_id_replacement(monkeypatch):
+    from types import SimpleNamespace
+
+    from src.evidence import DatabaseEvidenceBackend
+
+    class FakeCursor:
+        def __init__(self):
+            self.query_index = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, *_args):
+            self.query_index += 1
+
+        def fetchone(self):
+            assert self.query_index == 1
+            return (2, 2, 2)
+
+        def fetchall(self):
+            assert self.query_index == 2
+            return [(101,), (102,)]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def run(self, query):
+            assert "a.article_pk AS article_pk" in query
+            return [{"article_pk": 101}, {"article_pk": 103}]
+
+    class FakeDriver:
+        def session(self):
+            return FakeSession()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("src.evidence.connect", lambda: FakeConnection())
+    monkeypatch.setattr(
+        "src.db.qdrant.client",
+        lambda: SimpleNamespace(
+            count=lambda *_args, **_kwargs: SimpleNamespace(count=2)
+        ),
+    )
+    monkeypatch.setattr("src.evidence.make_driver", lambda: FakeDriver())
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            r"postgres_graph_articles=2, neo4j=2, "
+            r"missing=1, orphaned=1"
+        ),
+    ):
+        DatabaseEvidenceBackend()._verify_law_index()
 
 
 def test_request_limits_match_central_wire_contract():

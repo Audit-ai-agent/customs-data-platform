@@ -187,6 +187,10 @@ class EvidenceBackend(Protocol):
     ) -> tuple[LawArticleMatch, ...]: ...
 
 
+class ReadinessBackend(EvidenceBackend, Protocol):
+    def readiness(self) -> dict: ...
+
+
 class KnowledgeSnapshotMismatch(RuntimeError):
     """PostgreSQL 원장과 Neo4j projection의 현행 스냅샷이 다를 때."""
 
@@ -297,27 +301,53 @@ class DatabaseEvidenceBackend:
             return RequirementLookup(True, tuple(dict(row) for row in cur.fetchall()))
 
     def _verify_target_law_coverage(self) -> dict[str, int]:
-        """Fail closed when the configured law corpus is only partially loaded."""
+        """Require every configured law to have at least one current article."""
         from src.ingest.laws import TARGET_LAWS
 
         expected_ids = {law["law_id"] for law in TARGET_LAWS}
         with connect() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT law_id FROM laws WHERE law_id = ANY(%s)",
+                """
+                SELECT l.law_id,
+                       count(a.id) FILTER (
+                         WHERE a.is_current
+                           AND a.content IS NOT NULL
+                           AND btrim(a.content) <> ''
+                           AND a.content_hash ~ '^[0-9a-f]{64}$'
+                           AND btrim(a.version_mst) <> ''
+                           AND EXISTS (
+                             SELECT 1
+                             FROM law_versions v
+                             WHERE v.law_id=a.law_id AND v.mst=a.version_mst
+                           )
+                       ) AS verified_current_articles
+                FROM laws l
+                LEFT JOIN law_articles a ON a.law_id=l.law_id
+                WHERE l.law_id = ANY(%s)
+                GROUP BY l.law_id
+                """,
                 (sorted(expected_ids),),
             )
-            loaded_ids = {row[0] for row in cur.fetchall()}
+            rows = tuple(cur.fetchall())
+        loaded_ids = {row[0] for row in rows}
+        article_backed_ids = {row[0] for row in rows if int(row[1] or 0) > 0}
         missing = expected_ids - loaded_ids
-        if missing:
+        without_articles = loaded_ids - article_backed_ids
+        if missing or without_articles:
             raise RuntimeError(
                 "law corpus incomplete: "
                 f"expected={len(expected_ids)}, loaded={len(loaded_ids)}, "
-                f"missing={len(missing)}"
+                f"article_backed={len(article_backed_ids)}, "
+                f"missing={len(missing)}, without_current_articles={len(without_articles)}"
             )
-        return {"expected": len(expected_ids), "loaded": len(loaded_ids)}
+        return {
+            "expected": len(expected_ids),
+            "loaded": len(loaded_ids),
+            "article_backed": len(article_backed_ids),
+        }
 
     def _verify_law_index(self) -> dict[str, int]:
-        """Fail closed when the current Qdrant projection is incomplete."""
+        """Require complete Qdrant retrieval and Neo4j article projections."""
         if self._law_index_verified:
             return dict(self._law_index_state or {})
         with connect() as conn, conn.cursor() as cur:
@@ -329,23 +359,73 @@ class DatabaseEvidenceBackend:
                       SELECT 1 FROM law_articles c WHERE c.parent_article_pk=a.id
                     )
                   ),
-                  count(*) FILTER (WHERE a.qdrant_point_id IS NOT NULL)
+                  count(*) FILTER (
+                    WHERE a.is_current
+                      AND a.qdrant_point_id IS NOT NULL
+                      AND NOT EXISTS (
+                        SELECT 1 FROM law_articles c WHERE c.parent_article_pk=a.id
+                      )
+                  ),
+                  count(*) FILTER (
+                    WHERE a.is_current AND a.paragraph_no IS NULL
+                  )
                 FROM law_articles a
                 """
             )
-            expected, indexed = cur.fetchone()
+            expected, indexed, graph_articles = cur.fetchone()
+            cur.execute(
+                """
+                SELECT id
+                FROM law_articles
+                WHERE is_current AND paragraph_no IS NULL
+                """
+            )
+            postgres_graph_ids = {int(row[0]) for row in cur.fetchall()}
         from src.db.qdrant import COLLECTION, client as qdrant_client
 
         qdrant_count = qdrant_client().count(COLLECTION, exact=True).count
+        drv = make_driver()
+        try:
+            with drv.session() as session:
+                graph_rows = list(session.run(
+                    "MATCH (a:Article) RETURN a.article_pk AS article_pk"
+                ))
+        finally:
+            drv.close()
+        neo4j_ids = {
+            int(row["article_pk"])
+            for row in graph_rows
+            if row["article_pk"] is not None
+        }
+        neo4j_count = len(graph_rows)
+        missing_ids = postgres_graph_ids - neo4j_ids
+        orphaned_count = len(neo4j_ids - postgres_graph_ids) + (
+            neo4j_count - len(neo4j_ids)
+        )
         if expected != indexed or expected != qdrant_count:
             raise RuntimeError(
                 "law index incomplete: "
                 f"expected={expected}, postgres_indexed={indexed}, qdrant={qdrant_count}"
             )
+        if (
+            graph_articles != len(postgres_graph_ids)
+            or graph_articles != neo4j_count
+            or missing_ids
+            or orphaned_count
+        ):
+            raise RuntimeError(
+                "law graph incomplete: "
+                f"postgres_graph_articles={graph_articles}, neo4j={neo4j_count}, "
+                f"missing={len(missing_ids)}, orphaned={orphaned_count}"
+            )
         self._law_index_state = {
             "expected": int(expected),
             "postgres_indexed": int(indexed),
             "qdrant": int(qdrant_count),
+            "postgres_graph_articles": int(graph_articles),
+            "neo4j": int(neo4j_count),
+            "neo4j_missing": 0,
+            "neo4j_orphaned": 0,
         }
         self._law_index_verified = True
         return dict(self._law_index_state)

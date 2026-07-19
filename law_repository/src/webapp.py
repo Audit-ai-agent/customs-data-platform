@@ -16,10 +16,11 @@ from __future__ import annotations
 import os
 import sys
 import threading
+from collections.abc import Callable
 from datetime import date, datetime
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 
 from src import hybrid
@@ -28,12 +29,20 @@ from src.cli import LAW_ALIAS, _parse_article_no
 from src.db.qdrant import BM25_VECTOR, DENSE_VECTOR
 from src.evidence import (
     DatabaseEvidenceBackend,
+    ReadinessBackend,
     RetrieveRequest,
     RetrieveResponse,
     retrieve_evidence,
 )
+from src.provider_identity import (
+    ProviderBuildIdentity,
+    ReadinessResponse,
+    binding_header_mismatches,
+    load_provider_build_identity,
+)
 
 app = FastAPI(title="관세법령 저장소 데모")
+_internal_router = APIRouter()
 _encode_lock = threading.Lock()
 _INDEX_HTML = (Path(__file__).parent / "webui.html").read_text(encoding="utf-8")
 _DEMO_TOKEN = os.environ.get("DEMO_TOKEN", "")
@@ -125,23 +134,119 @@ def _resolve_law(law: str) -> str | None:
     return next((i for i, n in _law_names.items() if n.replace(" ", "") == squashed), None)
 
 
-@app.post("/internal/rag/v1/retrieve", response_model=RetrieveResponse)
-def internal_retrieve(payload: RetrieveRequest) -> RetrieveResponse:
+def _request_identity(request: Request) -> ProviderBuildIdentity:
+    try:
+        return request.app.state.provider_identity_loader()
+    except Exception as exc:
+        # Response/logs deliberately omit the raw exception: it can contain a
+        # deployment path and is not needed by an Agent to decide fail-closed.
+        print(
+            "[evidence] provider identity unavailable: "
+            f"{type(exc).__name__}",
+            file=sys.stderr,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Evidence provider build identity is unavailable",
+        ) from None
+
+
+@_internal_router.post("/internal/rag/v1/retrieve", response_model=RetrieveResponse)
+def internal_retrieve(
+    payload: RetrieveRequest,
+    request: Request,
+    response: Response,
+) -> RetrieveResponse:
     """AI Agent와 Data/RAG 경계의 버전 고정 Evidence API."""
-    return retrieve_evidence(payload)
+    identity = _request_identity(request)
+    if binding_header_mismatches(request.headers, identity):
+        raise HTTPException(
+            status_code=412,
+            detail="Evidence provider build binding does not match",
+        )
+    backend = request.app.state.evidence_backend_factory()
+    result = retrieve_evidence(payload, backend)
+    for name, value in identity.binding_headers().items():
+        response.headers[name] = value
+    return result
 
 
-@app.get("/internal/rag/v1/health/live")
+@_internal_router.get("/internal/rag/v1/health/live")
 def internal_liveness() -> dict:
     return {"status": "alive"}
 
 
-@app.get("/internal/rag/v1/health/ready")
-def internal_readiness() -> dict:
+@_internal_router.get(
+    "/internal/rag/v1/health/ready",
+    response_model=ReadinessResponse,
+)
+def internal_readiness(request: Request) -> ReadinessResponse:
+    identity = _request_identity(request)
     try:
-        return DatabaseEvidenceBackend().readiness()
+        readiness = request.app.state.evidence_backend_factory().readiness()
+        return ReadinessResponse.model_validate(
+            {**readiness, "evidence_contract": identity.model_dump()}
+        )
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        print(
+            f"[evidence] readiness failed: {type(exc).__name__}",
+            file=sys.stderr,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Evidence provider is not ready",
+        ) from None
+
+
+def _configure_evidence_application(
+    target: FastAPI,
+    *,
+    backend_factory: Callable[[], ReadinessBackend],
+    identity_loader: Callable[[], ProviderBuildIdentity],
+    test_only_conformance: bool,
+) -> FastAPI:
+    target.state.evidence_backend_factory = backend_factory
+    target.state.provider_identity_loader = identity_loader
+    target.state.test_only_conformance = test_only_conformance
+    target.include_router(_internal_router)
+    return target
+
+
+def create_evidence_application() -> FastAPI:
+    """Create the production Evidence API with no fixture activation path."""
+    target = FastAPI(title="Customs Evidence API")
+    return _configure_evidence_application(
+        target,
+        backend_factory=DatabaseEvidenceBackend,
+        identity_loader=load_provider_build_identity,
+        test_only_conformance=False,
+    )
+
+
+def create_test_conformance_application(
+    *,
+    identity: ProviderBuildIdentity,
+    backend: ReadinessBackend | None = None,
+) -> FastAPI:
+    """Create an isolated test-only app; production never calls this factory."""
+    from src.conformance import TestOnlyConformanceEvidenceBackend
+
+    selected_backend = backend or TestOnlyConformanceEvidenceBackend()
+    target = FastAPI(title="TEST ONLY — Evidence API conformance")
+    return _configure_evidence_application(
+        target,
+        backend_factory=lambda: selected_backend,
+        identity_loader=lambda: identity,
+        test_only_conformance=True,
+    )
+
+
+_configure_evidence_application(
+    app,
+    backend_factory=DatabaseEvidenceBackend,
+    identity_loader=load_provider_build_identity,
+    test_only_conformance=False,
+)
 
 
 @app.get("/api/article")
