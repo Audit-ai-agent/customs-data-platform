@@ -3,6 +3,7 @@
 전제: docker compose 기동 + Phase 2(법령→PG/Qdrant)·Phase 4(HSK 요건) 적재.
 미기동/미적재 시 각 fixture 가 skip.
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -14,6 +15,7 @@ from src.db.qdrant import BM25_VECTOR, COLLECTION, DENSE_VECTOR
 
 
 # ------------------------------------------------- 단위(DB 불필요)
+
 
 def test_temporal_predicate_current_uses_today():
     sql, params = repo._temporal_predicate(None)
@@ -29,13 +31,13 @@ def test_temporal_predicate_as_of_passthrough():
 
 
 def test_normalize_hsk_accepts_only_hs6_or_hsk10_without_padding():
-    assert repo.normalize_hsk("0101 21 0000") == "0101210000"   # 공백 제거
-    assert repo.normalize_hsk("854231") == "854231"             # HS6는 HS6로 유지
+    assert repo.normalize_hsk("0101 21 0000") == "0101210000"  # 공백 제거
+    assert repo.normalize_hsk("854231") == "854231"  # HS6는 HS6로 유지
     with pytest.raises(ValueError):
-        repo.normalize_hsk("8542")                               # 우측 0 패딩 금지
+        repo.normalize_hsk("8542")  # 우측 0 패딩 금지
     with pytest.raises(ValueError):
-        repo.normalize_hsk("123456789012345")                    # 자리 절단 금지
-    assert repo.normalize_hsk("0204100000")[0] == "0"           # 앞자리 0 보존
+        repo.normalize_hsk("123456789012345")  # 자리 절단 금지
+    assert repo.normalize_hsk("0204100000")[0] == "0"  # 앞자리 0 보존
 
 
 def test_resolve_hsk_candidates_exact_unique_and_ambiguous():
@@ -56,6 +58,7 @@ def test_search_unknown_arm_raises():
 
 
 # ------------------------------------------------- fixtures
+
 
 @pytest.fixture(scope="module")
 def qc():
@@ -98,8 +101,7 @@ def sample_hsk():
         pytest.skip(f"Neo4j 접속 불가: {e}")
     with drv.session() as s:
         rec = s.run(
-            "MATCH (h:HSK)-[:HAS_REQUIREMENT]->(:Requirement) "
-            "RETURN h.code AS c LIMIT 1"
+            "MATCH (h:HSK)-[:HAS_REQUIREMENT]->(:Requirement) RETURN h.code AS c LIMIT 1"
         ).single()
     drv.close()
     if not rec:
@@ -109,6 +111,8 @@ def sample_hsk():
 
 # ------------------------------------------------- arm 검색
 
+
+@pytest.mark.live
 def test_current_search_arm_shape(qc):
     for arm in (DENSE_VECTOR, BM25_VECTOR):
         hits = repo.search("세관장 확인 대상 물품", arm=arm, limit=5)
@@ -119,12 +123,15 @@ def test_current_search_arm_shape(qc):
             assert h.text and isinstance(h.text, str)  # text 온전 반환(설계 §4.2)
 
 
+@pytest.mark.live
 def test_current_search_respects_limit(qc):
     assert len(repo.search("관세", arm=DENSE_VECTOR, limit=3)) <= 3
 
 
 # ------------------------------------------------- temporal 시점 조회
 
+
+@pytest.mark.live
 def test_resolve_current_is_current(sample_article):
     row = repo.resolve_as_of(**sample_article, as_of=None)
     assert row is not None
@@ -133,11 +140,13 @@ def test_resolve_current_is_current(sample_article):
     assert row["valid_from"] <= date.today()
 
 
+@pytest.mark.live
 def test_resolve_before_enforcement_empty(sample_article):
     """시행 전 시점(1900년)에는 그 조문 버전이 존재하지 않는다."""
     assert repo.resolve_as_of(**sample_article, as_of=date(1900, 1, 1)) is None
 
 
+@pytest.mark.live
 def test_search_as_of_current_matches_today(qc, sample_article):
     """as_of=today 는 현행 검색과 같은 조문 집합을 확정할 수 있어야(구법 혼입 없음)."""
     hits = repo.search("관세 납부", arm=DENSE_VECTOR, limit=5, as_of=date.today())
@@ -147,12 +156,14 @@ def test_search_as_of_current_matches_today(qc, sample_article):
 
 # ------------------------------------------------- HSK traverse
 
+
+@pytest.mark.live
 def test_hsk_requirements_shape(sample_hsk):
     req = repo.hsk_requirements(sample_hsk)
     assert req["hsk10"] == sample_hsk
     assert req["requirements"], "요건 있는 leaf 인데 결과 없음"
     for q in req["requirements"]:
-        assert q["law_name"] and q["agencies"]      # 확인법령 + 기관 완성
+        assert q["law_name"] and q["agencies"]  # 확인법령 + 기관 완성
         assert q["trade_type"] in ("export", "import")
         assert q["source"] in ("direct", "inherited")
     # 조상 계층 접두어 정합(감사 설명용)
@@ -161,11 +172,13 @@ def test_hsk_requirements_shape(sample_hsk):
     assert req["ancestors"]["chapter2"]["code"] == sample_hsk[:2]
 
 
+@pytest.mark.live
 def test_hsk_trade_type_filter(sample_hsk):
     exp = repo.hsk_requirements(sample_hsk, trade_type="수입")
     assert all(q["trade_type"] == "import" for q in exp["requirements"])
 
 
+@pytest.mark.live
 def test_hsk_requirements_direct_from_leaf(sample_hsk):
     """Phase 4 는 leaf 직접 요건만 적재 → 직접 요건은 level 10."""
     req = repo.hsk_requirements(sample_hsk)
@@ -176,6 +189,8 @@ def test_hsk_requirements_direct_from_leaf(sample_hsk):
 
 # ------------------------------------------------- 조문 그래프 확장(graceful)
 
+
+@pytest.mark.live
 def test_expand_article_graceful(sample_hsk):
     """조문 그래프 미구축이어도 예외 없이 list 반환(그래프 생기면 자동 동작)."""
     out = repo.expand_article(1)

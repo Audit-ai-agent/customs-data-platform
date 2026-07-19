@@ -9,6 +9,7 @@ delta 멱등 재실행(네트워크 잡)은 pytest 가 아니라 운영 절차�
   python -m src.sync.delta  두 번 → 두 번째가 "신규 버전 없음"이어야 한다.
 여기서는 promote() 의 실데이터 멱등만 트랜잭션 롤백 안에서 검사한다.
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -19,11 +20,14 @@ from src import repository as repo
 from src.db.qdrant import COLLECTION
 from src.ingest.graph import HIER_RANK
 
+pytestmark = pytest.mark.live
+
 # 조문 identity (설계 §4.1 EXCLUDE 키와 동일)
 _KEY = "law_id, article_no, paragraph_no, item_no"
 
 
 # ------------------------------------------------- fixtures
+
 
 @pytest.fixture(scope="module")
 def pg():
@@ -76,8 +80,11 @@ def qdrant_points(qc):
     out, offset = [], None
     while True:
         points, offset = qc.scroll(
-            COLLECTION, limit=1024, offset=offset,
-            with_payload=["article_pk"], with_vectors=False,
+            COLLECTION,
+            limit=1024,
+            offset=offset,
+            with_payload=["article_pk"],
+            with_vectors=False,
         )
         out.extend((str(p.id), p.payload["article_pk"]) for p in points)
         if offset is None:
@@ -98,6 +105,7 @@ def _indexable_rows(pg) -> list[tuple[int, str | None]]:
 
 
 # ------------------------------------------------- A. PG 시간원장 불변식
+
 
 def test_no_overlapping_intervals_in_real_data(pg):
     """유효구간 겹침 0건 — EXCLUDE 제약이 지켜온 것을 데이터 단에서 재확인."""
@@ -126,7 +134,9 @@ def test_is_current_iff_effective_today(pg):
                                  AND (valid_to > current_date OR valid_to IS NULL))
             """
         )
-        assert cur.fetchone()[0] == 0, "is_current 와 유효구간 불일치 (python -m src.sync.delta 필요)"
+        assert cur.fetchone()[0] == 0, (
+            "is_current 와 유효구간 불일치 (python -m src.sync.delta 필요)"
+        )
 
 
 def test_qdrant_point_id_iff_indexable(pg):
@@ -184,15 +194,24 @@ def test_as_of_boundaries_exactly_one_version(pg):
                           AND item_no IS NOT DISTINCT FROM %(item_no)s
                           AND {pred}
                         """,
-                        {"law_id": law_id, "art_no": art_no, "para_no": para_no,
-                         "item_no": item_no, **params},
+                        {
+                            "law_id": law_id,
+                            "art_no": art_no,
+                            "para_no": para_no,
+                            "item_no": item_no,
+                            **params,
+                        },
                     )
                     hits = [r[0] for r in cur.fetchall()]
-                    assert len(hits) <= 1, f"조문 {law_id}/{art_no} as_of={as_of} 에 {len(hits)}버전"
+                    assert len(hits) <= 1, (
+                        f"조문 {law_id}/{art_no} as_of={as_of} 에 {len(hits)}버전"
+                    )
                     if expect_self:
                         assert hits == [pk], f"as_of=valid_from({as_of}) 이 자기 버전을 못 찾음"
                     else:
-                        assert pk not in hits, f"as_of=valid_to({as_of}) 에 닫힌 버전 혼입(반열림 위반)"
+                        assert pk not in hits, (
+                            f"as_of=valid_to({as_of}) 에 닫힌 버전 혼입(반열림 위반)"
+                        )
 
 
 def test_promote_idempotent_on_real_data(pg):
@@ -207,6 +226,7 @@ def test_promote_idempotent_on_real_data(pg):
 
 
 # ------------------------------------------------- B. PG ↔ Qdrant
+
 
 def test_qdrant_count_matches_pg_indexable(pg, qc):
     assert qc.count(COLLECTION).count == len(_indexable_rows(pg))
@@ -229,20 +249,21 @@ def test_qdrant_payload_pks_match_pg(pg, qdrant_points):
 
 # ------------------------------------------------- C. PG ↔ Neo4j 조문 그래프
 
+
 def _current_whole_articles(pg) -> dict[int, str]:
     """그래프 노드 대상 = 현행 whole-article (graph._fetch_current_articles 와 동일 기준)."""
     with pg.cursor() as cur:
-        cur.execute(
-            "SELECT id, law_id FROM law_articles WHERE is_current AND paragraph_no IS NULL"
-        )
+        cur.execute("SELECT id, law_id FROM law_articles WHERE is_current AND paragraph_no IS NULL")
         return dict(cur.fetchall())
 
 
 def test_graph_nodes_match_pg_current(pg, neo):
     expected = _current_whole_articles(pg)
     with neo.session() as s:
-        got = {r["pk"]: r["law_id"] for r in
-               s.run("MATCH (a:Article) RETURN a.article_pk AS pk, a.law_id AS law_id")}
+        got = {
+            r["pk"]: r["law_id"]
+            for r in s.run("MATCH (a:Article) RETURN a.article_pk AS pk, a.law_id AS law_id")
+        }
     assert set(got) == set(expected), "Article 노드 ≠ PG 현행 whole-article (그래프 재구축 필요)"
     assert all(got[pk] == expected[pk] for pk in got), "노드 law_id 가 PG 와 불일치"
 
@@ -268,13 +289,16 @@ def test_graph_edge_invariants(neo):
         ).single()["c"]
         assert bad_refers == 0, "REFERS_TO 가 동일 법령 내부에 있음 (CITES 여야 함)"
 
-        pairs = list(s.run(
-            "MATCH (s:Article)-[:DELEGATES]->(t:Article) "
-            "RETURN DISTINCT s.hierarchy AS sh, t.hierarchy AS th"
-        ))
+        pairs = list(
+            s.run(
+                "MATCH (s:Article)-[:DELEGATES]->(t:Article) "
+                "RETURN DISTINCT s.hierarchy AS sh, t.hierarchy AS th"
+            )
+        )
     for r in pairs:
-        assert HIER_RANK[r["sh"]] < HIER_RANK[r["th"]], \
+        assert HIER_RANK[r["sh"]] < HIER_RANK[r["th"]], (
             f"DELEGATES 방향 위반: {r['sh']} → {r['th']}"
+        )
 
 
 # ------------------------------------------------- D. HSK 상속 누락 체크
@@ -284,6 +308,7 @@ def test_graph_edge_invariants(neo):
 # 아예 갖지 않는다 — leaf 3,395건의 hs6, 1건의 heading4 조상 노드 부재는 소스
 # 고유 특성이지 적재 누락이 아니다. 따라서 "모든 접두어 존재"가 아니라
 # ① 소스 무손실 적재  ② HAS_REQUIREMENT가 repository 매칭으로 도달 가능을 불변식으로 삼는다.
+
 
 def test_hsnode_codes_lossless_vs_source(neo):
     """HSNode 코드 집합 == 소스 xlsx 코드 집합 — 적재 손실·유령 노드 0.
@@ -338,8 +363,7 @@ def test_hsk_inherited_traverse_functional(neo):
     """요건 걸린 leaf 하나로 end-to-end traverse — 직접 요건 + 조상 계층명 반환."""
     with neo.session() as s:
         rec = s.run(
-            "MATCH (h:HSK)-[:HAS_REQUIREMENT]->(:Requirement) "
-            "RETURN h.code AS c LIMIT 1"
+            "MATCH (h:HSK)-[:HAS_REQUIREMENT]->(:Requirement) RETURN h.code AS c LIMIT 1"
         ).single()
     if not rec:
         pytest.skip("Requirement 미적재")
