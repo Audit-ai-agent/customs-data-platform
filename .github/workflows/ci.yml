@@ -153,6 +153,33 @@ jobs:
           uv run --locked python -m compileall -q law_repository/src evals tools
           uv run --locked ruff check law_repository/src law_repository/tests evals tools
 
+      - name: Check production runtime formatting and types
+        if: github.event_name != 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --locked ruff format --check \
+            law_repository/src/deadline.py \
+            law_repository/src/process_ipc.py \
+            law_repository/src/process_security.py \
+            law_repository/src/process_start.py \
+            law_repository/src/model_runtime.py \
+            law_repository/src/neo4j_runtime.py \
+            law_repository/src/production.py \
+            law_repository/src/production_settings.py \
+            law_repository/src/runtime_api.py \
+            law_repository/src/runtime_release.py \
+            law_repository/src/generation_evidence.py \
+            law_repository/src/generation_runtime.py \
+            law_repository/src/generation_stores.py \
+            law_repository/src/db/postgres.py \
+            law_repository/src/db/qdrant.py \
+            law_repository/src/db/neo4j.py \
+            tools/run_evidence_v2_conformance_server.py \
+            law_repository/tests/test_runtime_deadlines.py \
+            law_repository/tests/test_evidence_v2_conformance_runner.py
+          uv run --locked mypy
+
       - name: Production service SAST
         if: github.event_name != 'workflow_dispatch'
         shell: bash

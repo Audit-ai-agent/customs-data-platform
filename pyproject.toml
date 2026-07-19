@@ -19,6 +19,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+  "mypy==1.17.1",
   "pytest>=8.3",
   "ruff>=0.12",
 ]
@@ -40,3 +41,30 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E9", "F63", "F7", "F82"]
+
+[tool.mypy]
+python_version = "3.11"
+mypy_path = ["law_repository"]
+files = [
+  "law_repository/src/deadline.py",
+  "law_repository/src/process_ipc.py",
+  "law_repository/src/process_security.py",
+  "law_repository/src/process_start.py",
+  "law_repository/src/model_runtime.py",
+  "law_repository/src/neo4j_runtime.py",
+  "law_repository/src/production.py",
+  "law_repository/src/production_settings.py",
+  "law_repository/src/runtime_api.py",
+  "law_repository/src/runtime_release.py",
+  "law_repository/src/generation_evidence.py",
+  "law_repository/src/generation_runtime.py",
+  "law_repository/src/generation_stores.py",
+  "law_repository/src/db/postgres.py",
+  "law_repository/src/db/qdrant.py",
+  "law_repository/src/db/neo4j.py",
+]
+ignore_missing_imports = true
+follow_imports = "skip"
+check_untyped_defs = true
+no_implicit_optional = true
+warn_unused_configs = true
