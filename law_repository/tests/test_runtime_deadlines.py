@@ -296,6 +296,36 @@ def test_postgres_blackhole_is_cancelled_closed_and_watchdog_exits(
     )
 
 
+def test_postgres_watchdog_firing_during_commit_cannot_return_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CommitRaceConnection(_BlackholePostgresConnection):
+        def commit(self) -> None:
+            self.commit_calls += 1
+            assert self.released.wait(timeout=1)
+
+    connection = CommitRaceConnection()
+    monkeypatch.setattr(postgres_module.psycopg.pq, "version", lambda: 170000)
+    monkeypatch.setattr(
+        postgres_module.psycopg,
+        "connect",
+        lambda _dsn, **_kwargs: connection,
+    )
+    monkeypatch.setattr(postgres_module.settings, "postgres_host", "db.internal")
+    monkeypatch.setattr(postgres_module.settings, "postgres_hostaddr", "192.0.2.20")
+
+    with pytest.raises(DeadlineExceeded, match="commit crossed"):
+        with postgres_module.connect(deadline=_FastPostgresDeadline()):
+            pass
+
+    assert connection.commit_calls == 1
+    assert connection.cancelled.is_set()
+    assert connection.closed
+    assert not any(
+        thread.name == "customs-evidence-postgres-deadline" for thread in threading.enumerate()
+    )
+
+
 def test_postgres_post_connect_setup_failure_closes_without_watchdog(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -560,6 +590,65 @@ def test_neo4j_close_reaps_two_permanent_hangs_in_one_shutdown_window() -> None:
     assert _temp_names("customs-evidence-neo4j-") == before_temp
 
 
+def test_neo4j_shutdown_cost_is_constant_for_one_and_eight_slow_children() -> None:
+    termination_timeout = 0.08
+
+    def measure(child_count: int) -> float:
+        executor = KillableNeo4jQueryExecutor(
+            uri="bolt://127.0.0.1:7687",
+            user="explicit-user",
+            password="explicit-password",
+            termination_timeout_seconds=termination_timeout,
+            worker_target=_neo_success_worker,
+            fatal_exit=lambda code: pytest.fail(f"unexpected fatal exit {code}"),
+        )
+
+        class SlowTerminateThenKillProcess:
+            def __init__(self) -> None:
+                self.alive = True
+                self.killed = False
+                self.terminate_calls = 0
+                self.kill_calls = 0
+
+            def is_alive(self) -> bool:
+                return self.alive
+
+            def terminate(self) -> None:
+                self.terminate_calls += 1
+
+            def kill(self) -> None:
+                self.kill_calls += 1
+                self.killed = True
+
+            def join(self, timeout: float) -> None:
+                time.sleep(timeout)
+                if self.killed:
+                    self.alive = False
+                    executor._unregister(self)
+
+        processes = [SlowTerminateThenKillProcess() for _index in range(child_count)]
+        for process in processes:
+            executor._register(process)
+
+        started = time.monotonic()
+        executor.close()
+        elapsed = time.monotonic() - started
+
+        assert executor.active_process_count == 0
+        assert all(not process.alive for process in processes)
+        assert all(process.terminate_calls == 1 for process in processes)
+        assert all(process.kill_calls == 1 for process in processes)
+        return elapsed
+
+    one_child = measure(1)
+    eight_children = measure(8)
+    upper_bound = 3 * termination_timeout + 0.15
+
+    assert 1.5 * termination_timeout <= one_child <= upper_bound
+    assert 1.5 * termination_timeout <= eight_children <= upper_bound
+    assert eight_children <= one_child + termination_timeout + 0.15
+
+
 def test_neo4j_rejects_combined_query_parameter_limit_and_abnormal_exit() -> None:
     limited = _neo_executor(_neo_success_worker, maximum_request_bytes=20)
     try:
@@ -631,6 +720,84 @@ def test_neo4j_partial_temp_setup_failure_closes_and_unlinks(
 
     assert executor.active_process_count == 0
     assert _temp_names("customs-evidence-neo4j-") == before_temp
+
+
+def test_neo4j_partial_process_start_is_reaped_even_when_start_raises() -> None:
+    class SyntheticFatalExit(RuntimeError):
+        pass
+
+    class PartialStartProcess:
+        def __init__(self) -> None:
+            self.alive = False
+            self.terminated = False
+            self.closed = False
+            self.exitcode: int | None = None
+
+        def start(self) -> None:
+            self.alive = True
+            raise OSError("synthetic post-child start failure")
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.alive = False
+            self.exitcode = -15
+
+        def kill(self) -> None:
+            self.alive = False
+            self.exitcode = -9
+
+        def join(self, _timeout: float) -> None:
+            return None
+
+        def close(self) -> None:
+            self.closed = True
+
+    class PartialStartContext:
+        def __init__(self) -> None:
+            self.process: PartialStartProcess | None = None
+
+        def Process(self, **_kwargs: Any) -> PartialStartProcess:  # noqa: N802
+            self.process = PartialStartProcess()
+            return self.process
+
+    fatal_codes: list[int] = []
+
+    def fatal_exit(code: int) -> Any:
+        fatal_codes.append(code)
+        raise SyntheticFatalExit("service must fail-stop")
+
+    context = PartialStartContext()
+    executor = KillableNeo4jQueryExecutor(
+        uri="bolt://127.0.0.1:7687",
+        user="explicit-user",
+        password="explicit-password",
+        termination_timeout_seconds=0.1,
+        process_context=context,  # type: ignore[arg-type]
+        worker_target=_neo_success_worker,
+        fatal_exit=fatal_exit,
+    )
+    before_temp = _temp_names("customs-evidence-neo4j-")
+    with pytest.raises(SyntheticFatalExit, match="fail-stop"):
+        executor.run(
+            "RETURN 1",
+            {"value": 1},
+            _deadline(request=2, store=0.5),
+        )
+    executor.close()
+
+    assert fatal_codes == [72]
+    assert context.process is not None
+    assert context.process.terminated
+    assert context.process.closed
+    assert not context.process.alive
+    assert executor.active_process_count == 0
+    assert _temp_names("customs-evidence-neo4j-") == before_temp
+    assert not any(
+        thread.name == "customs-evidence-neo4j-launcher" for thread in threading.enumerate()
+    )
 
 
 def _model_supervisor(worker: Any) -> DenseModelSupervisor:
@@ -918,6 +1085,38 @@ def test_process_start_bounded_fail_stop_joins_injected_test_launcher() -> None:
     assert entered.is_set()
     assert fatal_codes == [91]
     assert not any(thread.name == "bounded-start-fatal-test" for thread in threading.enumerate())
+
+
+def test_process_start_exception_after_child_creation_is_fail_stop() -> None:
+    fatal_codes: list[int] = []
+
+    class SyntheticFatalExit(RuntimeError):
+        pass
+
+    class PartialStartProcess:
+        child_created = False
+
+        def start(self) -> None:
+            self.child_created = True
+            raise OSError("synthetic post-child start failure")
+
+    def fatal_exit(code: int) -> Any:
+        fatal_codes.append(code)
+        raise SyntheticFatalExit("partial start must fail-stop")
+
+    process = PartialStartProcess()
+    with pytest.raises(SyntheticFatalExit, match="partial start"):
+        start_process_bounded(
+            process,
+            timeout_seconds=0.2,
+            thread_name="bounded-start-partial-test",
+            fatal_exit=fatal_exit,
+            fatal_exit_code=92,
+        )
+
+    assert process.child_created
+    assert fatal_codes == [92]
+    assert not any(thread.name == "bounded-start-partial-test" for thread in threading.enumerate())
 
 
 @pytest.mark.parametrize("advertise_nofollow", [False, True])

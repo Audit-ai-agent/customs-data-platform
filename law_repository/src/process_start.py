@@ -63,7 +63,13 @@ def start_process_bounded(
         raise ProcessStartError("fatal process-start exit unexpectedly returned")
     launcher.join()
     if errors:
-        raise ProcessStartError("child process start failed") from errors[0]
+        # ``multiprocessing`` may create the OS child and then fail while
+        # serializing bootstrap state or wiring handles.  The caller cannot
+        # prove that such a partially started child is absent or tracked.
+        # Production must therefore fail-stop instead of returning a
+        # recoverable request error.
+        fatal_exit(fatal_exit_code)
+        raise ProcessStartError("fatal process-start exit unexpectedly returned") from errors[0]
 
 
 __all__ = ["ProcessStartError", "start_process_bounded"]

@@ -259,13 +259,41 @@ class KillableNeo4jQueryExecutor:
     def _close_registered_children(
         self,
         active: tuple[tuple[Any, Lock], ...],
-    ) -> None:
-        """Terminate different query children concurrently in one 2*T window."""
+        *,
+        shutdown_started: float,
+    ) -> float:
+        """Reap all children by shared phase cutoffs, independent of count."""
 
-        termination_cutoff = time.monotonic() + 2 * self._termination_timeout
+        terminate_cutoff = shutdown_started + self._termination_timeout
+        kill_cutoff = terminate_cutoff + self._termination_timeout
+        final_coordination_cutoff = kill_cutoff + self._termination_timeout
+
+        def terminate_by_shared_cutoffs(process: Any, process_lock: Lock) -> None:
+            with process_lock:
+                if self._is_alive(process):
+                    try:
+                        process.terminate()
+                    except (AssertionError, OSError, ValueError):
+                        pass
+                    try:
+                        process.join(max(0.0, terminate_cutoff - time.monotonic()))
+                    except (AssertionError, OSError, ValueError):
+                        pass
+                if self._is_alive(process):
+                    try:
+                        process.kill()
+                    except (AssertionError, OSError, ValueError):
+                        pass
+                    try:
+                        process.join(max(0.0, kill_cutoff - time.monotonic()))
+                    except (AssertionError, OSError, ValueError):
+                        pass
+                if self._is_alive(process):
+                    self._fatal_exit(78)
+
         terminators = [
             Thread(
-                target=self._terminate_and_reap,
+                target=terminate_by_shared_cutoffs,
                 args=(process, process_lock),
                 name="customs-evidence-neo4j-shutdown",
                 daemon=True,
@@ -281,11 +309,12 @@ class KillableNeo4jQueryExecutor:
             self._fatal_exit(77)
             raise
         for thread in terminators:
-            thread.join(max(0.0, termination_cutoff - time.monotonic()))
+            thread.join(max(0.0, final_coordination_cutoff - time.monotonic()))
         if any(thread.is_alive() for thread in terminators):
             self._fatal_exit(73)
         if any(self._is_alive(process) for process, _lock in active):
             self._fatal_exit(74)
+        return final_coordination_cutoff
 
     def run(
         self,
@@ -312,7 +341,6 @@ class KillableNeo4jQueryExecutor:
         response_fd: int | None = None
         response_name: str | None = None
         process: Any | None = None
-        started = False
         registered = False
         process_lock: Lock | None = None
         try:
@@ -343,7 +371,6 @@ class KillableNeo4jQueryExecutor:
             process_lock = self._register(process)
             registered = True
             self._start(process, process_lock, operation_cutoff)
-            started = True
             process.join(max(0.0, operation_cutoff - time.monotonic()))
             if self._is_alive(process):
                 self._terminate_and_reap(process, process_lock)
@@ -384,7 +411,10 @@ class KillableNeo4jQueryExecutor:
                 close_and_unlink(response_fd, response_name)
             if process is not None and registered and process_lock is not None:
                 try:
-                    if started and self._is_alive(process):
+                    # Process.start can create the OS child and then raise
+                    # during bootstrap.  Liveness, not a returned-success
+                    # flag, decides whether cleanup is mandatory.
+                    if self._is_alive(process):
                         self._terminate_and_reap(process, process_lock)
                 finally:
                     self._unregister(process)
@@ -397,17 +427,21 @@ class KillableNeo4jQueryExecutor:
     def close(self) -> None:
         """Stop accepting queries and kill every currently registered child."""
 
+        shutdown_started = time.monotonic()
         with self._condition:
             self._closed = True
             active = tuple(self._active_processes.items())
-        self._close_registered_children(active)
+        final_coordination_cutoff = self._close_registered_children(
+            active,
+            shutdown_started=shutdown_started,
+        )
         # Query threads wake immediately after their child is reaped and own
-        # final descriptor/temp cleanup.  Bound this coordination wait.
-        coordination_cutoff = time.monotonic() + self._termination_timeout
+        # final descriptor/temp cleanup.  The same 3*T shutdown cutoff covers
+        # child termination, terminator bookkeeping, and registry cleanup.
         with self._condition:
             cleaned = self._condition.wait_for(
                 lambda: not self._active_processes,
-                timeout=max(0.0, coordination_cutoff - time.monotonic()),
+                timeout=max(0.0, final_coordination_cutoff - time.monotonic()),
             )
         if not cleaned:
             self._fatal_exit(75)

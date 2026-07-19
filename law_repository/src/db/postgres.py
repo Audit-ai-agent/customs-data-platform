@@ -69,6 +69,22 @@ def connect(*, deadline: RequestDeadline | None = None) -> Iterator[psycopg.Conn
     conn: psycopg.Connection | None = None
     abort_timer: Timer | None = None
     timer_join_timeout = 0.0
+
+    def stop_abort_timer() -> bool:
+        nonlocal abort_timer
+        timer = abort_timer
+        if timer is None:
+            return True
+        timer.cancel()
+        try:
+            timer.join(timeout=timer_join_timeout)
+        except RuntimeError:
+            # ``Timer.start`` may fail before the thread is registered.
+            pass
+        quiesced = not timer.is_alive()
+        abort_timer = None
+        return quiesced
+
     try:
         connected = psycopg.connect(settings.postgres_dsn, **connect_kwargs)
         conn = connected
@@ -110,6 +126,16 @@ def connect(*, deadline: RequestDeadline | None = None) -> Iterator[psycopg.Conn
                     raise DeadlineExceeded("PostgreSQL operation exceeded its hard deadline")
                 deadline.assert_work_allowed()
             connected.commit()
+            # A watchdog that fires while COMMIT is in progress can close the
+            # socket yet race with a driver that reports commit success.
+            # Quiesce the timer first, then make the final success decision.
+            watchdog_quiesced = stop_abort_timer()
+            if deadline is not None:
+                if not watchdog_quiesced:
+                    raise DeadlineExceeded("PostgreSQL deadline watchdog did not quiesce")
+                if operation_expired.is_set():
+                    raise DeadlineExceeded("PostgreSQL commit crossed its hard deadline")
+                deadline.assert_work_allowed()
         except Exception:
             if not connected.closed:
                 try:
@@ -118,12 +144,6 @@ def connect(*, deadline: RequestDeadline | None = None) -> Iterator[psycopg.Conn
                     connected.close()
             raise
     finally:
-        if abort_timer is not None:
-            abort_timer.cancel()
-            try:
-                abort_timer.join(timeout=timer_join_timeout)
-            except RuntimeError:
-                # ``Timer.start`` may fail before the thread is registered.
-                pass
+        stop_abort_timer()
         if conn is not None:
             conn.close()
