@@ -1,4 +1,4 @@
-"""Fail when FastAPI's Evidence v1 OpenAPI surface drifts from its JSON Schema.
+"""Fail when Evidence v1 bodies or runtime v2 readiness drift from schemas.
 
 The JSON Schema is the provider-owned source of truth.  This check resolves
 local references and compares every wire-relevant JSON Schema keyword while
@@ -20,8 +20,13 @@ SCHEMA_PATH = ROOT / "contracts" / "evidence" / "v1" / "rag_retrieval_v1.schema.
 READINESS_SCHEMA_PATH = (
     ROOT / "contracts" / "evidence" / "v1" / "readiness_v1.schema.json"
 )
+RUNTIME_READINESS_SCHEMA_PATH = (
+    ROOT / "contracts" / "evidence" / "v2" / "readiness_v2.schema.json"
+)
 sys.path.insert(0, str(LAW_REPOSITORY))
 
+from fastapi import FastAPI  # noqa: E402
+from src.runtime_api import configure_runtime_v2_application  # noqa: E402
 from src.webapp import app  # noqa: E402
 
 
@@ -39,6 +44,26 @@ READINESS_COMPONENTS = {
     "LawIndexReadiness": "LawIndexReadiness",
     "ReadinessResponse": "ReadinessResponse",
 }
+RUNTIME_READINESS_COMPONENTS = {
+    "EvidenceRuntimeReleaseIdentity": "EvidenceRuntimeReleaseIdentity",
+    "EvidenceRuntimeReadiness": "EvidenceRuntimeReadiness",
+}
+
+
+class _SchemaOnlyRuntimeLoader:
+    def acquire(self):
+        raise RuntimeError("schema-only application")
+
+    def assert_unchanged(self, _lease):
+        raise RuntimeError("schema-only application")
+
+
+runtime_app = configure_runtime_v2_application(
+    FastAPI(title="Evidence runtime v2 schema check"),
+    runtime_release_loader=_SchemaOnlyRuntimeLoader(),  # type: ignore[arg-type]
+    backend_factory=lambda _lease: None,  # type: ignore[arg-type,return-value]
+    test_only_conformance=True,
+)
 
 WIRE_KEYWORDS = {
     "type",
@@ -136,17 +161,24 @@ def _compare_components(
 
 def check_contract_drift() -> list[str]:
     openapi = app.openapi()
+    runtime_openapi = runtime_app.openapi()
     checks = (
-        (SCHEMA_PATH, COMPONENTS),
-        (READINESS_SCHEMA_PATH, READINESS_COMPONENTS),
+        (SCHEMA_PATH, COMPONENTS, openapi),
+        (READINESS_SCHEMA_PATH, READINESS_COMPONENTS, openapi),
+        (SCHEMA_PATH, COMPONENTS, runtime_openapi),
+        (
+            RUNTIME_READINESS_SCHEMA_PATH,
+            RUNTIME_READINESS_COMPONENTS,
+            runtime_openapi,
+        ),
     )
     errors: list[str] = []
-    for path, mapping in checks:
+    for path, mapping, selected_openapi in checks:
         canonical = json.loads(path.read_text(encoding="utf-8"))
         errors.extend(_compare_components(
             canonical_path=path,
             canonical=canonical,
-            openapi=openapi,
+            openapi=selected_openapi,
             component_mapping=mapping,
         ))
     return errors
@@ -159,7 +191,8 @@ def main() -> int:
         return 1
     print(
         "Evidence contracts match OpenAPI: "
-        f"{SCHEMA_PATH.relative_to(ROOT)}, {READINESS_SCHEMA_PATH.relative_to(ROOT)}"
+        f"{SCHEMA_PATH.relative_to(ROOT)}, {READINESS_SCHEMA_PATH.relative_to(ROOT)}, "
+        f"{RUNTIME_READINESS_SCHEMA_PATH.relative_to(ROOT)}"
     )
     return 0
 

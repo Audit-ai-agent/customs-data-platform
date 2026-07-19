@@ -17,11 +17,13 @@ from pathlib import Path
 try:
     from tools.provider_build import (
         create_provider_build_document,
+        create_runtime_provider_build_document,
         serialized_document,
     )
 except ModuleNotFoundError:  # direct execution with tools/ as sys.path[0]
     from provider_build import (  # type: ignore[no-redef]
         create_provider_build_document,
+        create_runtime_provider_build_document,
         serialized_document,
     )
 
@@ -35,6 +37,9 @@ FIXED_FILES = {
     ),
     "contracts/evidence/v1/readiness_v1.schema.json": (
         "contracts/evidence/v1/readiness_v1.schema.json"
+    ),
+    "contracts/evidence/v2/readiness_v2.schema.json": (
+        "contracts/evidence/v2/readiness_v2.schema.json"
     ),
     "law_repository/deploy/production/Dockerfile": "Dockerfile",
     "law_repository/deploy/production/README.md": "README.md",
@@ -161,6 +166,14 @@ def build_context(repo: Path, output: Path) -> dict[str, object]:
     )
     (output / "provider-build.json").write_bytes(
         serialized_document(provider_build)
+    )
+    runtime_provider_build = create_runtime_provider_build_document(
+        provider_revision=revision,
+        retrieval_schema=schema_bytes,
+        source_manifest=manifest_bytes,
+    )
+    (output / "provider-runtime-build.json").write_bytes(
+        serialized_document(runtime_provider_build)
     )
     return manifest
 

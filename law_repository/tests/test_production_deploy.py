@@ -43,6 +43,7 @@ def _fixture_repo(tmp_path: Path) -> Path:
         "law_repository/deploy/production/README.md": "production only\n",
         "contracts/evidence/v1/rag_retrieval_v1.schema.json": "{}\n",
         "contracts/evidence/v1/readiness_v1.schema.json": "{}\n",
+        "contracts/evidence/v2/readiness_v2.schema.json": "{}\n",
         "law_repository/src/production.py": "print('production')\n",
         "law_repository/src/provider_identity.py": "PROVIDER = 'identity'\n",
         "law_repository/tests/not-runtime.txt": "excluded\n",
@@ -80,9 +81,11 @@ def test_production_context_exports_only_committed_runtime_allowlist(
         "README.md",
         "contracts/evidence/v1/rag_retrieval_v1.schema.json",
         "contracts/evidence/v1/readiness_v1.schema.json",
+        "contracts/evidence/v2/readiness_v2.schema.json",
         "law_repository/src/production.py",
         "law_repository/src/provider_identity.py",
         "provider-build.json",
+        "provider-runtime-build.json",
         "pyproject.toml",
         "source-manifest.json",
         "uv.lock",
@@ -99,6 +102,11 @@ def test_production_context_exports_only_committed_runtime_allowlist(
     assert identity["source_manifest_sha256"] == hashlib.sha256(
         (output / "source-manifest.json").read_bytes()
     ).hexdigest()
+    runtime_identity = json.loads(
+        (output / "provider-runtime-build.json").read_text(encoding="utf-8")
+    )
+    assert runtime_identity["provider_release"] == "evidence-api-v1.2.0"
+    assert runtime_identity["provider_revision"] == identity["provider_revision"]
 
 
 def test_production_context_rejects_dirty_repo_and_in_repo_output(

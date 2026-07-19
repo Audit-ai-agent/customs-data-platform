@@ -49,8 +49,10 @@ snapshot_download(RERANK_MODEL.model_id, revision=RERANK_MODEL.revision)"
 # external service is contacted during image build.
 RUN cd /app/law_repository \
     && /opt/venv/bin/python -c \
-      "from src.provider_identity import load_provider_build_identity; \
-load_provider_build_identity(bundle_root=__import__('pathlib').Path('/app'))" \
+      "from src.provider_identity import load_provider_build_identity, load_runtime_provider_build_identity; \
+root=__import__('pathlib').Path('/app'); \
+load_provider_build_identity(bundle_root=root); \
+load_runtime_provider_build_identity(bundle_root=root)" \
     && groupadd --gid 65532 evidence \
     && useradd --uid 65532 --gid 65532 --no-create-home --shell /usr/sbin/nologin evidence \
     && chmod -R a=rX /app /opt/venv /opt/model-cache \

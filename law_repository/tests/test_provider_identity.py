@@ -15,7 +15,9 @@ from src.provider_identity import (
     ProviderIdentityError,
     binding_header_mismatches,
     create_provider_build_identity,
+    create_runtime_provider_build_identity,
     load_provider_build_identity,
+    load_runtime_provider_build_identity,
 )
 from tools.provider_build import create_provider_build_document
 
@@ -168,3 +170,24 @@ def test_starlette_raw_headers_require_one_field_per_binding_name(tmp_path: Path
         identity.schema_sha256,
     ]
     assert binding_header_mismatches(duplicated, identity) == (HEADER_SCHEMA_SHA256,)
+
+
+def test_runtime_v12_build_is_separate_from_frozen_v11_document(tmp_path: Path) -> None:
+    legacy = _write_bundle(tmp_path)
+    runtime = create_runtime_provider_build_identity(
+        provider_revision=legacy.provider_revision,
+        schema_sha256=legacy.schema_sha256,
+        source_manifest_sha256=legacy.source_manifest_sha256,
+    )
+    (tmp_path / "provider-runtime-build.json").write_text(
+        json.dumps(runtime.model_dump(), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    assert load_provider_build_identity(bundle_root=tmp_path).provider_release == (
+        "evidence-api-v1.1.0"
+    )
+    loaded = load_runtime_provider_build_identity(bundle_root=tmp_path)
+    assert loaded == runtime
+    assert loaded.provider_release == "evidence-api-v1.2.0"
+    assert loaded.provider_build_sha256 != legacy.provider_build_sha256

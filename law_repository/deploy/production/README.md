@@ -65,7 +65,7 @@ The service rejects an untrusted proxy, duplicate forwarded protocol, or
 non-HTTPS assertion. Do not use `0.0.0.0/0`, `::/0`, a query token, the demo
 token, or provider build hashes as authentication.
 
-Every `/internal/rag/*` endpoint except `/internal/rag/v1/health/live` requires
+Every `/internal/rag/*` endpoint except `/internal/rag/v2/health/live` requires
 exactly one constant-time compared `Authorization: Bearer <service-token>`.
 The token must contain 32-512 bearer-safe ASCII characters and should be a
 short-lived, randomly generated service credential delivered as a mounted
@@ -75,11 +75,11 @@ Verification from a trusted client:
 
 ```bash
 curl --fail --cacert /approved/ca.pem \
-  https://evidence.example/internal/rag/v1/health/live
+  https://evidence.example/internal/rag/v2/health/live
 
 curl --fail --cacert /approved/ca.pem \
   -H "Authorization: Bearer $EVIDENCE_SERVICE_TOKEN" \
-  https://evidence.example/internal/rag/v1/health/ready
+  https://evidence.example/internal/rag/v2/health/ready
 ```
 
 Also verify the negative cases: HTTP, invalid CA/host, direct container access,
@@ -123,7 +123,7 @@ release environment.
   and exception type. They never contain headers, bearer values, query text,
   document descriptions, raw responses, or DB exception strings.
 - Authenticated Prometheus text metrics are available at
-  `/internal/rag/v1/metrics`; labels are fixed and contain no case/item data.
+  `/internal/rag/v2/metrics`; labels are fixed and contain no case/item data.
 
 Alert on sustained 401/412/413/429-or-503/504 rates, concurrency saturation,
 readiness failure, latency, process restart, certificate/token expiry, and

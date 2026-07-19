@@ -6,6 +6,7 @@ from pathlib import Path
 
 from tools.check_contract_drift import (
     READINESS_SCHEMA_PATH,
+    RUNTIME_READINESS_SCHEMA_PATH,
     SCHEMA_PATH,
     check_contract_drift,
 )
@@ -31,6 +32,7 @@ def test_schema_path_is_provider_owned_not_a_sibling_repository():
     repo_root = Path(__file__).resolve().parents[2]
     assert SCHEMA_PATH.is_relative_to(repo_root)
     assert READINESS_SCHEMA_PATH.is_relative_to(repo_root)
+    assert RUNTIME_READINESS_SCHEMA_PATH.is_relative_to(repo_root)
 
 
 def test_readiness_schema_owns_exact_provider_identity_fields():
@@ -48,4 +50,21 @@ def test_readiness_schema_owns_exact_provider_identity_fields():
     assert set(identity["required"]) == set(identity["properties"])
     assert identity["properties"]["provider_release"] == {
         "const": "evidence-api-v1.1.0"
+    }
+
+
+def test_runtime_v2_schema_owns_exact_release_identity_fields():
+    schema = json.loads(RUNTIME_READINESS_SCHEMA_PATH.read_text(encoding="utf-8"))
+    identity = schema["$defs"]["EvidenceRuntimeReleaseIdentity"]
+    assert set(identity["required"]) == set(identity["properties"])
+    assert identity["properties"]["knowledge_generation_id"]["pattern"] == (
+        "^[0-9a-f]{64}$"
+    )
+    assert identity["properties"]["provider_release"] == {
+        "const": "evidence-api-v1.2.0"
+    }
+    readiness = schema["$defs"]["EvidenceRuntimeReadiness"]
+    assert set(readiness["properties"]) == {
+        "status",
+        "evidence_runtime_release",
     }

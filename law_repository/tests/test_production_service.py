@@ -6,6 +6,7 @@ import threading
 import time
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -241,7 +242,7 @@ def test_real_production_factory_cannot_enable_fixture_from_environment(
     monkeypatch,
 ) -> None:
     from src import production
-    from src.evidence import DatabaseEvidenceBackend
+    from src.generation_evidence import GenerationEvidenceBackend
 
     safe_values = {
         "postgres_host": "db.internal",
@@ -259,9 +260,16 @@ def test_real_production_factory_cannot_enable_fixture_from_environment(
 
     app = create_production_evidence_application(_settings())
 
-    assert app.state.test_only_conformance is False
+    assert app.state.test_only_runtime_conformance is False
     assert app.state.test_only_production_shell is False
-    assert isinstance(app.state.evidence_backend_factory(), DatabaseEvidenceBackend)
+    paths = set(app.openapi()["paths"])
+    assert "/internal/rag/v1/retrieve" not in paths
+    assert "/internal/rag/v2/retrieve" in paths
+    lease = SimpleNamespace(identity=SimpleNamespace())
+    assert isinstance(
+        app.state.runtime_backend_factory(lease),
+        GenerationEvidenceBackend,
+    )
 
 
 def test_liveness_is_public_but_still_requires_tls() -> None:

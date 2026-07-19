@@ -39,6 +39,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from src.config import settings as data_store_settings
 from src.evidence import DatabaseEvidenceBackend, ReadinessBackend
+from src.generation_evidence import GenerationEvidenceBackend
 from src.production_settings import (
     ProductionSettings,
     RuntimeSecrets,
@@ -49,6 +50,24 @@ from src.provider_identity import (
     ProviderBuildIdentity,
     binding_header_mismatches,
     load_provider_build_identity,
+)
+from src.runtime_api import (
+    BOUND_RUNTIME_LEASE_STATE_KEY,
+    RUNTIME_LIVENESS_PATH,
+    RUNTIME_METRICS_PATH,
+    RUNTIME_OPENAPI_PATH,
+    RUNTIME_READINESS_PATH,
+    RUNTIME_RETRIEVE_PATH,
+    ReadyEvidenceBackend,
+    RuntimeBackendFactory,
+    configure_runtime_v2_application,
+)
+from src.runtime_release import (
+    EvidenceRuntimeReleaseIdentity,
+    GenerationRequestLease,
+    RuntimeLeaseLoader,
+    RuntimeReleaseLoader,
+    runtime_binding_header_mismatches,
 )
 from src.webapp import _configure_evidence_application
 
@@ -63,6 +82,31 @@ _BOUND_IDENTITY_STATE_KEY = "_evidence_provider_build_identity"
 _REQUEST_ID_HEADER = "X-Request-ID"
 _REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _BEARER_PATTERN = re.compile(rb"^Bearer ([A-Za-z0-9._~+/=-]{32,512})$", re.IGNORECASE)
+
+
+@dataclass(frozen=True, slots=True)
+class _RoutePaths:
+    retrieve: str
+    live: str
+    ready: str
+    metrics: str
+    openapi: str
+
+
+_V1_ROUTES = _RoutePaths(
+    retrieve=_RETRIEVE_PATH,
+    live=_LIVENESS_PATH,
+    ready=_READINESS_PATH,
+    metrics=_METRICS_PATH,
+    openapi=_OPENAPI_PATH,
+)
+_V2_ROUTES = _RoutePaths(
+    retrieve=RUNTIME_RETRIEVE_PATH,
+    live=RUNTIME_LIVENESS_PATH,
+    ready=RUNTIME_READINESS_PATH,
+    metrics=RUNTIME_METRICS_PATH,
+    openapi=RUNTIME_OPENAPI_PATH,
+)
 
 
 class _RequestRejected(Exception):
@@ -154,13 +198,13 @@ def _client_request_id(scope: Scope) -> str | None:
     return decoded
 
 
-def _route_label(path: str) -> str:
+def _route_label(path: str, routes: _RoutePaths = _V1_ROUTES) -> str:
     return {
-        _RETRIEVE_PATH: "retrieve",
-        _LIVENESS_PATH: "live",
-        _READINESS_PATH: "ready",
-        _METRICS_PATH: "metrics",
-        _OPENAPI_PATH: "openapi",
+        routes.retrieve: "retrieve",
+        routes.live: "live",
+        routes.ready: "ready",
+        routes.metrics: "metrics",
+        routes.openapi: "openapi",
     }.get(path, "other")
 
 
@@ -601,6 +645,38 @@ def _bind_provider_identity(scope: Scope, provider_app: FastAPI) -> None:
     scope.setdefault("state", {})[_BOUND_IDENTITY_STATE_KEY] = identity
 
 
+def _bind_runtime_release(scope: Scope, provider_app: FastAPI) -> None:
+    """Acquire and bind the sealed generation before receiving request bytes."""
+
+    try:
+        lease = provider_app.state.runtime_release_loader.acquire()
+    except Exception as exc:
+        _LOGGER.error(
+            json.dumps(
+                {
+                    "event": "runtime_release_unavailable",
+                    "exception_type": type(exc).__name__,
+                },
+                sort_keys=True,
+            )
+        )
+        raise _RequestRejected(
+            503,
+            "RUNTIME_RELEASE_UNAVAILABLE",
+            "Evidence runtime release is unavailable",
+        ) from None
+    if runtime_binding_header_mismatches(
+        _RawHeaders(scope.get("headers", [])),
+        lease.identity,
+    ):
+        raise _RequestRejected(
+            412,
+            "RUNTIME_BINDING_MISMATCH",
+            "Evidence runtime release binding does not match",
+        )
+    scope.setdefault("state", {})[BOUND_RUNTIME_LEASE_STATE_KEY] = lease
+
+
 class _RawHeaders(Mapping[str, str]):
     """Minimal case-insensitive raw header view preserving exact cardinality."""
 
@@ -640,10 +716,12 @@ class ProductionBoundaryMiddleware:
         *,
         provider_app: FastAPI,
         service_state: _ProductionState,
+        routes: _RoutePaths = _V1_ROUTES,
     ) -> None:
         self.app = app
         self.provider_app = provider_app
         self.service_state = service_state
+        self.routes = routes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -653,7 +731,7 @@ class ProductionBoundaryMiddleware:
         started = time.monotonic()
         method = scope.get("method", "")
         path = scope.get("path", "")
-        route = _route_label(path)
+        route = _route_label(path, self.routes)
         request_id = f"svc-{uuid.uuid4().hex}"
         admitted = False
         try:
@@ -672,26 +750,15 @@ class ProductionBoundaryMiddleware:
                     "TLS_REQUIRED",
                     "A trusted TLS transport is required",
                 )
-            if path.startswith(_INTERNAL_PREFIX) and path != _LIVENESS_PATH:
+            if path.startswith(_INTERNAL_PREFIX) and path != self.routes.live:
                 _authenticate(scope, self.service_state.secrets.service_token)
-            if method == "POST" and path == _RETRIEVE_PATH:
+            if method == "POST" and path == self.routes.retrieve:
                 _validate_request_framing(
                     scope,
                     self.service_state.settings.max_request_body_bytes,
                 )
-                _bind_provider_identity(scope, self.provider_app)
-                body = await _read_limited_body(
-                    receive,
-                    self.service_state.settings.max_request_body_bytes,
-                )
-                _validate_strict_json(
-                    body,
-                    client_request_id or "",
-                    enforce_request_id_match=client_request_id is not None,
-                )
-                receive = _replay_body(body)
 
-            if path == _LIVENESS_PATH:
+            if path == self.routes.live:
                 buffer = _ResponseBuffer(
                     self.service_state.settings.max_response_body_bytes
                 )
@@ -706,6 +773,9 @@ class ProductionBoundaryMiddleware:
                 )
                 return
 
+            # Admission precedes provider/generation DB access and every body
+            # byte. Authenticated slow clients and slow identity stores cannot
+            # bypass the configured concurrency ceiling.
             admitted = await self.service_state.admission.try_acquire()
             if not admitted:
                 raise _RequestRejected(
@@ -718,13 +788,73 @@ class ProductionBoundaryMiddleware:
                         )
                     },
                 )
+            if method == "POST" and path == self.routes.retrieve:
+                preflight_callable = (
+                    _bind_runtime_release
+                    if self.routes is _V2_ROUTES
+                    else _bind_provider_identity
+                )
+                preflight = asyncio.create_task(
+                    asyncio.to_thread(
+                        preflight_callable,
+                        scope,
+                        self.provider_app,
+                    )
+                )
+                remaining = self._remaining_deadline(started)
+                done, _ = await asyncio.wait({preflight}, timeout=remaining)
+                if not done:
+                    self.service_state.metrics.timed_out(route)
+                    finalizer = asyncio.create_task(
+                        self._finish_after_timeout(preflight)
+                    )
+                    self.service_state.track(finalizer)
+                    admitted = False
+                    response = _safe_error(
+                        504,
+                        "DEADLINE_EXCEEDED",
+                        "Evidence request exceeded its service deadline",
+                        request_id=request_id,
+                    )
+                    await response(scope, receive, send)
+                    self._record(
+                        route=route,
+                        method=method,
+                        status_code=504,
+                        started=started,
+                        request_id=request_id,
+                    )
+                    return
+                await preflight
+                try:
+                    body = await asyncio.wait_for(
+                        _read_limited_body(
+                            receive,
+                            self.service_state.settings.max_request_body_bytes,
+                        ),
+                        timeout=self._remaining_deadline(started),
+                    )
+                except TimeoutError:
+                    self.service_state.metrics.timed_out(route)
+                    raise _RequestRejected(
+                        408,
+                        "REQUEST_BODY_TIMEOUT",
+                        "Request body was not received before the service deadline",
+                    ) from None
+                _validate_strict_json(
+                    body,
+                    client_request_id or "",
+                    enforce_request_id_match=client_request_id is not None,
+                )
+                receive = _replay_body(body)
+
             buffer = _ResponseBuffer(
                 self.service_state.settings.max_response_body_bytes
             )
             inner = asyncio.create_task(self.app(scope, receive, buffer.send))
             done, _ = await asyncio.wait(
                 {inner},
-                timeout=self.service_state.settings.request_deadline_seconds,
+                timeout=self._remaining_deadline(started),
             )
             if not done:
                 buffer.discard = True
@@ -823,6 +953,15 @@ class ProductionBoundaryMiddleware:
         finally:
             if admitted:
                 await self.service_state.admission.release()
+
+    def _remaining_deadline(self, started: float) -> float:
+        remaining = (
+            self.service_state.settings.request_deadline_seconds
+            - (time.monotonic() - started)
+        )
+        # asyncio.wait/asyncio.wait_for accept zero, which gives an immediate
+        # bounded timeout while avoiding a negative-value ambiguity.
+        return max(0.0, remaining)
 
     async def _finish_after_timeout(self, task: asyncio.Task[Any]) -> None:
         try:
@@ -926,7 +1065,10 @@ def _install_safe_exception_handlers(target: FastAPI) -> None:
         )
 
 
-def _install_openapi_security(target: FastAPI) -> None:
+def _install_openapi_security(
+    target: FastAPI,
+    routes: _RoutePaths = _V1_ROUTES,
+) -> None:
     def custom_openapi() -> dict[str, Any]:
         if target.openapi_schema:
             return target.openapi_schema
@@ -943,7 +1085,7 @@ def _install_openapi_security(target: FastAPI) -> None:
             "description": "Short-lived service credential; never use a query token.",
         }
         for path, operations in schema.get("paths", {}).items():
-            if path.startswith(_INTERNAL_PREFIX) and path != _LIVENESS_PATH:
+            if path.startswith(_INTERNAL_PREFIX) and path != routes.live:
                 for operation in operations.values():
                     if isinstance(operation, dict):
                         operation["security"] = [{"ServiceBearer": []}]
@@ -1027,6 +1169,83 @@ def _create_application(
         ProductionBoundaryMiddleware,
         provider_app=target,
         service_state=state,
+        routes=_V1_ROUTES,
+    )
+    return target
+
+
+def _create_runtime_v2_application(
+    *,
+    service_settings: ProductionSettings,
+    runtime_release_loader: RuntimeLeaseLoader,
+    backend_factory: RuntimeBackendFactory,
+    test_only: bool,
+) -> FastAPI:
+    """Create the authenticated generation-bound shell without v1 routes."""
+
+    secrets = service_settings.resolve_secrets()
+    state = _ProductionState(settings=service_settings, secrets=secrets)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        await state.admission.start()
+        _LOGGER.info(
+            json.dumps(
+                {
+                    "event": "evidence_runtime_v2_started",
+                    "max_concurrency": service_settings.max_concurrency,
+                    "transport_mode": service_settings.transport_mode,
+                },
+                sort_keys=True,
+            )
+        )
+        try:
+            yield
+        finally:
+            drained = await state.admission.stop_and_drain(
+                service_settings.shutdown_grace_seconds
+            )
+            _LOGGER.info(
+                json.dumps(
+                    {
+                        "drained": drained,
+                        "event": "evidence_runtime_v2_stopped",
+                    },
+                    sort_keys=True,
+                )
+            )
+
+    target = FastAPI(
+        title="Customs Evidence Runtime API — Production",
+        version="1.2.0",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=RUNTIME_OPENAPI_PATH if service_settings.enable_openapi else None,
+        lifespan=lifespan,
+    )
+    target.state.production_service = state
+    target.state.test_only_production_shell = test_only
+
+    @target.get(RUNTIME_METRICS_PATH, include_in_schema=False)
+    async def production_metrics_v2() -> PlainTextResponse:
+        return PlainTextResponse(
+            state.metrics.render(),
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
+
+    _install_safe_exception_handlers(target)
+    configure_runtime_v2_application(
+        target,
+        runtime_release_loader=runtime_release_loader,
+        backend_factory=backend_factory,
+        test_only_conformance=test_only,
+    )
+    _install_openapi_security(target, _V2_ROUTES)
+    target.add_middleware(
+        ProductionBoundaryMiddleware,
+        provider_app=target,
+        service_state=state,
+        routes=_V2_ROUTES,
     )
     return target
 
@@ -1034,15 +1253,16 @@ def _create_application(
 def create_production_evidence_application(
     service_settings: ProductionSettings | None = None,
 ) -> FastAPI:
-    """Create the real Database-backed service; fixture env switches do not exist."""
+    """Create the sealed-generation v2 service; fixture env switches do not exist."""
 
     selected = service_settings or ProductionSettings()
     apply_runtime_data_store_secrets(selected, data_store_settings)
     validate_production_data_store_settings(selected, data_store_settings)
-    return _create_application(
+    runtime_loader = RuntimeReleaseLoader()
+    return _create_runtime_v2_application(
         service_settings=selected,
-        backend_factory=DatabaseEvidenceBackend,
-        identity_loader=load_provider_build_identity,
+        runtime_release_loader=runtime_loader,
+        backend_factory=lambda lease: GenerationEvidenceBackend(lease),
         test_only=False,
     )
 
@@ -1059,6 +1279,22 @@ def create_test_production_shell_application(
         service_settings=service_settings,
         backend_factory=lambda: backend,
         identity_loader=lambda: identity,
+        test_only=True,
+    )
+
+
+def create_test_runtime_v2_application(
+    *,
+    service_settings: ProductionSettings,
+    runtime_release_loader: RuntimeLeaseLoader,
+    backend_factory: RuntimeBackendFactory,
+) -> FastAPI:
+    """Explicit offline v2 conformance shell; production never calls it."""
+
+    return _create_runtime_v2_application(
+        service_settings=service_settings,
+        runtime_release_loader=runtime_release_loader,
+        backend_factory=backend_factory,
         test_only=True,
     )
 
