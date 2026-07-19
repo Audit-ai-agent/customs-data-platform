@@ -91,9 +91,7 @@ class EvidenceRuntimeReleaseIdentity(BaseModel):
             HEADER_PROVIDER_REVISION: self.provider_revision,
             HEADER_PROVIDER_BUILD_SHA256: self.provider_build_sha256,
             HEADER_KNOWLEDGE_GENERATION: self.knowledge_generation_id,
-            HEADER_GENERATION_ATTESTATION_SHA256: (
-                self.knowledge_generation_attestation_sha256
-            ),
+            HEADER_GENERATION_ATTESTATION_SHA256: (self.knowledge_generation_attestation_sha256),
             HEADER_EVALUATION_SHA256: self.evaluation_report_sha256,
             HEADER_RUNTIME_RELEASE_SHA256: self.runtime_release_sha256,
         }

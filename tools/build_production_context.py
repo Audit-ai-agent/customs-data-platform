@@ -69,9 +69,7 @@ def _git(repo: Path, *args: str) -> str:
         check=False,
     )
     if result.returncode:
-        raise ProductionContextError(
-            result.stderr.strip() or f"git {' '.join(args)} failed"
-        )
+        raise ProductionContextError(result.stderr.strip() or f"git {' '.join(args)} failed")
     return result.stdout.strip()
 
 
@@ -115,9 +113,7 @@ def build_context(repo: Path, output: Path) -> dict[str, object]:
             "Data repository must be clean; context is built from committed HEAD"
         )
     if output.exists() and any(output.iterdir()):
-        raise ProductionContextError(
-            "output directory must not exist or must be empty"
-        )
+        raise ProductionContextError("output directory must not exist or must be empty")
 
     revision = _git(repo, "rev-parse", "HEAD")
     mappings = dict(FIXED_FILES)
@@ -158,17 +154,13 @@ def build_context(repo: Path, output: Path) -> dict[str, object]:
         + "\n"
     ).encode("utf-8")
     (output / "source-manifest.json").write_bytes(manifest_bytes)
-    schema_bytes = (
-        output / "contracts/evidence/v1/rag_retrieval_v1.schema.json"
-    ).read_bytes()
+    schema_bytes = (output / "contracts/evidence/v1/rag_retrieval_v1.schema.json").read_bytes()
     provider_build = create_provider_build_document(
         provider_revision=revision,
         retrieval_schema=schema_bytes,
         source_manifest=manifest_bytes,
     )
-    (output / "provider-build.json").write_bytes(
-        serialized_document(provider_build)
-    )
+    (output / "provider-build.json").write_bytes(serialized_document(provider_build))
     runtime_provider_build = create_runtime_provider_build_document(
         provider_revision=revision,
         retrieval_schema=schema_bytes,
@@ -186,9 +178,7 @@ def build_context(repo: Path, output: Path) -> dict[str, object]:
         readiness_schema=readiness_schema_bytes,
         source_manifest=manifest_bytes,
     )
-    (output / "provider-runtime-lock.json").write_bytes(
-        serialized_document(runtime_provider_lock)
-    )
+    (output / "provider-runtime-lock.json").write_bytes(serialized_document(runtime_provider_lock))
     return manifest
 
 

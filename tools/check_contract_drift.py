@@ -17,12 +17,8 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 LAW_REPOSITORY = ROOT / "law_repository"
 SCHEMA_PATH = ROOT / "contracts" / "evidence" / "v1" / "rag_retrieval_v1.schema.json"
-READINESS_SCHEMA_PATH = (
-    ROOT / "contracts" / "evidence" / "v1" / "readiness_v1.schema.json"
-)
-RUNTIME_READINESS_SCHEMA_PATH = (
-    ROOT / "contracts" / "evidence" / "v2" / "readiness_v2.schema.json"
-)
+READINESS_SCHEMA_PATH = ROOT / "contracts" / "evidence" / "v1" / "readiness_v1.schema.json"
+RUNTIME_READINESS_SCHEMA_PATH = ROOT / "contracts" / "evidence" / "v2" / "readiness_v2.schema.json"
 sys.path.insert(0, str(LAW_REPOSITORY))
 
 from fastapi import FastAPI  # noqa: E402
@@ -108,8 +104,7 @@ def _signature(rule: Any, root: dict[str, Any]) -> Any:
         value = rule[key]
         if key == "properties":
             signature[key] = {
-                name: _signature(child, root)
-                for name, child in sorted(value.items())
+                name: _signature(child, root) for name, child in sorted(value.items())
             }
         elif key in {"items", "additionalProperties"} and isinstance(value, dict):
             signature[key] = _signature(value, root)
@@ -175,12 +170,14 @@ def check_contract_drift() -> list[str]:
     errors: list[str] = []
     for path, mapping, selected_openapi in checks:
         canonical = json.loads(path.read_text(encoding="utf-8"))
-        errors.extend(_compare_components(
-            canonical_path=path,
-            canonical=canonical,
-            openapi=selected_openapi,
-            component_mapping=mapping,
-        ))
+        errors.extend(
+            _compare_components(
+                canonical_path=path,
+                canonical=canonical,
+                openapi=selected_openapi,
+                component_mapping=mapping,
+            )
+        )
     return errors
 
 

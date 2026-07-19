@@ -187,10 +187,7 @@ def test_qdrant_queries_exact_generation_collection_and_filter() -> None:
     assert len(qdrant.calls) == 2
     assert all(call["collection_name"] == expected_collection for call in qdrant.calls)
     assert all(call["collection_name"] != "customs_law_active" for call in qdrant.calls)
-    assert all(
-        call["query_filter"].must[0].match.value == "7" * 64
-        for call in qdrant.calls
-    )
+    assert all(call["query_filter"].must[0].match.value == "7" * 64 for call in qdrant.calls)
 
 
 def test_hsk_resolution_requires_generation_and_snapshot_projection() -> None:

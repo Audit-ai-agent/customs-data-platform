@@ -33,8 +33,7 @@ def _fixture_repo(tmp_path: Path) -> Path:
     files = {
         ".dockerignore": "**/.env*\n.git\n",
         "pyproject.toml": (
-            "[project]\nname='fixture'\nversion='1.0.0'\n"
-            "requires-python='==3.11.*'\n"
+            "[project]\nname='fixture'\nversion='1.0.0'\nrequires-python='==3.11.*'\n"
         ),
         "uv.lock": "version = 1\nrevision = 3\nrequires-python = '==3.11.*'\n",
         "law_repository/deploy/production/Dockerfile": (
@@ -70,11 +69,7 @@ def test_production_context_exports_only_committed_runtime_allowlist(
 
     manifest = context_builder.build_context(repo, output)
 
-    exported = {
-        path.relative_to(output).as_posix()
-        for path in output.rglob("*")
-        if path.is_file()
-    }
+    exported = {path.relative_to(output).as_posix() for path in output.rglob("*") if path.is_file()}
     assert exported == {
         ".dockerignore",
         "Dockerfile",
@@ -100,17 +95,16 @@ def test_production_context_exports_only_committed_runtime_allowlist(
     assert "must-not-be-exported" not in serialized
     identity = json.loads((output / "provider-build.json").read_text(encoding="utf-8"))
     assert identity["provider_revision"] == _git(repo, "rev-parse", "HEAD")
-    assert identity["source_manifest_sha256"] == hashlib.sha256(
-        (output / "source-manifest.json").read_bytes()
-    ).hexdigest()
+    assert (
+        identity["source_manifest_sha256"]
+        == hashlib.sha256((output / "source-manifest.json").read_bytes()).hexdigest()
+    )
     runtime_identity = json.loads(
         (output / "provider-runtime-build.json").read_text(encoding="utf-8")
     )
     assert runtime_identity["provider_release"] == "evidence-api-v1.2.0"
     assert runtime_identity["provider_revision"] == identity["provider_revision"]
-    runtime_lock = json.loads(
-        (output / "provider-runtime-lock.json").read_text(encoding="utf-8")
-    )
+    runtime_lock = json.loads((output / "provider-runtime-lock.json").read_text(encoding="utf-8"))
     assert set(runtime_lock) == {
         "contract",
         "schema_version",
@@ -123,18 +117,23 @@ def test_production_context_exports_only_committed_runtime_allowlist(
     }
     assert runtime_lock["contract"] == "evidence-runtime-release-provider-lock"
     assert runtime_lock["provider_revision"] == _git(repo, "rev-parse", "HEAD")
-    assert runtime_lock["provider_build_sha256"] == runtime_identity[
-        "provider_build_sha256"
-    ]
-    assert runtime_lock["retrieval_schema_sha256"] == hashlib.sha256(
-        (output / "contracts/evidence/v1/rag_retrieval_v1.schema.json").read_bytes()
-    ).hexdigest()
-    assert runtime_lock["readiness_schema_sha256"] == hashlib.sha256(
-        (output / "contracts/evidence/v2/readiness_v2.schema.json").read_bytes()
-    ).hexdigest()
-    assert runtime_lock["provider_source_manifest_sha256"] == hashlib.sha256(
-        (output / "source-manifest.json").read_bytes()
-    ).hexdigest()
+    assert runtime_lock["provider_build_sha256"] == runtime_identity["provider_build_sha256"]
+    assert (
+        runtime_lock["retrieval_schema_sha256"]
+        == hashlib.sha256(
+            (output / "contracts/evidence/v1/rag_retrieval_v1.schema.json").read_bytes()
+        ).hexdigest()
+    )
+    assert (
+        runtime_lock["readiness_schema_sha256"]
+        == hashlib.sha256(
+            (output / "contracts/evidence/v2/readiness_v2.schema.json").read_bytes()
+        ).hexdigest()
+    )
+    assert (
+        runtime_lock["provider_source_manifest_sha256"]
+        == hashlib.sha256((output / "source-manifest.json").read_bytes()).hexdigest()
+    )
 
 
 def test_production_context_rejects_dirty_repo_and_in_repo_output(
@@ -150,9 +149,9 @@ def test_production_context_rejects_dirty_repo_and_in_repo_output(
 
 
 def test_production_dockerfile_requires_immutable_inputs_and_non_root() -> None:
-    dockerfile = (
-        ROOT / "law_repository" / "deploy" / "production" / "Dockerfile"
-    ).read_text(encoding="utf-8")
+    dockerfile = (ROOT / "law_repository" / "deploy" / "production" / "Dockerfile").read_text(
+        encoding="utf-8"
+    )
     lowered = dockerfile.lower()
 
     assert "arg uv_image\n" in lowered
@@ -170,16 +169,16 @@ def test_production_dockerfile_requires_immutable_inputs_and_non_root() -> None:
 
 
 def test_production_compose_does_not_publish_ports_or_create_team_stores() -> None:
-    compose = (
-        ROOT / "law_repository" / "deploy" / "production" / "compose.example.yml"
-    ).read_text(encoding="utf-8")
+    compose = (ROOT / "law_repository" / "deploy" / "production" / "compose.example.yml").read_text(
+        encoding="utf-8"
+    )
     lowered = compose.lower()
 
     assert "\n    ports:" not in lowered
     assert "read_only: true" in lowered
     assert "no-new-privileges:true" in lowered
     assert "cap_drop:" in lowered
-    assert "user: \"65532:65532\"" in lowered
+    assert 'user: "65532:65532"' in lowered
     assert "evidence_service_token_file" in lowered
     assert "postgres_password_file" in lowered
     assert "qdrant_api_key_file" in lowered

@@ -19,9 +19,7 @@ def test_provider_owned_schema_is_the_frozen_v1_artifact():
     payload = SCHEMA_PATH.read_bytes()
     assert hashlib.sha256(payload).hexdigest() == EXPECTED_V1_SHA256
     schema = json.loads(payload)
-    assert schema["$defs"]["RetrieveRequest"]["properties"]["schema_version"] == {
-        "const": "1.0"
-    }
+    assert schema["$defs"]["RetrieveRequest"]["properties"]["schema_version"] == {"const": "1.0"}
 
 
 def test_fastapi_openapi_has_no_evidence_v1_contract_drift():
@@ -48,21 +46,15 @@ def test_readiness_schema_owns_exact_provider_identity_fields():
         "provider_build_sha256",
     }
     assert set(identity["required"]) == set(identity["properties"])
-    assert identity["properties"]["provider_release"] == {
-        "const": "evidence-api-v1.1.0"
-    }
+    assert identity["properties"]["provider_release"] == {"const": "evidence-api-v1.1.0"}
 
 
 def test_runtime_v2_schema_owns_exact_release_identity_fields():
     schema = json.loads(RUNTIME_READINESS_SCHEMA_PATH.read_text(encoding="utf-8"))
     identity = schema["$defs"]["EvidenceRuntimeReleaseIdentity"]
     assert set(identity["required"]) == set(identity["properties"])
-    assert identity["properties"]["knowledge_generation_id"]["pattern"] == (
-        "^[0-9a-f]{64}$"
-    )
-    assert identity["properties"]["provider_release"] == {
-        "const": "evidence-api-v1.2.0"
-    }
+    assert identity["properties"]["knowledge_generation_id"]["pattern"] == ("^[0-9a-f]{64}$")
+    assert identity["properties"]["provider_release"] == {"const": "evidence-api-v1.2.0"}
     readiness = schema["$defs"]["EvidenceRuntimeReadiness"]
     assert set(readiness["properties"]) == {
         "status",

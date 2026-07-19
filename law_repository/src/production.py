@@ -759,9 +759,7 @@ class ProductionBoundaryMiddleware:
                 )
 
             if path == self.routes.live:
-                buffer = _ResponseBuffer(
-                    self.service_state.settings.max_response_body_bytes
-                )
+                buffer = _ResponseBuffer(self.service_state.settings.max_response_body_bytes)
                 await self.app(scope, receive, buffer.send)
                 await buffer.flush(send, request_id)
                 self._record(
@@ -782,17 +780,11 @@ class ProductionBoundaryMiddleware:
                     503,
                     "SERVICE_BUSY",
                     "Evidence service is not accepting more work",
-                    headers={
-                        "Retry-After": str(
-                            self.service_state.settings.retry_after_seconds
-                        )
-                    },
+                    headers={"Retry-After": str(self.service_state.settings.retry_after_seconds)},
                 )
             if method == "POST" and path == self.routes.retrieve:
                 preflight_callable = (
-                    _bind_runtime_release
-                    if self.routes is _V2_ROUTES
-                    else _bind_provider_identity
+                    _bind_runtime_release if self.routes is _V2_ROUTES else _bind_provider_identity
                 )
                 preflight = asyncio.create_task(
                     asyncio.to_thread(
@@ -805,9 +797,7 @@ class ProductionBoundaryMiddleware:
                 done, _ = await asyncio.wait({preflight}, timeout=remaining)
                 if not done:
                     self.service_state.metrics.timed_out(route)
-                    finalizer = asyncio.create_task(
-                        self._finish_after_timeout(preflight)
-                    )
+                    finalizer = asyncio.create_task(self._finish_after_timeout(preflight))
                     self.service_state.track(finalizer)
                     admitted = False
                     response = _safe_error(
@@ -848,9 +838,7 @@ class ProductionBoundaryMiddleware:
                 )
                 receive = _replay_body(body)
 
-            buffer = _ResponseBuffer(
-                self.service_state.settings.max_response_body_bytes
-            )
+            buffer = _ResponseBuffer(self.service_state.settings.max_response_body_bytes)
             inner = asyncio.create_task(self.app(scope, receive, buffer.send))
             done, _ = await asyncio.wait(
                 {inner},
@@ -859,9 +847,7 @@ class ProductionBoundaryMiddleware:
             if not done:
                 buffer.discard = True
                 self.service_state.metrics.timed_out(route)
-                finalizer = asyncio.create_task(
-                    self._finish_after_timeout(inner)
-                )
+                finalizer = asyncio.create_task(self._finish_after_timeout(inner))
                 self.service_state.track(finalizer)
                 admitted = False
                 response = _safe_error(
@@ -955,9 +941,8 @@ class ProductionBoundaryMiddleware:
                 await self.service_state.admission.release()
 
     def _remaining_deadline(self, started: float) -> float:
-        remaining = (
-            self.service_state.settings.request_deadline_seconds
-            - (time.monotonic() - started)
+        remaining = self.service_state.settings.request_deadline_seconds - (
+            time.monotonic() - started
         )
         # asyncio.wait/asyncio.wait_for accept zero, which gives an immediate
         # bounded timeout while avoiding a negative-value ambiguity.
@@ -1125,9 +1110,7 @@ def _create_application(
         try:
             yield
         finally:
-            drained = await state.admission.stop_and_drain(
-                service_settings.shutdown_grace_seconds
-            )
+            drained = await state.admission.stop_and_drain(service_settings.shutdown_grace_seconds)
             _LOGGER.info(
                 json.dumps(
                     {
@@ -1202,9 +1185,7 @@ def _create_runtime_v2_application(
         try:
             yield
         finally:
-            drained = await state.admission.stop_and_drain(
-                service_settings.shutdown_grace_seconds
-            )
+            drained = await state.admission.stop_and_drain(service_settings.shutdown_grace_seconds)
             _LOGGER.info(
                 json.dumps(
                     {

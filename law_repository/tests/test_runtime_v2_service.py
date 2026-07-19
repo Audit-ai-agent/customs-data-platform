@@ -253,8 +253,7 @@ def test_binding_is_rejected_before_body_and_backend(mutation: str) -> None:
     backend = ReadyConformanceBackend()
     app = _app(loader=loader, backend=backend)
     raw = [
-        (name.lower().encode("ascii"), value.encode("ascii"))
-        for name, value in _headers().items()
+        (name.lower().encode("ascii"), value.encode("ascii")) for name, value in _headers().items()
     ]
     target = b"x-evidence-runtime-release-sha256"
     if mutation == "missing":
@@ -264,9 +263,7 @@ def test_binding_is_rejected_before_body_and_backend(mutation: str) -> None:
     else:
         raw.append((target, loader.current.identity.runtime_release_sha256.encode("ascii")))
 
-    messages, received = asyncio.run(
-        _invoke_without_body(app, raw_headers=raw)
-    )
+    messages, received = asyncio.run(_invoke_without_body(app, raw_headers=raw))
     assert received is False
     assert next(item["status"] for item in messages if item["type"] == "http.response.start") == 412
     assert backend.retrieve_calls == 0
@@ -327,9 +324,7 @@ def test_snapshot_mismatch_discards_retrieval_result() -> None:
 
 def test_no_active_or_incomplete_generation_is_readiness_503_without_secret() -> None:
     loader = FakeRuntimeLoader()
-    loader.fail_acquire = RuntimeError(
-        "postgresql://user:secret@example.invalid/team-volume 3/58"
-    )
+    loader.fail_acquire = RuntimeError("postgresql://user:secret@example.invalid/team-volume 3/58")
     app = _app(loader=loader)
     with TestClient(app, base_url="https://evidence.internal") as client:
         response = client.get(
@@ -554,16 +549,12 @@ async def _invoke(
 
 def _status(messages: list[dict[str, Any]]) -> int:
     return next(
-        int(message["status"])
-        for message in messages
-        if message["type"] == "http.response.start"
+        int(message["status"]) for message in messages if message["type"] == "http.response.start"
     )
 
 
 def _json(messages: list[dict[str, Any]]) -> dict[str, Any]:
     payload = b"".join(
-        message.get("body", b"")
-        for message in messages
-        if message["type"] == "http.response.body"
+        message.get("body", b"") for message in messages if message["type"] == "http.response.body"
     )
     return json.loads(payload)

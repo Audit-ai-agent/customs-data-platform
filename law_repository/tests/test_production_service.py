@@ -560,17 +560,13 @@ def _raw_retrieval_headers(
 
 def _response_status(messages: list[dict[str, Any]]) -> int:
     return next(
-        int(message["status"])
-        for message in messages
-        if message["type"] == "http.response.start"
+        int(message["status"]) for message in messages if message["type"] == "http.response.start"
     )
 
 
 def _response_json(messages: list[dict[str, Any]]) -> dict[str, Any]:
     body = b"".join(
-        message.get("body", b"")
-        for message in messages
-        if message["type"] == "http.response.body"
+        message.get("body", b"") for message in messages if message["type"] == "http.response.body"
     )
     return json.loads(body)
 
@@ -790,9 +786,7 @@ def test_metrics_openapi_and_logs_do_not_expose_body_or_token(caplog) -> None:
         assert openapi.status_code == 200
         schema = openapi.json()
         assert schema["components"]["securitySchemes"]["ServiceBearer"]["scheme"] == "bearer"
-        assert schema["paths"][_RETRIEVE_PATH]["post"]["security"] == [
-            {"ServiceBearer": []}
-        ]
+        assert schema["paths"][_RETRIEVE_PATH]["post"]["security"] == [{"ServiceBearer": []}]
         assert "security" not in schema["paths"][_LIVENESS_PATH]["get"]
 
     logs = caplog.text
@@ -805,9 +799,7 @@ def test_metrics_openapi_and_logs_do_not_expose_body_or_token(caplog) -> None:
 def test_safe_readiness_error_does_not_return_or_log_exception_secret(caplog) -> None:
     class FailingBackend(TestOnlyConformanceEvidenceBackend):
         def readiness(self):
-            raise RuntimeError(
-                "postgresql://operator:password@db.internal/db?token=secret"
-            )
+            raise RuntimeError("postgresql://operator:password@db.internal/db?token=secret")
 
     caplog.set_level("INFO")
     app = _app(backend=FailingBackend(effective_date=date(2026, 7, 10)))

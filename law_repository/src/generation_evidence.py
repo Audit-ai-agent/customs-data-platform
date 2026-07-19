@@ -51,9 +51,7 @@ class GenerationEvidenceBackend:
         qdrant_factory: Callable[[], Any] = make_qdrant,
         neo4j_factory: Callable[[], Any] = make_driver,
         dense_encoder: Callable[[list[str]], Any] = _default_dense_encoder,
-        sparse_encoder: Callable[[str], tuple[list[int], list[float]]] = (
-            bm25.encode_query
-        ),
+        sparse_encoder: Callable[[str], tuple[list[int], list[float]]] = (bm25.encode_query),
     ) -> None:
         self.lease = lease
         self.identity = lease.identity
@@ -324,9 +322,7 @@ class GenerationEvidenceBackend:
                     """,
                     generation_id=self.generation_id,
                     hsk_snapshot_id=hsk.snapshot_id,
-                    source_manifest_sha256=(
-                        self.identity.knowledge_source_manifest_sha256
-                    ),
+                    source_manifest_sha256=(self.identity.knowledge_source_manifest_sha256),
                     model_manifest_sha256=self.identity.model_manifest_sha256,
                 ).single()
         finally:
@@ -395,17 +391,12 @@ class GenerationEvidenceBackend:
                     """,
                     generation_id=self.generation_id,
                     hsk_snapshot_id=hsk_snapshot_id,
-                    source_manifest_sha256=(
-                        self.identity.knowledge_source_manifest_sha256
-                    ),
+                    source_manifest_sha256=(self.identity.knowledge_source_manifest_sha256),
                     model_manifest_sha256=self.identity.model_manifest_sha256,
                     code=normalized,
                     prefix=normalized if len(normalized) == 6 else None,
                 )
-                projected = [
-                    (str(row["code"]), str(row["content_sha256"]))
-                    for row in rows
-                ]
+                projected = [(str(row["code"]), str(row["content_sha256"])) for row in rows]
         finally:
             driver.close()
         leaves = [code for code, _content_sha256 in projected]
@@ -427,8 +418,7 @@ class GenerationEvidenceBackend:
                     (self.generation_id, hsk_snapshot_id, sorted(leaves)),
                 )
                 postgres_members = {
-                    str(code): str(payload_sha256)
-                    for code, payload_sha256 in cur.fetchall()
+                    str(code): str(payload_sha256) for code, payload_sha256 in cur.fetchall()
                 }
             if postgres_members != dict(projected):
                 raise GenerationEvidenceError(
@@ -445,9 +435,10 @@ class GenerationEvidenceBackend:
     ) -> RequirementLookup:
         if snapshot_id != self.current_snapshot_id():
             raise GenerationEvidenceError("CCCT lookup escaped generation snapshot")
-        with self._connection_factory() as connection, connection.cursor(
-            row_factory=dict_row
-        ) as cur:
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cur,
+        ):
             cur.execute(
                 """
                 SELECT EXISTS (
@@ -564,8 +555,7 @@ class GenerationEvidenceBackend:
                     seed_ids=list(seed_ids),
                 )
                 return {
-                    int(row["article_pk"]): min(1.0, 0.1 * int(row["edge_count"]))
-                    for row in rows
+                    int(row["article_pk"]): min(1.0, 0.1 * int(row["edge_count"])) for row in rows
                 }
         finally:
             driver.close()
@@ -585,8 +575,7 @@ class GenerationEvidenceBackend:
                 if (
                     not isinstance(payload, dict)
                     or payload.get("generation_id") != self.generation_id
-                    or payload.get("model_manifest_sha256")
-                    != self.identity.model_manifest_sha256
+                    or payload.get("model_manifest_sha256") != self.identity.model_manifest_sha256
                 ):
                     raise GenerationEvidenceError("Qdrant result escaped generation")
                 try:
@@ -599,17 +588,12 @@ class GenerationEvidenceBackend:
                         paragraph_no = int(paragraph_no)
                     text = str(payload["text"])
                 except (KeyError, TypeError, ValueError) as exc:
-                    raise GenerationEvidenceError(
-                        "Qdrant generation payload is malformed"
-                    ) from exc
+                    raise GenerationEvidenceError("Qdrant generation payload is malformed") from exc
                 if (
                     re.fullmatch(r"[0-9a-f]{64}", content_sha256) is None
-                    or hashlib.sha256(text.encode("utf-8")).hexdigest()
-                    != content_sha256
+                    or hashlib.sha256(text.encode("utf-8")).hexdigest() != content_sha256
                 ):
-                    raise GenerationEvidenceError(
-                        "Qdrant generation content identity mismatch"
-                    )
+                    raise GenerationEvidenceError("Qdrant generation content identity mismatch")
                 projection = (
                     content_sha256,
                     law_id,
@@ -635,9 +619,10 @@ class GenerationEvidenceBackend:
         if not candidates:
             return ()
 
-        with self._connection_factory() as connection, connection.cursor(
-            row_factory=dict_row
-        ) as cur:
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cur,
+        ):
             cur.execute(
                 """
                 SELECT a.article_pk, a.law_id, l.law_name,
@@ -681,33 +666,23 @@ class GenerationEvidenceBackend:
                 raise GenerationEvidenceError(
                     "Qdrant candidate does not match immutable PostgreSQL content"
                 )
-            if hashlib.sha256(str(row["content"]).encode("utf-8")).hexdigest() != row[
-                "content_hash"
-            ]:
-                raise GenerationEvidenceError(
-                    "PostgreSQL generation content hash mismatch"
-                )
+            if (
+                hashlib.sha256(str(row["content"]).encode("utf-8")).hexdigest()
+                != row["content_hash"]
+            ):
+                raise GenerationEvidenceError("PostgreSQL generation content hash mismatch")
             row["source_uri"] = (
                 "https://www.law.go.kr/법령/"
                 f"{quote(str(row['law_name']))}/제{int(row['article_no']) // 100}조"
             )
-            text_tokens = set(
-                re.findall(r"[0-9A-Za-z가-힣]{2,}", str(row["content"]).lower())
-            )
-            lexical = (
-                len(query_tokens & text_tokens) / len(query_tokens)
-                if query_tokens
-                else 0.0
-            )
+            text_tokens = set(re.findall(r"[0-9A-Za-z가-힣]{2,}", str(row["content"]).lower()))
+            lexical = len(query_tokens & text_tokens) / len(query_tokens) if query_tokens else 0.0
             score = min(
                 1.0,
-                0.85 * min(1.0, candidate["rrf"] / theoretical_rrf_max)
-                + 0.15 * lexical,
+                0.85 * min(1.0, candidate["rrf"] / theoretical_rrf_max) + 0.15 * lexical,
             )
             methods = tuple(
-                method
-                for method in ("dense", "bm25", "graph")
-                if method in candidate["methods"]
+                method for method in ("dense", "bm25", "graph") if method in candidate["methods"]
             )
             matches.append(
                 LawArticleMatch(

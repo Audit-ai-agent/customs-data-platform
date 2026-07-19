@@ -1,4 +1,5 @@
 """Pure helpers shared by provider-build generators."""
+
 from __future__ import annotations
 
 import hashlib
@@ -130,6 +131,5 @@ def create_runtime_provider_lock_document(
 
 def serialized_document(document: Mapping[str, object]) -> bytes:
     return (
-        json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False)
-        + "\n"
+        json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n"
     ).encode("utf-8")
