@@ -465,13 +465,19 @@ def _neo_executor(
     *,
     maximum_request_bytes: int = 1_048_576,
 ) -> KillableNeo4jQueryExecutor:
+    def unexpected_fatal_exit(code: int) -> Any:
+        pytest.fail(f"unexpected Neo4j test-process fatal exit {code}")
+
     return KillableNeo4jQueryExecutor(
         uri="bolt://127.0.0.1:7687",
         user="explicit-user",
         password="explicit-password",
-        termination_timeout_seconds=0.1,
+        # Process startup and reaping on shared Linux CI runners can exceed
+        # 100 ms without violating the production shutdown contract.
+        termination_timeout_seconds=0.25,
         maximum_request_bytes=maximum_request_bytes,
         worker_target=worker,
+        fatal_exit=unexpected_fatal_exit,
     )
 
 
