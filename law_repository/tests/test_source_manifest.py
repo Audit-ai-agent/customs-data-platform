@@ -6,10 +6,11 @@ from datetime import datetime, timezone
 
 import pytest
 
-from src.ingest.laws import TARGET_LAWS
+from src.ingest.laws import TARGET_LAWS, build_meta, parse_articles
 from src.source_manifest import (
     LawSourceManifest,
     SourceManifestError,
+    article_content_set_sha256,
     canonical_json_bytes,
     load_verified_source_manifest,
     target_law_manifest_sha256,
@@ -18,14 +19,36 @@ from src.source_manifest import (
 
 def _manifest(tmp_path):
     laws = []
-    payload = {"법령": {"기본정보": {"법령ID": "fixture"}}}
-    data = canonical_json_bytes(payload)
-    digest = hashlib.sha256(data).hexdigest()
     for index, target in enumerate(TARGET_LAWS, 1):
+        payload = {
+            "법령": {
+                "기본정보": {
+                    "법령ID": target["law_id"],
+                    "법령명_한글": target["name"],
+                    "시행일자": "20260719",
+                    "공포일자": "20260701",
+                    "제개정구분": {"content": "일부개정"},
+                    "소관부처": {"content": "테스트 부처"},
+                },
+                "조문": {
+                    "조문단위": {
+                        "조문여부": "조문",
+                        "조문번호": "1",
+                        "조문가지번호": "0",
+                        "조문제목": "목적",
+                        "조문내용": f"제1조({target['name']} 목적) 테스트 조문",
+                        "조문시행일자": "20260719",
+                    }
+                },
+            }
+        }
+        data = canonical_json_bytes(payload)
+        digest = hashlib.sha256(data).hexdigest()
         current = f"law_current_{target['law_id']}.json"
         effective = f"law_effective_{target['law_id']}_{index}.json"
         (tmp_path / current).write_bytes(data)
         (tmp_path / effective).write_bytes(data)
+        rows = parse_articles(payload, build_meta(payload, str(index)))
         laws.append(
             {
                 "law_id": target["law_id"],
@@ -43,8 +66,8 @@ def _manifest(tmp_path):
                 "effective_source_uri": (
                     f"https://www.law.go.kr/DRF/lawService.do?target=law&MST={index}"
                 ),
-                "article_count": 1,
-                "article_content_set_sha256": "a" * 64,
+                "article_count": sum(1 + len(row.get("children", [])) for row in rows),
+                "article_content_set_sha256": article_content_set_sha256(rows),
             }
         )
     return {
@@ -97,3 +120,18 @@ def test_manifest_rejects_credential_bearing_source_uri(tmp_path) -> None:
 
     with pytest.raises(ValueError):
         LawSourceManifest.model_validate(payload)
+
+
+def test_asset_semantic_tamper_is_detected_even_when_hash_is_recomputed(tmp_path) -> None:
+    payload = _manifest(tmp_path)
+    asset = payload["laws"][0]
+    path = tmp_path / asset["effective_file"]
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["법령"]["기본정보"]["법령ID"] = "999999"
+    tampered = canonical_json_bytes(document)
+    path.write_bytes(tampered)
+    asset["effective_sha256"] = hashlib.sha256(tampered).hexdigest()
+    (tmp_path / "source-manifest.json").write_bytes(canonical_json_bytes(payload))
+
+    with pytest.raises(SourceManifestError, match="SOURCE_ASSET_SEMANTIC_MISMATCH"):
+        load_verified_source_manifest(tmp_path)

@@ -8,11 +8,11 @@ import re
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Literal
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from src.ingest.laws import TARGET_LAWS
+from src.ingest.laws import TARGET_LAWS, build_meta, parse_articles
 
 SHA256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 LAW_ID = Annotated[str, Field(pattern=r"^[0-9]{6}$")]
@@ -56,7 +56,17 @@ class LawSourceAsset(_StrictModel):
                 or "\x00" in filename
             ):
                 raise ValueError("source asset path must be a plain relative filename")
-        for uri in (self.current_source_uri, self.effective_source_uri):
+        expected_sources = (
+            (
+                self.current_source_uri,
+                {"target": ["law"], "ID": [self.law_id]},
+            ),
+            (
+                self.effective_source_uri,
+                {"target": ["law"], "MST": [self.effective_mst]},
+            ),
+        )
+        for uri, expected_query in expected_sources:
             parsed = urlsplit(uri)
             if (
                 parsed.scheme != "https"
@@ -65,8 +75,18 @@ class LawSourceAsset(_StrictModel):
                 or parsed.path != "/DRF/lawService.do"
                 or parsed.fragment
                 or "OC=" in parsed.query.upper()
+                or parse_qs(
+                    parsed.query,
+                    keep_blank_values=True,
+                    strict_parsing=True,
+                )
+                != expected_query
             ):
                 raise ValueError("source URI must identify the official credential-free endpoint")
+        if self.current_file != f"law_current_{self.law_id}.json":
+            raise ValueError("current source filename does not match the law identity")
+        if self.effective_file != f"law_effective_{self.law_id}_{self.effective_mst}.json":
+            raise ValueError("effective source filename does not match the law identity")
         return self
 
 
@@ -183,6 +203,7 @@ def load_verified_source_manifest(
         raise SourceManifestError("SOURCE_MANIFEST_INVALID") from None
 
     for asset in manifest.laws:
+        decoded_documents: dict[str, dict[str, Any]] = {}
         for filename, expected_hash in (
             (asset.current_file, asset.current_sha256),
             (asset.effective_file, asset.effective_sha256),
@@ -198,6 +219,46 @@ def load_verified_source_manifest(
                 raise SourceManifestError("SOURCE_ASSET_JSON_INVALID") from None
             if not isinstance(document, dict):
                 raise SourceManifestError("SOURCE_ASSET_JSON_INVALID")
+            decoded_documents[filename] = document
+
+        try:
+            current_meta = build_meta(
+                decoded_documents[asset.current_file],
+                asset.current_mst,
+            )
+            effective_meta = build_meta(
+                decoded_documents[asset.effective_file],
+                asset.effective_mst,
+            )
+            effective_rows = parse_articles(
+                decoded_documents[asset.effective_file],
+                effective_meta,
+            )
+            expected_effective_date = datetime.strptime(
+                asset.effective_date,
+                "%Y-%m-%d",
+            ).date()
+            observed_effective_date = datetime.strptime(
+                effective_meta["enforcement_date"],
+                "%Y%m%d",
+            ).date()
+            observed_article_count = sum(
+                1 + len(row.get("children", [])) for row in effective_rows
+            )
+        except (KeyError, TypeError, ValueError):
+            raise SourceManifestError("SOURCE_ASSET_SEMANTIC_MISMATCH") from None
+
+        if (
+            current_meta["law_id"] != asset.law_id
+            or current_meta["law_name"] != asset.law_name
+            or effective_meta["law_id"] != asset.law_id
+            or effective_meta["law_name"] != asset.law_name
+            or observed_effective_date > expected_effective_date
+            or observed_article_count != asset.article_count
+            or article_content_set_sha256(effective_rows)
+            != asset.article_content_set_sha256
+        ):
+            raise SourceManifestError("SOURCE_ASSET_SEMANTIC_MISMATCH")
 
     return manifest, hashlib.sha256(manifest_bytes).hexdigest()
 
