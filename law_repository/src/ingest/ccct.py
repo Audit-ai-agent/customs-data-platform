@@ -26,13 +26,16 @@ reqApreIttCd/Nm(요건승인기관), reqCfrmIstmNm(요건확인서류명), bfhnA
 
 실행: law_repository/ 에서  python -m src.ingest.ccct [--sweep-only|--load-only] [--limit N]
 """
+
 from __future__ import annotations
 
 import json
 import hashlib
+import random
 import re
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date
@@ -53,12 +56,26 @@ PROGRESS = Path(__file__).resolve().parents[2] / "data" / "ccct_progress.jsonl"
 TRADE_TYPES = {"1": "수출", "2": "수입"}
 WIRE_TRADE_TYPES = {"1": "export", "2": "import"}
 WORKERS = 8
+MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+CONNECT_TIMEOUT_SECONDS = 10
+READ_TIMEOUT_SECONDS = 30
 
 _QUOTA_CODES = {"22", "23"}  # 일일 트래픽 초과 / 초당 요청 제한
+_session = requests.Session()
+_session.headers.update({"User-Agent": "customs-data-platform/ccct-collector"})
+_session.trust_env = False
 
 
 class QuotaExceeded(RuntimeError):
     pass
+
+
+class CcctApiError(RuntimeError):
+    """Content-free official API failure safe for logs and artifacts."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
 
 
 def _clean(value: object) -> str:
@@ -96,8 +113,14 @@ def document_code(name: str) -> str:
 
 
 def canonical_requirement_id(
-    *, hsk10: str, trade_type: str, law_code: str, agency_code: str,
-    document_name: str, valid_from: str | None, valid_to: str | None,
+    *,
+    hsk10: str,
+    trade_type: str,
+    law_code: str,
+    agency_code: str,
+    document_name: str,
+    valid_from: str | None,
+    valid_to: str | None,
     rtm_tpcd: str,
 ) -> str:
     """스냅샷이 바뀌어도 같은 요건을 가리키는 안정 ID."""
@@ -154,14 +177,16 @@ def build_dataset(records=None) -> CcctDataset:
             raise ValueError(f"CCCT items는 list여야 함: {query_key}")
         uri = source_uri(hsk10, tpcd)
         raw_response = {"hs": rec.get("hs"), "tpcd": rec.get("tpcd"), "items": items}
-        queries.append({
-            "hsk10": hsk10,
-            "trade_type": trade_type,
-            "source_uri": uri,
-            "item_count": len(items),
-            "query_hash": _sha256(raw_response),
-            "raw_response": raw_response,
-        })
+        queries.append(
+            {
+                "hsk10": hsk10,
+                "trade_type": trade_type,
+                "source_uri": uri,
+                "item_count": len(items),
+                "query_hash": _sha256(raw_response),
+                "raw_response": raw_response,
+            }
+        )
 
         for item_index, raw_item in enumerate(items):
             if not isinstance(raw_item, dict):
@@ -223,16 +248,18 @@ def build_dataset(records=None) -> CcctDataset:
                 "source_item_index": item_index,
                 "raw_record_hash": raw_hash,
             }
-            source_records.append({
-                "source_record_id": f"ccct_src_{_sha256(src_key)}",
-                "requirement_id": req_id,
-                "hsk10": hsk10,
-                "trade_type": trade_type,
-                "source_item_index": item_index,
-                "source_uri": uri,
-                "raw_record_hash": raw_hash,
-                "raw_record": raw_item,
-            })
+            source_records.append(
+                {
+                    "source_record_id": f"ccct_src_{_sha256(src_key)}",
+                    "requirement_id": req_id,
+                    "hsk10": hsk10,
+                    "trade_type": trade_type,
+                    "source_item_index": item_index,
+                    "source_uri": uri,
+                    "raw_record_hash": raw_hash,
+                    "raw_record": raw_item,
+                }
+            )
 
     # 스냅샷은 조회 커버리지(빈 응답 포함)와 모든 raw row의 집합으로 결정.
     manifest = {
@@ -252,46 +279,82 @@ def build_dataset(records=None) -> CcctDataset:
 
 # ---------------------------------------------------------------- sweep
 
-def _query(hs: str, tpcd: str, retries: int = 4) -> list[dict]:
-    import time
 
+def _query(hs: str, tpcd: str, retries: int = 4) -> list[dict]:
+    credential = settings.data_go_kr_service_key.strip()
+    if not credential or credential.casefold() in {"test", "change_me", "your_service_key_here"}:
+        raise CcctApiError("CCCT_API_CREDENTIAL_UNAVAILABLE")
+    if not re.fullmatch(r"\d{10}", hs) or tpcd not in TRADE_TYPES:
+        raise CcctApiError("CCCT_API_QUERY_INVALID")
     for attempt in range(retries + 1):
+        response: requests.Response | None = None
         try:
-            r = requests.get(
+            response = _session.get(
                 URL,
-                params={"serviceKey": settings.data_go_kr_service_key,
-                        "hsSgn": hs, "imexTpcd": tpcd},
-                timeout=30,
+                params={"serviceKey": credential, "hsSgn": hs, "imexTpcd": tpcd},
+                timeout=(CONNECT_TIMEOUT_SECONDS, READ_TIMEOUT_SECONDS),
+                allow_redirects=False,
+                stream=True,
             )
-            r.raise_for_status()
+            status = int(response.status_code)
+            if 300 <= status < 400:
+                response.close()
+                raise CcctApiError("CCCT_API_REDIRECT_REJECTED")
+            if status == 429:
+                response.close()
+                raise QuotaExceeded("CCCT_API_QUOTA_EXCEEDED")
+            if status < 200 or status >= 300:
+                response.close()
+                if status >= 500 and attempt < retries:
+                    time.sleep(1.5 * (attempt + 1) + random.SystemRandom().uniform(0, 0.25))
+                    continue
+                raise CcctApiError("CCCT_API_REQUEST_REJECTED")
+
+            raw_length = response.headers.get("Content-Length")
+            if raw_length:
+                try:
+                    if int(raw_length) > MAX_RESPONSE_BYTES:
+                        response.close()
+                        raise CcctApiError("CCCT_API_RESPONSE_TOO_LARGE")
+                except ValueError:
+                    response.close()
+                    raise CcctApiError("CCCT_API_INVALID_CONTENT_LENGTH") from None
+            body = bytearray()
+            for chunk in response.iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    continue
+                body.extend(chunk)
+                if len(body) > MAX_RESPONSE_BYTES:
+                    response.close()
+                    raise CcctApiError("CCCT_API_RESPONSE_TOO_LARGE")
+            response.close()
             break
-        except requests.HTTPError as e:
-            # 429 = 일일 쿼터 소진 (실측: XML 이 아니라 HTTP 429 로 옴) — 즉시 중단
-            if e.response is not None and e.response.status_code == 429:
-                raise QuotaExceeded("HTTP 429 — 일일 트래픽 소진, 내일 재실행") from e
-            if attempt == retries:
-                raise
-            time.sleep(1.5 * (attempt + 1))  # 502 등 일시 장애 백오프
+        except (CcctApiError, QuotaExceeded):
+            raise
         except (requests.ConnectionError, requests.Timeout):
+            if response is not None:
+                response.close()
             if attempt == retries:
-                raise
-            time.sleep(1.5 * (attempt + 1))
-    parsed = xmltodict.parse(r.text)
+                raise CcctApiError("CCCT_API_TRANSPORT_FAILURE") from None
+            time.sleep(1.5 * (attempt + 1) + random.SystemRandom().uniform(0, 0.25))
+    try:
+        parsed = xmltodict.parse(bytes(body), disable_entities=True)
+    except Exception:
+        raise CcctApiError("CCCT_API_INVALID_XML") from None
     # 쿼터 초과 등 게이트웨이 오류는 <response> 가 아니라 OpenAPI_ServiceResponse 로 옴
     gw = parsed.get("OpenAPI_ServiceResponse")
     if gw:
         hdr = gw.get("cmmMsgHeader") or {}
         reason = (hdr.get("returnReasonCode") or "").strip()
-        msg = hdr.get("returnAuthMsg") or hdr.get("errMsg") or reason
         if reason in _QUOTA_CODES:
-            raise QuotaExceeded(msg)
-        raise RuntimeError(f"hsSgn={hs} tpcd={tpcd}: gateway {msg}")
+            raise QuotaExceeded("CCCT_API_QUOTA_EXCEEDED")
+        raise CcctApiError("CCCT_API_GATEWAY_REJECTED")
     d = parsed.get("response") or {}
     code = ((d.get("header") or {}).get("resultCode") or "").strip()
     if code in _QUOTA_CODES:
-        raise QuotaExceeded((d.get("header") or {}).get("resultMsg", code))
+        raise QuotaExceeded("CCCT_API_QUOTA_EXCEEDED")
     if code != "00":
-        raise RuntimeError(f"hsSgn={hs} tpcd={tpcd}: {d.get('header')}")
+        raise CcctApiError("CCCT_API_RESULT_REJECTED")
     items = as_list(((d.get("body") or {}).get("items") or {}).get("item"))
     return [dict(it) for it in items if it]
 
@@ -309,12 +372,7 @@ def sweep(limit: int | None = None) -> None:
     """전수조사. 결과(빈 것 포함)를 PROGRESS 에 append — 재실행 시 완료분 skip."""
     done = {(rec["hs"], rec["tpcd"]) for rec in _iter_progress()}
 
-    todo = [
-        (hs, tpcd)
-        for hs in leaf_codes()
-        for tpcd in TRADE_TYPES
-        if (hs, tpcd) not in done
-    ]
+    todo = [(hs, tpcd) for hs in leaf_codes() for tpcd in TRADE_TYPES if (hs, tpcd) not in done]
     if limit:
         todo = todo[:limit]
     print(f"[sweep] 완료 {len(done)} / 남음 {len(todo)} (workers={WORKERS})")
@@ -350,8 +408,10 @@ def sweep(limit: int | None = None) -> None:
                     continue
                 (hs, tpcd), items = res
                 with lock:
-                    out.write(json.dumps({"hs": hs, "tpcd": tpcd, "items": items},
-                                         ensure_ascii=False) + "\n")
+                    out.write(
+                        json.dumps({"hs": hs, "tpcd": tpcd, "items": items}, ensure_ascii=False)
+                        + "\n"
+                    )
                     out.flush()
                     n_done += 1
                     n_hit += bool(items)
@@ -406,6 +466,7 @@ def _iter_progress():
 
 def persist_postgres(dataset: CcctDataset) -> None:
     """스냅샷을 하나의 PG 트랜잭션으로 적재하고 현행으로 승격."""
+
     def batches(rows, size: int = 1000):
         rows = list(rows)
         for start in range(0, len(rows), size):
@@ -430,8 +491,13 @@ def persist_postgres(dataset: CcctDataset) -> None:
               source_uri=EXCLUDED.source_uri,
               is_current=false
             """,
-            (dataset.snapshot_id, dataset.content_hash, len(dataset.queries),
-             len(dataset.source_records), URL),
+            (
+                dataset.snapshot_id,
+                dataset.content_hash,
+                len(dataset.queries),
+                len(dataset.source_records),
+                URL,
+            ),
         )
         for batch in batches(dataset.documents):
             cur.execute(
@@ -528,16 +594,24 @@ def project_neo4j(dataset: CcctDataset) -> None:
     try:
         with drv.session() as s:
             s.run("CREATE CONSTRAINT law_code IF NOT EXISTS FOR (n:Law) REQUIRE n.code IS UNIQUE")
-            s.run("CREATE CONSTRAINT agency_code IF NOT EXISTS FOR (n:Agency) REQUIRE n.code IS UNIQUE")
-            s.run("CREATE CONSTRAINT requirement_id IF NOT EXISTS FOR (n:Requirement) REQUIRE n.id IS UNIQUE")
-            s.run("CREATE CONSTRAINT certificate_code IF NOT EXISTS FOR (n:Certificate) REQUIRE n.code IS UNIQUE")
+            s.run(
+                "CREATE CONSTRAINT agency_code IF NOT EXISTS FOR (n:Agency) REQUIRE n.code IS UNIQUE"
+            )
+            s.run(
+                "CREATE CONSTRAINT requirement_id IF NOT EXISTS FOR (n:Requirement) REQUIRE n.id IS UNIQUE"
+            )
+            s.run(
+                "CREATE CONSTRAINT certificate_code IF NOT EXISTS FOR (n:Certificate) REQUIRE n.code IS UNIQUE"
+            )
             # cleanup + 현행 projection 전체를 단일 tx로 묶어 중간 그래프를 노출하지 않는다.
             tx = s.begin_transaction()
             try:
                 tx.run("MATCH ()-[rel:REQUIRES]->() DELETE rel").consume()
                 tx.run("MATCH (:Law)-[rel:APPROVED_BY]->(:Agency) DELETE rel").consume()
                 tx.run("MATCH (req:Requirement {source_type: 'ccct'}) DETACH DELETE req").consume()
-                tx.run("MATCH (cert:Certificate {source_type: 'ccct'}) DETACH DELETE cert").consume()
+                tx.run(
+                    "MATCH (cert:Certificate {source_type: 'ccct'}) DETACH DELETE cert"
+                ).consume()
                 rows = list(dataset.requirements)
                 for i in range(0, len(rows), 1000):
                     tx.run(
@@ -570,15 +644,21 @@ def verify(drv=None) -> None:
     drv = drv or make_driver()
     try:
         with drv.session() as s:
-            req = s.run("MATCH (n:Requirement {source_type: 'ccct'}) RETURN count(n) AS c").single()["c"]
+            req = s.run(
+                "MATCH (n:Requirement {source_type: 'ccct'}) RETURN count(n) AS c"
+            ).single()["c"]
             laws = s.run("MATCH (n:Law) RETURN count(*) AS c").single()["c"]
             ags = s.run("MATCH (n:Agency) RETURN count(*) AS c").single()["c"]
-            certs = s.run("MATCH (n:Certificate {source_type: 'ccct'}) RETURN count(*) AS c").single()["c"]
+            certs = s.run(
+                "MATCH (n:Certificate {source_type: 'ccct'}) RETURN count(*) AS c"
+            ).single()["c"]
             hsk = s.run(
                 "MATCH (h:HSK)-[:HAS_REQUIREMENT]->(:Requirement {source_type: 'ccct'}) "
                 "RETURN count(DISTINCT h) AS c"
             ).single()["c"]
-            print(f"[verify] Requirement {req} | 확인법령 {laws} | 기관 {ags} | 서류 {certs} | 요건 HSK {hsk}")
+            print(
+                f"[verify] Requirement {req} | 확인법령 {laws} | 기관 {ags} | 서류 {certs} | 요건 HSK {hsk}"
+            )
             sample = s.run(
                 """
                 MATCH (h:HSK)-[:HAS_REQUIREMENT]->(req:Requirement)-[:BASED_ON]->(law:Law),
@@ -590,7 +670,9 @@ def verify(drv=None) -> None:
                 """
             )
             for r in sample:
-                print(f"  {r['hs']}({r['name']}) --{r['tt']}--> {r['law']} / {r['doc']} / {r['agency']}")
+                print(
+                    f"  {r['hs']}({r['name']}) --{r['tt']}--> {r['law']} / {r['doc']} / {r['agency']}"
+                )
     finally:
         if own:
             drv.close()
