@@ -38,18 +38,22 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from src.config import settings as data_store_settings
-from src.evidence import DatabaseEvidenceBackend, ReadinessBackend
+from src.db.postgres import validate_deadline_runtime as validate_postgres_deadline_runtime
+from src.deadline import REQUEST_DEADLINE_STATE_KEY, RequestDeadline
+from src.evidence import ReadinessBackend
 from src.generation_evidence import GenerationEvidenceBackend
+from src.model_runtime import DenseModelSupervisor
+from src.neo4j_runtime import KillableNeo4jQueryExecutor
 from src.production_settings import (
     ProductionSettings,
     RuntimeSecrets,
     apply_runtime_data_store_secrets,
     validate_production_data_store_settings,
+    validate_runtime_deadline_settings,
 )
 from src.provider_identity import (
     ProviderBuildIdentity,
     binding_header_mismatches,
-    load_provider_build_identity,
 )
 from src.runtime_api import (
     BOUND_RUNTIME_LEASE_STATE_KEY,
@@ -58,13 +62,10 @@ from src.runtime_api import (
     RUNTIME_OPENAPI_PATH,
     RUNTIME_READINESS_PATH,
     RUNTIME_RETRIEVE_PATH,
-    ReadyEvidenceBackend,
     RuntimeBackendFactory,
     configure_runtime_v2_application,
 )
 from src.runtime_release import (
-    EvidenceRuntimeReleaseIdentity,
-    GenerationRequestLease,
     RuntimeLeaseLoader,
     RuntimeReleaseLoader,
     runtime_binding_header_mismatches,
@@ -649,7 +650,10 @@ def _bind_runtime_release(scope: Scope, provider_app: FastAPI) -> None:
     """Acquire and bind the sealed generation before receiving request bytes."""
 
     try:
-        lease = provider_app.state.runtime_release_loader.acquire()
+        deadline = scope.setdefault("state", {}).get(REQUEST_DEADLINE_STATE_KEY)
+        if not isinstance(deadline, RequestDeadline):
+            raise RuntimeError("request deadline is unavailable")
+        lease = provider_app.state.runtime_release_loader.acquire(deadline)
     except Exception as exc:
         _LOGGER.error(
             json.dumps(
@@ -736,7 +740,17 @@ class ProductionBoundaryMiddleware:
         admitted = False
         try:
             client_request_id = _client_request_id(scope)
-            scope.setdefault("state", {})["service_request_id"] = request_id
+            request_state = scope.setdefault("state", {})
+            request_state["service_request_id"] = request_id
+            request_state[REQUEST_DEADLINE_STATE_KEY] = RequestDeadline.start(
+                started_at=started,
+                request_timeout_seconds=(self.service_state.settings.request_deadline_seconds),
+                store_timeout_seconds=(self.service_state.settings.store_operation_timeout_seconds),
+                model_timeout_seconds=(self.service_state.settings.model_inference_timeout_seconds),
+                completion_reserve_seconds=(
+                    self.service_state.settings.deadline_completion_reserve_seconds
+                ),
+            )
             _single_header(scope, b"host", required=True)
             if scope.get("query_string", b""):
                 raise _RequestRejected(
@@ -1163,6 +1177,8 @@ def _create_runtime_v2_application(
     runtime_release_loader: RuntimeLeaseLoader,
     backend_factory: RuntimeBackendFactory,
     test_only: bool,
+    model_supervisor: DenseModelSupervisor | None = None,
+    runtime_closeables: tuple[Any, ...] = (),
 ) -> FastAPI:
     """Create the authenticated generation-bound shell without v1 routes."""
 
@@ -1171,26 +1187,48 @@ def _create_runtime_v2_application(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        await state.admission.start()
-        _LOGGER.info(
-            json.dumps(
-                {
-                    "event": "evidence_runtime_v2_started",
-                    "max_concurrency": service_settings.max_concurrency,
-                    "transport_mode": service_settings.transport_mode,
-                },
-                sort_keys=True,
-            )
-        )
+        model_started = False
         try:
+            if model_supervisor is not None:
+                await asyncio.to_thread(model_supervisor.start)
+                model_started = True
+            await state.admission.start()
+            _LOGGER.info(
+                json.dumps(
+                    {
+                        "event": "evidence_runtime_v2_started",
+                        "max_concurrency": service_settings.max_concurrency,
+                        "transport_mode": service_settings.transport_mode,
+                    },
+                    sort_keys=True,
+                )
+            )
             yield
         finally:
-            drained = await state.admission.stop_and_drain(service_settings.shutdown_grace_seconds)
+            cleanup_budget = (
+                (3 * service_settings.store_termination_timeout_seconds)
+                if runtime_closeables
+                else 0.0
+            ) + (
+                (2 * service_settings.model_termination_timeout_seconds)
+                if model_supervisor is not None
+                else 0.0
+            )
+            drain_budget = max(
+                0.0,
+                service_settings.shutdown_grace_seconds - cleanup_budget,
+            )
+            drained = await state.admission.stop_and_drain(drain_budget)
+            for resource in runtime_closeables:
+                await asyncio.to_thread(resource.close)
+            if model_supervisor is not None:
+                await asyncio.to_thread(model_supervisor.close)
             _LOGGER.info(
                 json.dumps(
                     {
                         "drained": drained,
                         "event": "evidence_runtime_v2_stopped",
+                        "model_started": model_started,
                     },
                     sort_keys=True,
                 )
@@ -1206,6 +1244,7 @@ def _create_runtime_v2_application(
     )
     target.state.production_service = state
     target.state.test_only_production_shell = test_only
+    target.state.model_supervisor = model_supervisor
 
     @target.get(RUNTIME_METRICS_PATH, include_in_schema=False)
     async def production_metrics_v2() -> PlainTextResponse:
@@ -1239,12 +1278,34 @@ def create_production_evidence_application(
     selected = service_settings or ProductionSettings()
     apply_runtime_data_store_secrets(selected, data_store_settings)
     validate_production_data_store_settings(selected, data_store_settings)
-    runtime_loader = RuntimeReleaseLoader()
+    validate_runtime_deadline_settings(selected)
+    validate_postgres_deadline_runtime()
+    neo4j_executor = KillableNeo4jQueryExecutor(
+        uri=data_store_settings.neo4j_uri,
+        user=data_store_settings.neo4j_user,
+        password=data_store_settings.neo4j_password,
+        termination_timeout_seconds=selected.store_termination_timeout_seconds,
+    )
+    runtime_loader = RuntimeReleaseLoader(
+        neo4j_query_executor=neo4j_executor,
+    )
+    model_supervisor = DenseModelSupervisor(
+        startup_timeout_seconds=selected.model_startup_timeout_seconds,
+        termination_timeout_seconds=selected.model_termination_timeout_seconds,
+    )
     return _create_runtime_v2_application(
         service_settings=selected,
         runtime_release_loader=runtime_loader,
-        backend_factory=lambda lease: GenerationEvidenceBackend(lease),
+        backend_factory=lambda lease, deadline: GenerationEvidenceBackend(
+            lease,
+            deadline=deadline,
+            dense_encoder=model_supervisor.encode,
+            model_health_check=model_supervisor.assert_ready,
+            neo4j_query_executor=neo4j_executor,
+        ),
         test_only=False,
+        model_supervisor=model_supervisor,
+        runtime_closeables=(neo4j_executor,),
     )
 
 
@@ -1269,6 +1330,7 @@ def create_test_runtime_v2_application(
     service_settings: ProductionSettings,
     runtime_release_loader: RuntimeLeaseLoader,
     backend_factory: RuntimeBackendFactory,
+    runtime_closeables: tuple[Any, ...] = (),
 ) -> FastAPI:
     """Explicit offline v2 conformance shell; production never calls it."""
 
@@ -1277,6 +1339,7 @@ def create_test_runtime_v2_application(
         runtime_release_loader=runtime_release_loader,
         backend_factory=backend_factory,
         test_only=True,
+        runtime_closeables=runtime_closeables,
     )
 
 

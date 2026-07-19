@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from src.config import Settings as DataStoreSettings
 from src.conformance import TestOnlyConformanceEvidenceBackend
+from src.deadline import RequestDeadline
 from src.production import (
     create_production_evidence_application,
     create_test_production_shell_application,
@@ -52,7 +53,10 @@ def _settings(**overrides: Any) -> ProductionSettings:
         "transport_mode": "direct_tls",
         "max_concurrency": 2,
         "request_deadline_seconds": 5,
-        "shutdown_grace_seconds": 5,
+        "store_operation_timeout_seconds": 1,
+        "model_inference_timeout_seconds": 1,
+        "model_termination_timeout_seconds": 1,
+        "shutdown_grace_seconds": 10,
     }
     values.update(overrides)
     return ProductionSettings(_env_file=None, **values)
@@ -246,6 +250,7 @@ def test_real_production_factory_cannot_enable_fixture_from_environment(
 
     safe_values = {
         "postgres_host": "db.internal",
+        "postgres_hostaddr": "192.0.2.10",
         "postgres_password": "runtime-postgres-credential",
         "postgres_sslmode": "verify-full",
         "qdrant_url": "https://qdrant.internal:6333",
@@ -266,8 +271,15 @@ def test_real_production_factory_cannot_enable_fixture_from_environment(
     assert "/internal/rag/v1/retrieve" not in paths
     assert "/internal/rag/v2/retrieve" in paths
     lease = SimpleNamespace(identity=SimpleNamespace())
+    deadline = RequestDeadline.start(
+        started_at=time.monotonic(),
+        request_timeout_seconds=5,
+        store_timeout_seconds=1,
+        model_timeout_seconds=1,
+        completion_reserve_seconds=0.25,
+    )
     assert isinstance(
-        app.state.runtime_backend_factory(lease),
+        app.state.runtime_backend_factory(lease, deadline),
         GenerationEvidenceBackend,
     )
 

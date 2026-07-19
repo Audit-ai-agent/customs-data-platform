@@ -12,19 +12,31 @@ import hashlib
 import math
 import re
 import uuid
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
+from typing import Any, Protocol
 
 from qdrant_client import models
 
 from src.db.neo4j import driver as neo4j_driver
-from src.db.qdrant import BM25_VECTOR, DENSE_VECTOR, client as qdrant_client
+from src.db.qdrant import (
+    BM25_VECTOR,
+    DENSE_VECTOR,
+)
+from src.db.qdrant import (
+    bounded_client as bounded_qdrant_client,
+)
+from src.db.qdrant import (
+    client as qdrant_client,
+)
+from src.deadline import RequestDeadline
 from src.generation import (
     GenerationValidationError,
     StoreAttestation,
     canonical_sha256,
     validate_index_config,
 )
+from src.neo4j_runtime import Neo4jQueryExecutor
 
 ACTIVE_QDRANT_ALIAS = "customs_law_active"
 QDRANT_GENERATION_PREFIX = "customs_law_gen_"
@@ -52,7 +64,10 @@ class ExternalGenerationStore(Protocol):
         index_config: Mapping[str, Any],
     ) -> None: ...
 
-    def current_active_generation(self) -> str | None: ...
+    def current_active_generation(
+        self,
+        deadline: RequestDeadline | None = None,
+    ) -> str | None: ...
 
     def set_active_generation(self, generation_id: str | None) -> None: ...
 
@@ -136,7 +151,14 @@ class QdrantGenerationStore:
             )
         # The hash is validated again for every point during attestation.
 
-    def _active_collection(self, qc: Any) -> str | None:
+    def _active_collection(
+        self,
+        qc: Any,
+        deadline: RequestDeadline | None = None,
+    ) -> str | None:
+        # qdrant-client does not accept a per-call timeout for alias reads.
+        # Runtime callers use a request-scoped client whose global HTTP timeout
+        # is already floored below the absolute deadline.
         response = qc.get_aliases()
         aliases = getattr(response, "aliases", response)
         matches = [
@@ -148,8 +170,19 @@ class QdrantGenerationStore:
             raise GenerationStoreError("Qdrant active alias is ambiguous")
         return matches[0] if matches else None
 
-    def current_active_generation(self) -> str | None:
-        collection = self._active_collection(self._client_factory())
+    def current_active_generation(
+        self,
+        deadline: RequestDeadline | None = None,
+    ) -> str | None:
+        if deadline is not None:
+            with bounded_qdrant_client(
+                deadline,
+                client_factory=self._client_factory,
+            ) as qc:
+                collection = self._active_collection(qc, deadline)
+        else:
+            qc = self._client_factory()
+            collection = self._active_collection(qc)
         if collection is None:
             return None
         if not collection.startswith(QDRANT_GENERATION_PREFIX):
@@ -333,6 +366,13 @@ class QdrantGenerationStore:
                 vectors = getattr(point, "vector", None)
                 dense, sparse_indices, sparse_values = self._vectors(vectors, config)
                 article_pk = payload.get("article_pk")
+                if (
+                    isinstance(article_pk, bool)
+                    or not isinstance(article_pk, int)
+                    or article_pk <= 0
+                    or not isinstance(content_sha256, str)
+                ):
+                    raise GenerationStoreError("Qdrant article identity is invalid")
                 records.append((article_pk, content_sha256))
                 projections.append(
                     {
@@ -390,11 +430,11 @@ class QdrantGenerationStore:
                 if isinstance(sparse_vectors, Mapping)
                 else getattr(sparse_vectors, BM25_VECTOR)
             )
-            distance = getattr(dense, "distance")
-            modifier = getattr(sparse, "modifier")
+            distance = dense.distance
+            modifier = sparse.modifier
             return {
                 "dense_vector_name": DENSE_VECTOR,
-                "dense_vector_size": int(getattr(dense, "size")),
+                "dense_vector_size": int(dense.size),
                 "distance": str(getattr(distance, "value", distance)).lower(),
                 "sparse_vector_name": BM25_VECTOR,
                 "sparse_modifier": str(getattr(modifier, "value", modifier)).lower(),
@@ -452,26 +492,37 @@ class Neo4jGenerationStore:
     def __init__(
         self,
         *,
-        driver_factory: Callable[[], Any] = neo4j_driver,
+        driver_factory: Callable[..., Any] = neo4j_driver,
         store_revision: str,
         database: str | None = None,
+        runtime_query_executor: Neo4jQueryExecutor | None = None,
     ) -> None:
         if not store_revision.strip():
             raise ValueError("store_revision is required")
         self._driver_factory = driver_factory
         self._store_revision = store_revision
         self._database = database
+        self._runtime_query_executor = runtime_query_executor
 
     @contextmanager
-    def _driver(self) -> Iterator[Any]:
-        drv = self._driver_factory()
+    def _driver(self, deadline: RequestDeadline | None = None) -> Iterator[Any]:
+        drv = (
+            self._driver_factory(timeout_seconds=deadline.store_operation_seconds())
+            if deadline is not None
+            else self._driver_factory()
+        )
         try:
             yield drv
         finally:
             drv.close()
 
-    def _session(self, driver: Any) -> Any:
-        return driver.session(database=self._database) if self._database else driver.session()
+    def _session(self, driver: Any, deadline: RequestDeadline | None = None) -> Any:
+        config: dict[str, Any] = {}
+        if self._database:
+            config["database"] = self._database
+        if deadline is not None:
+            config["connection_acquisition_timeout"] = deadline.store_operation_seconds()
+        return driver.session(**config)
 
     def prepare_generation(
         self,
@@ -782,17 +833,22 @@ class Neo4jGenerationStore:
         if result is None or int(result["hsk_count"]) != len(normalized):
             raise GenerationStoreError("Neo4j HSK generation projection failed")
 
-    def current_active_generation(self) -> str | None:
-        with self._driver() as drv, self._session(drv) as session:
-            rows = list(
-                session.run(
-                    """
-                    MATCH (:KnowledgeGenerationPointer {name: 'active'})
-                          -[:POINTS_TO]->(g:KnowledgeGeneration)
-                    RETURN g.generation_id AS generation_id
-                    """
-                )
-            )
+    def current_active_generation(
+        self,
+        deadline: RequestDeadline | None = None,
+    ) -> str | None:
+        query = """
+            MATCH (:KnowledgeGenerationPointer {name: 'active'})
+                  -[:POINTS_TO]->(g:KnowledgeGeneration)
+            RETURN g.generation_id AS generation_id
+            """
+        if deadline is not None:
+            if self._runtime_query_executor is None:
+                raise GenerationStoreError("bounded Neo4j runtime executor is not configured")
+            rows = self._runtime_query_executor.run(query, {}, deadline)
+        else:
+            with self._driver() as drv, self._session(drv) as session:
+                rows = list(session.run(query))
         if len(rows) > 1:
             raise GenerationStoreError("Neo4j active generation pointer is ambiguous")
         return _validate_generation_id(rows[0]["generation_id"]) if rows else None

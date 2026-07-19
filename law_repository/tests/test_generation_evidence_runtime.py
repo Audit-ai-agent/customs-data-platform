@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from datetime import date
 from types import SimpleNamespace
 from typing import Any
 
 from src.db.qdrant import BM25_VECTOR, DENSE_VECTOR
+from src.deadline import RequestDeadline
 from src.generation_evidence import GenerationEvidenceBackend
 from src.generation_evidence import GenerationEvidenceError
 from src.runtime_release import (
@@ -43,6 +45,16 @@ def _lease() -> GenerationRequestLease:
     )
 
 
+def _deadline() -> RequestDeadline:
+    return RequestDeadline.start(
+        started_at=time.monotonic(),
+        request_timeout_seconds=30,
+        store_timeout_seconds=5,
+        model_timeout_seconds=5,
+        completion_reserve_seconds=0.25,
+    )
+
+
 class FakeQdrant:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -75,33 +87,15 @@ class FakeQdrantHit(FakeQdrant):
         )
 
 
-class FakeSession:
+class FakeNeo4jExecutor:
     def __init__(self) -> None:
         self.query = ""
         self.params: dict[str, Any] = {}
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_args):
-        return None
-
-    def run(self, query: str, **params):
+    def run(self, query: str, params: dict[str, Any], _deadline: RequestDeadline):
         self.query = query
-        self.params = params
+        self.params = dict(params)
         return [{"code": "0303540000", "content_sha256": "a" * 64}]
-
-
-class FakeDriver:
-    def __init__(self) -> None:
-        self.fake_session = FakeSession()
-        self.closed = False
-
-    def session(self):
-        return self.fake_session
-
-    def close(self) -> None:
-        self.closed = True
 
 
 class FakeMembershipCursor:
@@ -175,8 +169,9 @@ def test_qdrant_queries_exact_generation_collection_and_filter() -> None:
     qdrant = FakeQdrant()
     backend = GenerationEvidenceBackend(
         _lease(),
-        qdrant_factory=lambda: qdrant,
-        dense_encoder=lambda _texts: [[0.1, 0.2]],
+        deadline=_deadline(),
+        qdrant_factory=lambda **_kwargs: qdrant,
+        dense_encoder=lambda _texts, _deadline: [[0.1, 0.2]],
         sparse_encoder=lambda _text: ([1], [1.0]),
     )
 
@@ -191,11 +186,12 @@ def test_qdrant_queries_exact_generation_collection_and_filter() -> None:
 
 
 def test_hsk_resolution_requires_generation_and_snapshot_projection() -> None:
-    driver = FakeDriver()
+    executor = FakeNeo4jExecutor()
     backend = GenerationEvidenceBackend(
         _lease(),
-        neo4j_factory=lambda: driver,
-        connection_factory=FakeMembershipConnection,
+        deadline=_deadline(),
+        neo4j_query_executor=executor,
+        connection_factory=lambda _deadline: FakeMembershipConnection(),
     )
     backend._dataset = lambda _dataset_id: SimpleNamespace(snapshot_id="hsk-2026-01-01")  # type: ignore[method-assign]
 
@@ -203,24 +199,24 @@ def test_hsk_resolution_requires_generation_and_snapshot_projection() -> None:
 
     assert resolution.status == "exact"
     assert resolution.resolved_hsk10 == "0303540000"
-    assert "GenerationHSK" in driver.fake_session.query
-    assert "CONTAINS_HSK" in driver.fake_session.query
-    assert "generation_id" in driver.fake_session.query
-    assert driver.fake_session.params["generation_id"] == "7" * 64
-    assert driver.fake_session.params["hsk_snapshot_id"] == "hsk-2026-01-01"
+    assert "GenerationHSK" in executor.query
+    assert "CONTAINS_HSK" in executor.query
+    assert "generation_id" in executor.query
+    assert executor.params["generation_id"] == "7" * 64
+    assert executor.params["hsk_snapshot_id"] == "hsk-2026-01-01"
     assert (
-        driver.fake_session.params["source_manifest_sha256"]
+        executor.params["source_manifest_sha256"]
         == backend.identity.knowledge_source_manifest_sha256
     )
-    assert driver.closed is True
 
 
 def test_qdrant_hit_identity_must_match_postgres_generation_row() -> None:
     backend = GenerationEvidenceBackend(
         _lease(),
-        qdrant_factory=FakeQdrantHit,
-        connection_factory=FakeArticleConnection,
-        dense_encoder=lambda _texts: [[0.1, 0.2]],
+        deadline=_deadline(),
+        qdrant_factory=lambda **_kwargs: FakeQdrantHit(),
+        connection_factory=lambda _deadline: FakeArticleConnection(),
+        dense_encoder=lambda _texts, _deadline: [[0.1, 0.2]],
         sparse_encoder=lambda _text: ([1], [1.0]),
     )
     backend._graph_related = lambda _seeds: {}  # type: ignore[method-assign]

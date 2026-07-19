@@ -10,20 +10,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, Callable, Mapping, Protocol
+from typing import Annotated, Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from typing_extensions import Annotated, Literal
 
 from src.db.postgres import connect
+from src.deadline import RequestDeadline
 from src.generation import GenerationValidationError, SourceManifest
 from src.generation_runtime import (
     ActiveGenerationError,
     ActiveGenerationLoader,
 )
 from src.generation_stores import Neo4jGenerationStore, QdrantGenerationStore
+from src.neo4j_runtime import Neo4jQueryExecutor
 from src.provider_identity import (
     HEADER_PROVIDER_BUILD_SHA256,
     HEADER_PROVIDER_RELEASE,
@@ -128,17 +130,32 @@ class GenerationReleaseMetadata:
 
 
 class GenerationMetadataLoader(Protocol):
-    def load(self, generation_id: str) -> GenerationReleaseMetadata: ...
+    def load(
+        self,
+        generation_id: str,
+        deadline: RequestDeadline | None = None,
+    ) -> GenerationReleaseMetadata: ...
+
+
+def _deadline_connection(deadline: RequestDeadline | None = None):
+    return connect(deadline=deadline)
 
 
 class PostgresGenerationMetadataLoader:
     """Read the CCCT/HSK generation metadata from the PostgreSQL authority."""
 
-    def __init__(self, connection_factory: Callable[[], Any] = connect) -> None:
+    def __init__(
+        self,
+        connection_factory: Callable[[RequestDeadline | None], Any] = _deadline_connection,
+    ) -> None:
         self._connection_factory = connection_factory
 
-    def load(self, generation_id: str) -> GenerationReleaseMetadata:
-        with self._connection_factory() as connection, connection.cursor() as cur:
+    def load(
+        self,
+        generation_id: str,
+        deadline: RequestDeadline | None = None,
+    ) -> GenerationReleaseMetadata:
+        with self._connection_factory(deadline) as connection, connection.cursor() as cur:
             cur.execute(
                 """
                 SELECT source_manifest, source_manifest_sha256
@@ -205,18 +222,27 @@ class GenerationRequestLease:
 
 
 class RuntimeLeaseLoader(Protocol):
-    def acquire(self) -> GenerationRequestLease: ...
+    def acquire(self, deadline: RequestDeadline | None = None) -> GenerationRequestLease: ...
 
-    def assert_unchanged(self, lease: GenerationRequestLease) -> None: ...
+    def assert_unchanged(
+        self,
+        lease: GenerationRequestLease,
+        deadline: RequestDeadline | None = None,
+    ) -> None: ...
 
 
-def _production_active_loader() -> ActiveGenerationLoader:
+def _production_active_loader(
+    neo4j_query_executor: Neo4jQueryExecutor | None = None,
+) -> ActiveGenerationLoader:
     # External aliases/pointers are mandatory in production.  The revision
     # label is unused for read-only pointer checks but remains explicit.
     return ActiveGenerationLoader(
         external_stores=(
             QdrantGenerationStore(store_revision="runtime-v2-read"),
-            Neo4jGenerationStore(store_revision="runtime-v2-read"),
+            Neo4jGenerationStore(
+                store_revision="runtime-v2-read",
+                runtime_query_executor=neo4j_query_executor,
+            ),
         )
     )
 
@@ -232,16 +258,29 @@ class RuntimeReleaseLoader:
         ),
         active_generation_loader: ActiveGenerationLoader | None = None,
         metadata_loader: GenerationMetadataLoader | None = None,
+        neo4j_query_executor: Neo4jQueryExecutor | None = None,
     ) -> None:
         self._provider_loader = provider_loader
-        self._active_loader = active_generation_loader or _production_active_loader()
+        self._active_loader = active_generation_loader or _production_active_loader(
+            neo4j_query_executor,
+        )
         self._metadata_loader = metadata_loader or PostgresGenerationMetadataLoader()
 
-    def acquire(self) -> GenerationRequestLease:
+    def acquire(self, deadline: RequestDeadline | None = None) -> GenerationRequestLease:
         try:
             provider = self._provider_loader()
-            active = self._active_loader.load()
-            metadata = self._metadata_loader.load(active.generation_id)
+            if deadline is not None:
+                deadline.assert_work_allowed()
+            active = (
+                self._active_loader.load(deadline)
+                if deadline is not None
+                else self._active_loader.load()
+            )
+            metadata = (
+                self._metadata_loader.load(active.generation_id, deadline)
+                if deadline is not None
+                else self._metadata_loader.load(active.generation_id)
+            )
         except (ActiveGenerationError, RuntimeReleaseError):
             raise
         except Exception as exc:
@@ -281,8 +320,12 @@ class RuntimeReleaseLoader:
             generation_changed_at=active.changed_at,
         )
 
-    def assert_unchanged(self, lease: GenerationRequestLease) -> None:
-        current = self.acquire()
+    def assert_unchanged(
+        self,
+        lease: GenerationRequestLease,
+        deadline: RequestDeadline | None = None,
+    ) -> None:
+        current = self.acquire(deadline)
         if current.token != lease.token or current.identity != lease.identity:
             raise RuntimeReleaseError("runtime release changed during request")
 

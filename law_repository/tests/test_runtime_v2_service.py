@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 from datetime import date
 from typing import Any
 
@@ -10,6 +11,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.conformance import TestOnlyConformanceEvidenceBackend
+from src.deadline import RequestDeadline
+from src.neo4j_runtime import KillableNeo4jQueryExecutor
 from src.production import create_test_runtime_v2_application
 from src.production_settings import ProductionSettings
 from src.runtime_api import (
@@ -76,13 +79,20 @@ class FakeRuntimeLoader:
         self.acquire_calls = 0
         self.assert_calls = 0
 
-    def acquire(self) -> GenerationRequestLease:
+    def acquire(
+        self,
+        _deadline: RequestDeadline | None = None,
+    ) -> GenerationRequestLease:
         self.acquire_calls += 1
         if self.fail_acquire is not None:
             raise self.fail_acquire
         return self.current
 
-    def assert_unchanged(self, lease: GenerationRequestLease) -> None:
+    def assert_unchanged(
+        self,
+        lease: GenerationRequestLease,
+        _deadline: RequestDeadline | None = None,
+    ) -> None:
         self.assert_calls += 1
         if self.fail_postcheck is not None:
             raise self.fail_postcheck
@@ -134,6 +144,9 @@ def _settings(**overrides: Any) -> ProductionSettings:
         "transport_mode": "direct_tls",
         "max_concurrency": 2,
         "request_deadline_seconds": 5,
+        "store_operation_timeout_seconds": 1,
+        "model_inference_timeout_seconds": 1,
+        "model_termination_timeout_seconds": 1,
         "shutdown_grace_seconds": 5,
     }
     values.update(overrides)
@@ -189,7 +202,7 @@ def _app(
     return create_test_runtime_v2_application(
         service_settings=settings or _settings(),
         runtime_release_loader=selected_loader,
-        backend_factory=lambda _lease: selected_backend,
+        backend_factory=lambda _lease, _deadline: selected_backend,
     )
 
 
@@ -242,6 +255,51 @@ def test_v2_retrieval_preserves_v1_body_and_returns_all_eight_headers() -> None:
     }
     for name, expected in loader.current.identity.binding_headers().items():
         assert response.headers[name] == expected
+
+
+class _DeadlineRecordingLoader(FakeRuntimeLoader):
+    def __init__(self) -> None:
+        super().__init__()
+        self.deadlines: list[RequestDeadline] = []
+
+    def acquire(
+        self,
+        deadline: RequestDeadline | None = None,
+    ) -> GenerationRequestLease:
+        assert isinstance(deadline, RequestDeadline)
+        self.deadlines.append(deadline)
+        return super().acquire(deadline)
+
+    def assert_unchanged(
+        self,
+        lease: GenerationRequestLease,
+        deadline: RequestDeadline | None = None,
+    ) -> None:
+        assert isinstance(deadline, RequestDeadline)
+        self.deadlines.append(deadline)
+        super().assert_unchanged(lease, deadline)
+
+
+def test_preflight_backend_and_postcheck_share_exact_deadline_object() -> None:
+    loader = _DeadlineRecordingLoader()
+    backend_deadlines: list[RequestDeadline] = []
+    app = create_test_runtime_v2_application(
+        service_settings=_settings(),
+        runtime_release_loader=loader,
+        backend_factory=lambda _lease, deadline: (
+            backend_deadlines.append(deadline) or ReadyConformanceBackend()
+        ),
+    )
+    with TestClient(app, base_url="https://evidence.internal") as client:
+        response = client.post(
+            RUNTIME_RETRIEVE_PATH,
+            content=json.dumps(_body()).encode(),
+            headers=_headers(),
+        )
+    assert response.status_code == 200
+    assert len(loader.deadlines) == 2
+    assert len(backend_deadlines) == 1
+    assert loader.deadlines[0] is backend_deadlines[0] is loader.deadlines[1]
 
 
 @pytest.mark.parametrize(
@@ -351,7 +409,10 @@ class BlockingPreflightLoader(FakeRuntimeLoader):
         self.started = threading.Event()
         self.release = threading.Event()
 
-    def acquire(self) -> GenerationRequestLease:
+    def acquire(
+        self,
+        _deadline: RequestDeadline | None = None,
+    ) -> GenerationRequestLease:
         self.acquire_calls += 1
         self.started.set()
         assert self.release.wait(timeout=5)
@@ -451,6 +512,132 @@ def test_slow_body_is_deadline_bounded_and_releases_admission() -> None:
     assert _status(timed_out) == 408
     assert _json(timed_out)["error"]["code"] == "REQUEST_BODY_TIMEOUT"
     assert _status(recovered) == 200
+
+
+def _runtime_neo4j_hang_worker(**_kwargs: Any) -> None:
+    while True:
+        time.sleep(1)
+
+
+class _Neo4jDeadlineBackend(ReadyConformanceBackend):
+    def __init__(
+        self,
+        executor: KillableNeo4jQueryExecutor,
+        deadline: RequestDeadline,
+    ) -> None:
+        super().__init__()
+        self.executor = executor
+        self.deadline = deadline
+
+    def validate_ready(self) -> None:
+        self.executor.run("RETURN 1", {}, self.deadline)
+
+
+def _deadline_executor() -> KillableNeo4jQueryExecutor:
+    return KillableNeo4jQueryExecutor(
+        uri="bolt://127.0.0.1:7687",
+        user="test",
+        password="explicit-test-value",
+        termination_timeout_seconds=0.1,
+        worker_target=_runtime_neo4j_hang_worker,
+    )
+
+
+def test_hung_store_is_reaped_before_max_concurrency_slot_recovers() -> None:
+    executor = _deadline_executor()
+    loader = FakeRuntimeLoader()
+    calls = 0
+
+    def backend_factory(_lease, deadline):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _Neo4jDeadlineBackend(executor, deadline)
+        return ReadyConformanceBackend()
+
+    app = create_test_runtime_v2_application(
+        service_settings=_settings(
+            max_concurrency=1,
+            request_deadline_seconds=5,
+            store_operation_timeout_seconds=1,
+        ),
+        runtime_release_loader=loader,
+        backend_factory=backend_factory,
+        runtime_closeables=(executor,),
+    )
+    headers = {"Authorization": f"Bearer {_TOKEN}"}
+    started = time.monotonic()
+    with TestClient(app, base_url="https://evidence.internal") as client:
+        failed_closed = client.get(RUNTIME_READINESS_PATH, headers=headers)
+        recovered = client.get(RUNTIME_READINESS_PATH, headers=headers)
+    elapsed = time.monotonic() - started
+
+    assert failed_closed.status_code == 503
+    assert failed_closed.json()["error"]["code"] == "SERVICE_UNAVAILABLE"
+    assert recovered.status_code == 200
+    assert elapsed < 4
+    assert executor.active_process_count == 0
+    assert app.state.production_service.admission._active == 0
+    assert not app.state.production_service.background_tasks
+
+
+def _wait_for_executor_child(
+    executor: KillableNeo4jQueryExecutor,
+    timeout: float,
+) -> bool:
+    cutoff = time.monotonic() + timeout
+    while time.monotonic() < cutoff:
+        if executor.active_process_count:
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def test_shutdown_kills_hung_store_after_bounded_drain() -> None:
+    executor = _deadline_executor()
+    loader = FakeRuntimeLoader()
+    app = create_test_runtime_v2_application(
+        service_settings=_settings(
+            max_concurrency=1,
+            request_deadline_seconds=10,
+            store_operation_timeout_seconds=5,
+            shutdown_grace_seconds=1,
+        ),
+        runtime_release_loader=loader,
+        backend_factory=lambda _lease, deadline: _Neo4jDeadlineBackend(
+            executor,
+            deadline,
+        ),
+        runtime_closeables=(executor,),
+    )
+
+    async def run():
+        context = app.router.lifespan_context(app)
+        await context.__aenter__()
+        request = asyncio.create_task(
+            _invoke(
+                app,
+                method="GET",
+                path=RUNTIME_READINESS_PATH,
+                raw_headers=[
+                    (b"host", b"evidence.internal"),
+                    (b"authorization", f"Bearer {_TOKEN}".encode()),
+                ],
+            )
+        )
+        assert await asyncio.to_thread(_wait_for_executor_child, executor, 2)
+        started = time.monotonic()
+        await context.__aexit__(None, None, None)
+        shutdown_elapsed = time.monotonic() - started
+        response = await asyncio.wait_for(request, timeout=2)
+        return shutdown_elapsed, response
+
+    shutdown_elapsed, response = asyncio.run(run())
+    assert shutdown_elapsed < 2
+    assert _status(response) == 503
+    assert executor.active_process_count == 0
+    assert app.state.production_service.admission._active == 0
+    assert not app.state.production_service.background_tasks
 
 
 async def _invoke_without_body(

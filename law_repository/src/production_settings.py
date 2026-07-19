@@ -74,7 +74,9 @@ class ProductionSettings(BaseSettings):
     trusted_proxy_cidrs: str = ""
     allow_insecure_loopback_dev: bool = False
 
-    bind_host: str = "0.0.0.0"  # noqa: S104 - ingress-only container listener
+    # The production container is reachable only through the approved ingress
+    # network; transport/auth middleware still rejects an untrusted caller.
+    bind_host: str = "0.0.0.0"  # noqa: S104  # nosec B104
     port: int = Field(default=8010, ge=1, le=65535)
     max_request_body_bytes: int = Field(
         default=1_048_576,
@@ -88,6 +90,12 @@ class ProductionSettings(BaseSettings):
     )
     max_concurrency: int = Field(default=8, ge=1, le=64)
     request_deadline_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
+    store_operation_timeout_seconds: float = Field(default=5.0, ge=1.0, le=60.0)
+    store_termination_timeout_seconds: float = Field(default=1.0, ge=0.1, le=10.0)
+    model_inference_timeout_seconds: float = Field(default=10.0, ge=1.0, le=120.0)
+    deadline_completion_reserve_seconds: float = Field(default=0.25, ge=0.05, le=5.0)
+    model_startup_timeout_seconds: float = Field(default=180.0, ge=1.0, le=600.0)
+    model_termination_timeout_seconds: float = Field(default=2.0, ge=0.1, le=10.0)
     shutdown_grace_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
     retry_after_seconds: int = Field(default=2, ge=1, le=60)
     enable_openapi: bool = False
@@ -95,13 +103,10 @@ class ProductionSettings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_security_boundary(self) -> ProductionSettings:
-        configured = int(self.service_token is not None) + int(
-            self.service_token_file is not None
-        )
+        configured = int(self.service_token is not None) + int(self.service_token_file is not None)
         if configured != 1:
             raise ValueError(
-                "exactly one of EVIDENCE_SERVICE_TOKEN or "
-                "EVIDENCE_SERVICE_TOKEN_FILE is required"
+                "exactly one of EVIDENCE_SERVICE_TOKEN or EVIDENCE_SERVICE_TOKEN_FILE is required"
             )
         if self.service_token_file is not None and not self.service_token_file.is_absolute():
             raise ValueError("EVIDENCE_SERVICE_TOKEN_FILE must be an absolute path")
@@ -120,25 +125,19 @@ class ProductionSettings(BaseSettings):
 
         if self.transport_mode == "loopback_dev":
             if not self.allow_insecure_loopback_dev:
-                raise ValueError(
-                    "loopback_dev requires EVIDENCE_ALLOW_INSECURE_LOOPBACK_DEV=true"
-                )
+                raise ValueError("loopback_dev requires EVIDENCE_ALLOW_INSECURE_LOOPBACK_DEV=true")
             if not _is_loopback_host(self.bind_host):
                 raise ValueError("loopback_dev must bind only to a loopback address")
         elif self.allow_insecure_loopback_dev:
-            raise ValueError(
-                "EVIDENCE_ALLOW_INSECURE_LOOPBACK_DEV is valid only with loopback_dev"
-            )
+            raise ValueError("EVIDENCE_ALLOW_INSECURE_LOOPBACK_DEV is valid only with loopback_dev")
 
         networks = _parse_proxy_networks(self.trusted_proxy_cidrs)
         if self.transport_mode == "trusted_proxy_tls" and not networks:
-            raise ValueError(
-                "trusted_proxy_tls requires one or more EVIDENCE_TRUSTED_PROXY_CIDRS"
-            )
+            raise ValueError("trusted_proxy_tls requires one or more EVIDENCE_TRUSTED_PROXY_CIDRS")
         if self.transport_mode != "trusted_proxy_tls" and networks:
-            raise ValueError(
-                "EVIDENCE_TRUSTED_PROXY_CIDRS is valid only with trusted_proxy_tls"
-            )
+            raise ValueError("EVIDENCE_TRUSTED_PROXY_CIDRS is valid only with trusted_proxy_tls")
+        if self.deadline_completion_reserve_seconds >= self.request_deadline_seconds:
+            raise ValueError("deadline completion reserve must be shorter than request deadline")
         return self
 
     def proxy_networks(
@@ -159,9 +158,7 @@ class ProductionSettings(BaseSettings):
                     )
                 raw = self.service_token_file.read_bytes()
             except OSError as exc:
-                raise ProductionConfigurationError(
-                    "service token file is unavailable"
-                ) from exc
+                raise ProductionConfigurationError("service token file is unavailable") from exc
             if len(raw) > 1_024:
                 raise ProductionConfigurationError("service token file is too large")
             try:
@@ -216,9 +213,9 @@ def _all_data_stores_are_loopback(settings: DataStoreSettings) -> bool:
     neo4j_host = _host_from_url(settings.neo4j_uri)
     return (
         _is_loopback_host(settings.postgres_host)
-        and bool(qdrant_host)
+        and qdrant_host is not None
         and _is_loopback_host(qdrant_host)
-        and bool(neo4j_host)
+        and neo4j_host is not None
         and _is_loopback_host(neo4j_host)
     )
 
@@ -255,6 +252,37 @@ def validate_production_data_store_settings(
         raise ProductionConfigurationError("remote Qdrant requires an API key")
     if urlsplit(data.neo4j_uri).scheme.lower() not in {"bolt+s", "neo4j+s"}:
         raise ProductionConfigurationError("remote Neo4j must use an encrypted URI")
+
+
+def validate_runtime_deadline_settings(service: ProductionSettings) -> None:
+    """Require every blocking dependency cap to finish before the HTTP deadline."""
+
+    usable = service.request_deadline_seconds - service.deadline_completion_reserve_seconds
+    store_worst_case = (
+        service.store_operation_timeout_seconds + 2 * service.store_termination_timeout_seconds
+    )
+    if store_worst_case >= usable:
+        raise ProductionConfigurationError(
+            "store operation and kill bounds must fit inside the request work budget"
+        )
+    model_worst_case = (
+        service.model_inference_timeout_seconds + 2 * service.model_termination_timeout_seconds
+    )
+    if model_worst_case >= usable:
+        raise ProductionConfigurationError(
+            "model inference and kill bounds must fit inside the request work budget"
+        )
+    # Neo4j terminate+kill plus registry coordination and model
+    # terminate+kill run after admission drain.  Their combined upper bound
+    # must fit inside the process shutdown grace.
+    shutdown_cleanup = (
+        3 * service.store_termination_timeout_seconds
+        + 2 * service.model_termination_timeout_seconds
+    )
+    if shutdown_cleanup >= service.shutdown_grace_seconds:
+        raise ProductionConfigurationError(
+            "runtime child termination bounds must fit inside shutdown grace"
+        )
 
 
 def _read_secret_file(path: Path, *, label: str) -> str:

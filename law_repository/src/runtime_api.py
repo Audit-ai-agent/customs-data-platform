@@ -8,6 +8,7 @@ from typing import Any, Protocol
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request, Response
 
+from src.deadline import REQUEST_DEADLINE_STATE_KEY, RequestDeadline
 from src.evidence import EvidenceBackend, RetrieveRequest, RetrieveResponse, retrieve_evidence
 from src.runtime_release import (
     EvidenceRuntimeReadiness,
@@ -28,9 +29,22 @@ class ReadyEvidenceBackend(EvidenceBackend, Protocol):
     def validate_ready(self) -> None: ...
 
 
-RuntimeBackendFactory = Callable[[GenerationRequestLease], ReadyEvidenceBackend]
+RuntimeBackendFactory = Callable[
+    [GenerationRequestLease, RequestDeadline],
+    ReadyEvidenceBackend,
+]
 
 runtime_router = APIRouter()
+
+
+def _request_deadline(request: Request) -> RequestDeadline:
+    deadline: Any = getattr(request.state, REQUEST_DEADLINE_STATE_KEY, None)
+    if isinstance(deadline, RequestDeadline):
+        return deadline
+    raise HTTPException(
+        status_code=503,
+        detail="Evidence request deadline is unavailable",
+    )
 
 
 def _request_lease(request: Request) -> GenerationRequestLease:
@@ -38,7 +52,9 @@ def _request_lease(request: Request) -> GenerationRequestLease:
     if isinstance(bound, GenerationRequestLease):
         return bound
     try:
-        return request.app.state.runtime_release_loader.acquire()
+        return request.app.state.runtime_release_loader.acquire(
+            _request_deadline(request),
+        )
     except Exception as exc:
         print(
             f"[evidence] runtime release unavailable: {type(exc).__name__}",
@@ -60,11 +76,12 @@ def runtime_liveness() -> dict[str, str]:
     response_model=EvidenceRuntimeReadiness,
 )
 def runtime_readiness(request: Request) -> EvidenceRuntimeReadiness:
+    deadline = _request_deadline(request)
     lease = _request_lease(request)
     try:
-        backend = request.app.state.runtime_backend_factory(lease)
+        backend = request.app.state.runtime_backend_factory(lease, deadline)
         backend.validate_ready()
-        request.app.state.runtime_release_loader.assert_unchanged(lease)
+        request.app.state.runtime_release_loader.assert_unchanged(lease, deadline)
     except Exception as exc:
         print(
             f"[evidence] runtime readiness failed: {type(exc).__name__}",
@@ -89,6 +106,7 @@ def runtime_retrieve(
     request: Request,
     response: Response,
 ) -> RetrieveResponse:
+    deadline = _request_deadline(request)
     lease = _request_lease(request)
     if runtime_binding_header_mismatches(request.headers, lease.identity):
         raise HTTPException(
@@ -96,7 +114,7 @@ def runtime_retrieve(
             detail="Evidence runtime release binding does not match",
         )
     try:
-        backend = request.app.state.runtime_backend_factory(lease)
+        backend = request.app.state.runtime_backend_factory(lease, deadline)
         result = retrieve_evidence(payload, backend)
         if (
             result.knowledge_snapshot_id is not None
@@ -105,7 +123,7 @@ def runtime_retrieve(
             raise RuntimeError("retrieval snapshot does not match runtime release")
         # Re-load code + generation identity after all store reads. A changed
         # epoch, seal, generation, provider build, or release discards result.
-        request.app.state.runtime_release_loader.assert_unchanged(lease)
+        request.app.state.runtime_release_loader.assert_unchanged(lease, deadline)
     except Exception as exc:
         print(
             f"[evidence] runtime retrieval failed: {type(exc).__name__}",

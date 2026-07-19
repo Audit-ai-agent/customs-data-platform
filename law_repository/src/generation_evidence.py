@@ -5,20 +5,31 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
 from datetime import date
-from typing import Any
+from typing import Any, Literal, cast
 from urllib.parse import quote
 
 from psycopg.rows import dict_row
 from qdrant_client import models
 
-from src.db.neo4j import driver as make_driver
 from src.db.postgres import connect
-from src.db.qdrant import BM25_VECTOR, DENSE_VECTOR, client as make_qdrant
+from src.db.qdrant import (
+    BM25_VECTOR,
+    DENSE_VECTOR,
+)
+from src.db.qdrant import (
+    bounded_client as bounded_qdrant_client,
+)
+from src.db.qdrant import (
+    client as make_qdrant,
+)
+from src.deadline import RequestDeadline
 from src.embed import bm25
 from src.evidence import LawArticleMatch, RequirementLookup
 from src.generation import GenerationValidationError, SourceManifest, canonical_sha256
 from src.generation_stores import qdrant_collection_name
+from src.neo4j_runtime import Neo4jQueryExecutor
 from src.repository import HskResolution, normalize_hsk, resolve_hsk_candidates
 from src.runtime_release import GenerationRequestLease
 
@@ -27,10 +38,15 @@ class GenerationEvidenceError(RuntimeError):
     """A generation-specific store invariant is unavailable or has drifted."""
 
 
-def _default_dense_encoder(texts: list[str]) -> Any:
-    from src.embed import dense
+def _unconfigured_dense_encoder(
+    _texts: list[str],
+    _deadline: RequestDeadline,
+) -> Any:
+    raise GenerationEvidenceError("bounded dense model runtime is not configured")
 
-    return dense.encode(texts)
+
+def _unconfigured_model_health() -> None:
+    raise GenerationEvidenceError("bounded dense model runtime is not configured")
 
 
 class GenerationEvidenceBackend:
@@ -47,20 +63,57 @@ class GenerationEvidenceBackend:
         self,
         lease: GenerationRequestLease,
         *,
-        connection_factory: Callable[[], Any] = connect,
-        qdrant_factory: Callable[[], Any] = make_qdrant,
-        neo4j_factory: Callable[[], Any] = make_driver,
-        dense_encoder: Callable[[list[str]], Any] = _default_dense_encoder,
+        deadline: RequestDeadline | None = None,
+        connection_factory: Callable[[RequestDeadline | None], Any] | None = None,
+        qdrant_factory: Callable[..., Any] = make_qdrant,
+        neo4j_query_executor: Neo4jQueryExecutor | None = None,
+        dense_encoder: Callable[
+            [list[str], RequestDeadline],
+            Any,
+        ] = _unconfigured_dense_encoder,
+        model_health_check: Callable[[], None] = _unconfigured_model_health,
         sparse_encoder: Callable[[str], tuple[list[int], list[float]]] = (bm25.encode_query),
     ) -> None:
         self.lease = lease
         self.identity = lease.identity
-        self._connection_factory = connection_factory
+        self._deadline = deadline
+        self._connection_factory = connection_factory or (
+            lambda request_deadline: connect(deadline=request_deadline)
+        )
         self._qdrant_factory = qdrant_factory
-        self._neo4j_factory = neo4j_factory
+        self._neo4j_query_executor = neo4j_query_executor
         self._dense_encoder = dense_encoder
+        self._model_health_check = model_health_check
         self._sparse_encoder = sparse_encoder
         self._manifest_cache: SourceManifest | None = None
+
+    def _require_deadline(self) -> RequestDeadline:
+        if self._deadline is None:
+            raise GenerationEvidenceError("production request deadline is unavailable")
+        self._deadline.assert_work_allowed()
+        return self._deadline
+
+    def _connection(self):
+        return self._connection_factory(self._deadline)
+
+    @contextmanager
+    def _qdrant_client(self):
+        deadline = self._require_deadline()
+        with bounded_qdrant_client(
+            deadline,
+            client_factory=self._qdrant_factory,
+        ) as client:
+            yield client
+
+    def _run_neo4j(
+        self,
+        text: str,
+        parameters: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        deadline = self._require_deadline()
+        if self._neo4j_query_executor is None:
+            raise GenerationEvidenceError("bounded Neo4j runtime executor is not configured")
+        return self._neo4j_query_executor.run(text, parameters, deadline)
 
     @property
     def generation_id(self) -> str:
@@ -69,7 +122,7 @@ class GenerationEvidenceBackend:
     def _manifest(self) -> SourceManifest:
         if self._manifest_cache is not None:
             return self._manifest_cache
-        with self._connection_factory() as connection, connection.cursor() as cur:
+        with self._connection() as connection, connection.cursor() as cur:
             cur.execute(
                 """
                 SELECT source_manifest, source_manifest_sha256
@@ -101,7 +154,7 @@ class GenerationEvidenceBackend:
         raise GenerationEvidenceError("generation dataset identity is unavailable")
 
     def _assert_postgres_pointer(self) -> None:
-        with self._connection_factory() as connection, connection.cursor() as cur:
+        with self._connection() as connection, connection.cursor() as cur:
             cur.execute(
                 """
                 SELECT generation_id, epoch
@@ -114,7 +167,7 @@ class GenerationEvidenceBackend:
             raise GenerationEvidenceError("PostgreSQL generation lease changed")
 
     def _store_attestation_counts(self) -> dict[str, int]:
-        with self._connection_factory() as connection, connection.cursor() as cur:
+        with self._connection() as connection, connection.cursor() as cur:
             cur.execute(
                 """
                 SELECT store_name, article_count, model_manifest_sha256
@@ -137,7 +190,7 @@ class GenerationEvidenceBackend:
         return result
 
     def _verify_postgres_laws(self, expected_articles: int) -> None:
-        with self._connection_factory() as connection, connection.cursor() as cur:
+        with self._connection() as connection, connection.cursor() as cur:
             cur.execute(
                 """
                 SELECT count(*), count(DISTINCT law_id)
@@ -189,7 +242,7 @@ class GenerationEvidenceBackend:
         expected_queries = int(ccct.metrics.get("query_count", -1))
         expected_requirements = int(ccct.metrics.get("source_requirement_count", -1))
         expected_documents = int(ccct.metrics.get("document_count", -1))
-        with self._connection_factory() as connection, connection.cursor() as cur:
+        with self._connection() as connection, connection.cursor() as cur:
             cur.execute(
                 """
                 SELECT source_definition, source_definition_sha256
@@ -261,15 +314,28 @@ class GenerationEvidenceBackend:
 
     def _verify_external_stores(self, expected_articles: int) -> None:
         collection = qdrant_collection_name(self.generation_id)
-        qdrant = self._qdrant_factory()
-        if not qdrant.collection_exists(collection):
-            raise GenerationEvidenceError("generation Qdrant collection is unavailable")
-        if int(qdrant.count(collection, exact=True).count) != expected_articles:
-            raise GenerationEvidenceError("generation Qdrant projection is incomplete")
+        deadline = self._require_deadline()
+        with self._qdrant_client() as qdrant:
+            # qdrant-client supports no per-call timeout for
+            # collection_exists; the request-scoped client global timeout is
+            # the hard transport cap.
+            if not qdrant.collection_exists(collection):
+                raise GenerationEvidenceError("generation Qdrant collection is unavailable")
+            if (
+                int(
+                    qdrant.count(
+                        collection,
+                        exact=True,
+                        timeout=deadline.store_operation_whole_seconds(),
+                    ).count
+                )
+                != expected_articles
+            ):
+                raise GenerationEvidenceError("generation Qdrant projection is incomplete")
 
         hsk = self._dataset("hsk")
         expected_hsk = int(hsk.metrics.get("leaf_node_count", -1))
-        with self._connection_factory() as connection, connection.cursor() as cur:
+        with self._connection() as connection, connection.cursor() as cur:
             cur.execute(
                 """
                 SELECT d.source_definition, d.source_definition_sha256,
@@ -297,11 +363,8 @@ class GenerationEvidenceBackend:
             or int(hsk_row[3]) != expected_hsk
         ):
             raise GenerationEvidenceError("generation HSK dataset identity is incomplete")
-        driver = self._neo4j_factory()
-        try:
-            with driver.session() as session:
-                row = session.run(
-                    """
+        rows = self._run_neo4j(
+            """
                     MATCH (g:KnowledgeGeneration {generation_id: $generation_id})
                     OPTIONAL MATCH (g)-[:CONTAINS]->(a:GenerationArticle {
                       generation_id: $generation_id
@@ -320,13 +383,14 @@ class GenerationEvidenceBackend:
                            count(DISTINCT h) AS hsk_leaf_count,
                            count(DISTINCT h.code) AS hsk_code_count
                     """,
-                    generation_id=self.generation_id,
-                    hsk_snapshot_id=hsk.snapshot_id,
-                    source_manifest_sha256=(self.identity.knowledge_source_manifest_sha256),
-                    model_manifest_sha256=self.identity.model_manifest_sha256,
-                ).single()
-        finally:
-            driver.close()
+            {
+                "generation_id": self.generation_id,
+                "hsk_snapshot_id": hsk.snapshot_id,
+                "source_manifest_sha256": (self.identity.knowledge_source_manifest_sha256),
+                "model_manifest_sha256": self.identity.model_manifest_sha256,
+            },
+        )
+        row = rows[0] if len(rows) == 1 else None
         if (
             row is None
             or int(row["article_count"]) != expected_articles
@@ -338,6 +402,8 @@ class GenerationEvidenceBackend:
     def validate_ready(self) -> None:
         """Run all generation-scoped release checks; any legacy-only stack fails."""
 
+        self._require_deadline()
+        self._model_health_check()
         self._assert_postgres_pointer()
         self._manifest()
         counts = self._store_attestation_counts()
@@ -365,12 +431,9 @@ class GenerationEvidenceBackend:
             return HskResolution("invalid", None, None)
         if normalized is None:
             return HskResolution("missing", None, None)
-        driver = self._neo4j_factory()
         hsk_snapshot_id = self._dataset("hsk").snapshot_id
-        try:
-            with driver.session() as session:
-                rows = session.run(
-                    """
+        rows = self._run_neo4j(
+            """
                     MATCH (:KnowledgeGeneration {generation_id: $generation_id})
                           -[:CONTAINS_HSK {
                             generation_id: $generation_id,
@@ -389,21 +452,21 @@ class GenerationEvidenceBackend:
                            h.content_sha256 AS content_sha256
                     ORDER BY code
                     """,
-                    generation_id=self.generation_id,
-                    hsk_snapshot_id=hsk_snapshot_id,
-                    source_manifest_sha256=(self.identity.knowledge_source_manifest_sha256),
-                    model_manifest_sha256=self.identity.model_manifest_sha256,
-                    code=normalized,
-                    prefix=normalized if len(normalized) == 6 else None,
-                )
-                projected = [(str(row["code"]), str(row["content_sha256"])) for row in rows]
-        finally:
-            driver.close()
+            {
+                "generation_id": self.generation_id,
+                "hsk_snapshot_id": hsk_snapshot_id,
+                "source_manifest_sha256": (self.identity.knowledge_source_manifest_sha256),
+                "model_manifest_sha256": self.identity.model_manifest_sha256,
+                "code": normalized,
+                "prefix": normalized if len(normalized) == 6 else None,
+            },
+        )
+        projected = [(str(row["code"]), str(row["content_sha256"])) for row in rows]
         leaves = [code for code, _content_sha256 in projected]
         if len(leaves) != len(set(leaves)):
             raise GenerationEvidenceError("generation HSK projection contains duplicates")
         if projected:
-            with self._connection_factory() as connection, connection.cursor() as cur:
+            with self._connection() as connection, connection.cursor() as cur:
                 cur.execute(
                     """
                     SELECT member_key, payload_sha256
@@ -436,7 +499,7 @@ class GenerationEvidenceBackend:
         if snapshot_id != self.current_snapshot_id():
             raise GenerationEvidenceError("CCCT lookup escaped generation snapshot")
         with (
-            self._connection_factory() as connection,
+            self._connection() as connection,
             connection.cursor(row_factory=dict_row) as cur,
         ):
             cur.execute(
@@ -506,7 +569,7 @@ class GenerationEvidenceBackend:
 
     def _qdrant_arm(self, query: str, arm: str, limit: int) -> Sequence[Any]:
         collection = qdrant_collection_name(self.generation_id)
-        qdrant = self._qdrant_factory()
+        deadline = self._require_deadline()
         generation_filter = models.Filter(
             must=[
                 models.FieldCondition(
@@ -516,30 +579,30 @@ class GenerationEvidenceBackend:
             ]
         )
         if arm == DENSE_VECTOR:
-            dense = self._dense_encoder([query])[0]
+            dense = self._dense_encoder([query], deadline)[0]
             vector = dense.tolist() if hasattr(dense, "tolist") else list(dense)
         elif arm == BM25_VECTOR:
             indices, values = self._sparse_encoder(query)
             vector = models.SparseVector(indices=indices, values=values)
         else:
             raise ValueError("unsupported retrieval arm")
-        return qdrant.query_points(
-            collection_name=collection,
-            query=vector,
-            using=arm,
-            query_filter=generation_filter,
-            limit=limit,
-            with_payload=True,
-        ).points
+        with self._qdrant_client() as qdrant:
+            response = qdrant.query_points(
+                collection_name=collection,
+                query=vector,
+                using=arm,
+                query_filter=generation_filter,
+                limit=limit,
+                with_payload=True,
+                timeout=deadline.store_operation_whole_seconds(),
+            )
+            return tuple(response.points)
 
     def _graph_related(self, seed_ids: Sequence[int]) -> dict[int, float]:
         if not seed_ids:
             return {}
-        driver = self._neo4j_factory()
-        try:
-            with driver.session() as session:
-                rows = session.run(
-                    """
+        rows = self._run_neo4j(
+            """
                     UNWIND $seed_ids AS seed_id
                     MATCH (source:GenerationArticle {
                       generation_id: $generation_id,
@@ -551,14 +614,12 @@ class GenerationEvidenceBackend:
                     })
                     RETURN target.article_pk AS article_pk, count(r) AS edge_count
                     """,
-                    generation_id=self.generation_id,
-                    seed_ids=list(seed_ids),
-                )
-                return {
-                    int(row["article_pk"]): min(1.0, 0.1 * int(row["edge_count"])) for row in rows
-                }
-        finally:
-            driver.close()
+            {
+                "generation_id": self.generation_id,
+                "seed_ids": list(seed_ids),
+            },
+        )
+        return {int(row["article_pk"]): min(1.0, 0.1 * int(row["edge_count"])) for row in rows}
 
     def search_law_articles(
         self,
@@ -594,7 +655,7 @@ class GenerationEvidenceBackend:
                     or hashlib.sha256(text.encode("utf-8")).hexdigest() != content_sha256
                 ):
                     raise GenerationEvidenceError("Qdrant generation content identity mismatch")
-                projection = (
+                qdrant_projection = (
                     content_sha256,
                     law_id,
                     article_no,
@@ -602,11 +663,11 @@ class GenerationEvidenceBackend:
                 )
                 entry = candidates.setdefault(pk, {"methods": set(), "raw": {}, "rrf": 0.0})
                 previous_projection = entry.get("qdrant_projection")
-                if previous_projection is not None and previous_projection != projection:
+                if previous_projection is not None and previous_projection != qdrant_projection:
                     raise GenerationEvidenceError(
                         "Qdrant retrieval arms disagree on article identity"
                     )
-                entry["qdrant_projection"] = projection
+                entry["qdrant_projection"] = qdrant_projection
                 entry["methods"].add(method)
                 entry["raw"][method] = float(point.score)
                 entry["rrf"] += 1.0 / (rrf_k + rank)
@@ -620,7 +681,7 @@ class GenerationEvidenceBackend:
             return ()
 
         with (
-            self._connection_factory() as connection,
+            self._connection() as connection,
             connection.cursor(row_factory=dict_row) as cur,
         ):
             cur.execute(
@@ -656,8 +717,8 @@ class GenerationEvidenceBackend:
             row = rows.get(pk)
             if row is None:  # guarded by the exact set comparison above
                 raise GenerationEvidenceError("PostgreSQL generation candidate disappeared")
-            projection = candidate.get("qdrant_projection")
-            if projection is not None and projection != (
+            stored_projection = candidate.get("qdrant_projection")
+            if stored_projection is not None and stored_projection != (
                 row["content_hash"],
                 row["law_id"],
                 row["article_no"],
@@ -681,8 +742,13 @@ class GenerationEvidenceBackend:
                 1.0,
                 0.85 * min(1.0, candidate["rrf"] / theoretical_rrf_max) + 0.15 * lexical,
             )
-            methods = tuple(
-                method for method in ("dense", "bm25", "graph") if method in candidate["methods"]
+            methods = cast(
+                tuple[Literal["dense", "bm25", "graph"], ...],
+                tuple(
+                    method
+                    for method in ("dense", "bm25", "graph")
+                    if method in candidate["methods"]
+                ),
             )
             matches.append(
                 LawArticleMatch(

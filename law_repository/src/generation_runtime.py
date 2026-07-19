@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Callable, Mapping, Sequence
+from datetime import UTC, datetime
+from typing import Any
 
 from src.db.postgres import connect
+from src.deadline import RequestDeadline
 from src.generation import (
     GenerationSpec,
     GenerationValidationError,
@@ -18,6 +20,10 @@ from src.generation import (
     validate_store_attestations,
 )
 from src.generation_stores import ExternalGenerationStore
+
+
+def _deadline_connection(deadline: RequestDeadline | None = None):
+    return connect(deadline=deadline)
 
 
 class ActiveGenerationError(RuntimeError):
@@ -58,7 +64,7 @@ class ActiveGenerationAttestation:
 def _utc_timestamp(value: object) -> str:
     if not isinstance(value, datetime) or value.tzinfo is None:
         raise ActiveGenerationError("active pointer timestamp is not timezone-aware")
-    return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    return value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _store_attestation(payload: Mapping[str, Any], stored_sha256: str) -> StoreAttestation:
@@ -88,17 +94,25 @@ class ActiveGenerationLoader:
     def __init__(
         self,
         *,
-        connection_factory: Callable[[], Any] = connect,
+        connection_factory: Callable[[RequestDeadline | None], Any] | None = None,
         external_stores: Sequence[ExternalGenerationStore] = (),
     ) -> None:
         names = [store.name for store in external_stores]
         if len(names) != len(set(names)) or any(name not in {"qdrant", "neo4j"} for name in names):
             raise ValueError("external generation store names are invalid")
-        self._connection_factory = connection_factory
+        self._connection_factory = connection_factory or _deadline_connection
         self._external_stores = tuple(external_stores)
 
-    def load(self) -> ActiveGenerationAttestation:
-        with self._connection_factory() as connection:
+    def load(
+        self,
+        deadline: RequestDeadline | None = None,
+    ) -> ActiveGenerationAttestation:
+        connection_context = (
+            self._connection_factory(deadline)
+            if deadline is not None
+            else self._connection_factory()  # type: ignore[call-arg]
+        )
+        with connection_context as connection:
             with connection.cursor() as cur:
                 cur.execute(
                     """
@@ -204,7 +218,12 @@ class ActiveGenerationLoader:
                 raise ActiveGenerationError("active generation changed during attestation load")
 
         for store in self._external_stores:
-            if store.current_active_generation() != generation_id:
+            current = (
+                store.current_active_generation(deadline)
+                if deadline is not None
+                else store.current_active_generation()
+            )
+            if current != generation_id:
                 raise ActiveGenerationError(
                     f"{store.name} active pointer does not match PostgreSQL"
                 )
