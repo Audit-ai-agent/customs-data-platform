@@ -17,7 +17,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from pydantic import SecretStr
 
@@ -37,6 +37,7 @@ from src.runtime_release import (  # noqa: E402
     RuntimeReleaseError,
     runtime_release_sha256,
 )
+
 from tools.provider_build import (  # noqa: E402
     RUNTIME_PROVIDER_RELEASE,
     canonical_json_bytes,

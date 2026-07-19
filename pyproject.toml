@@ -62,6 +62,8 @@ files = [
   "law_repository/src/db/postgres.py",
   "law_repository/src/db/qdrant.py",
   "law_repository/src/db/neo4j.py",
+  "tools/run_evidence_v2_conformance_server.py",
+  "tools/run_preserved_data_v2_diagnostic.py",
 ]
 ignore_missing_imports = true
 follow_imports = "skip"

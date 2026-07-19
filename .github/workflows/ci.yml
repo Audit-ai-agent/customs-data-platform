@@ -190,9 +190,14 @@ jobs:
           uv run --locked ruff check --select S,B,E,F,I,UP \
             law_repository/src/production.py \
             law_repository/src/production_settings.py \
-            tools/build_production_context.py
+            tools/build_production_context.py \
+            tools/run_evidence_v2_conformance_server.py \
+            tools/run_preserved_data_v2_diagnostic.py
           uv run --isolated --no-project --with "bandit==1.8.6" \
-            bandit --quiet --recursive law_repository/src
+            bandit --quiet --recursive \
+              law_repository/src \
+              tools/run_evidence_v2_conformance_server.py \
+              tools/run_preserved_data_v2_diagnostic.py
 
       - name: Check provider contract drift
         id: contract_drift
