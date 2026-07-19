@@ -285,12 +285,13 @@ def _configure_evidence_application(
     backend_factory: Callable[[], ReadinessBackend],
     identity_loader: Callable[[], ProviderBuildIdentity],
     test_only_conformance: bool,
+    install_binding_middleware: bool = True,
 ) -> FastAPI:
     target.state.evidence_backend_factory = backend_factory
     target.state.provider_identity_loader = identity_loader
     target.state.test_only_conformance = test_only_conformance
     target.include_router(_internal_router)
-    if target is not app:
+    if target is not app and install_binding_middleware:
         target.add_middleware(
             _EvidenceBindingMiddleware,
             provider_app=target,
@@ -299,7 +300,13 @@ def _configure_evidence_application(
 
 
 def create_evidence_application() -> FastAPI:
-    """Create the production Evidence API with no fixture activation path."""
+    """Create the bare contract app with no fixture activation path.
+
+    This factory intentionally preserves the v1.1 contract test boundary.  It
+    does not provide service authentication, transport enforcement, admission,
+    or lifecycle controls and therefore must not be deployed directly.  Use
+    ``src.production.create_production_evidence_application`` for deployment.
+    """
     target = FastAPI(title="Customs Evidence API")
     return _configure_evidence_application(
         target,
