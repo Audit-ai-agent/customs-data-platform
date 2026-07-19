@@ -34,6 +34,7 @@ htmlcov/
 evals/results/
 artifacts/
 logs/
+outputs/
 
 # OS and editors
 .DS_Store

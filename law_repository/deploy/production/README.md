@@ -90,10 +90,10 @@ curl --fail --cacert /approved/ca.pem \
   https://evidence.example/internal/rag/v2/health/ready
 ```
 
-Also verify the negative cases: HTTP, invalid CA/host, direct container access,
-missing/duplicate/wrong bearer, query token, duplicate build header, oversized
-body, and `Content-Length` plus `Transfer-Encoding` must all fail before Data
-retrieval.
+Also verify the negative cases for HTTP, an invalid CA or host, and a direct
+container connection. A missing, duplicate, or wrong bearer; a query token;
+a duplicate build header; an oversized body; and `Content-Length` combined
+with `Transfer-Encoding` must all fail before Data retrieval.
 
 ## Runtime configuration
 

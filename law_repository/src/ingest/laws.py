@@ -12,6 +12,7 @@ dense(bge-m3)+bm25(sparse, idf) 로 인덱싱한다.
 
 실행: law_repository/ 에서  python -m src.ingest.laws  [--no-cache] [--skip-embed]
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -22,7 +23,13 @@ from datetime import date, datetime
 
 from src import lawgo
 from src.db.postgres import connect
-from src.db.qdrant import BM25_VECTOR, COLLECTION, DENSE_VECTOR, client as qdrant_client, ensure_collection
+from src.db.qdrant import (
+    BM25_VECTOR,
+    COLLECTION,
+    DENSE_VECTOR,
+    client as qdrant_client,
+    ensure_collection,
+)
 from src.embed import bm25
 
 TARGET_LAWS = [
@@ -67,7 +74,10 @@ TARGET_LAWS = [
     {"law_id": "000154", "name": "폐기물의 국가 간 이동 및 그 처리에 관한 법률"},
     {"law_id": "001771", "name": "폐기물관리법"},
     {"law_id": "000155", "name": "자원의 절약과 재활용촉진에 관한 법률"},
-    {"law_id": "000317", "name": "화학무기ㆍ생물무기의 금지와 특정화학물질ㆍ생물작용제 등의 제조ㆍ수출입 규제 등에 관한 법률"},
+    {
+        "law_id": "000317",
+        "name": "화학무기ㆍ생물무기의 금지와 특정화학물질ㆍ생물작용제 등의 제조ㆍ수출입 규제 등에 관한 법률",
+    },
     {"law_id": "011435", "name": "원자력안전법"},
     {"law_id": "011433", "name": "생활주변방사선 안전관리법"},
     {"law_id": "001459", "name": "전기용품 및 생활용품 안전관리법"},
@@ -119,6 +129,7 @@ def point_id(law_id: str, article_no: int, paragraph_no: int | None, mst: str) -
 
 
 # ---------------------------------------------------------------- 파싱/청킹
+
 
 def resolve_current_mst(law_id: str, name: str) -> str:
     """현행법령 목록(lawSearch target=law)에서 법령일련번호(MST) 확인.
@@ -181,7 +192,9 @@ def parse_articles(body: dict, meta: dict) -> list[dict]:
             continue
         title = lawgo.clean_text(u.get("조문제목"))
         label = lawgo.jo_label(jo_no, jo_branch)
-        heading = f"[{meta['law_name']} {label}({title})]" if title else f"[{meta['law_name']} {label}]"
+        heading = (
+            f"[{meta['law_name']} {label}({title})]" if title else f"[{meta['law_name']} {label}]"
+        )
         valid_from = lawgo.squash(u.get("조문시행일자")) or meta["enforcement_date"]
         base = {
             "article_no": lawgo.jo_code(jo_no, jo_branch),
@@ -211,6 +224,7 @@ def parse_articles(body: dict, meta: dict) -> list[dict]:
 
 # ---------------------------------------------------------------- PG 적재
 
+
 def upsert_law(cur, meta: dict) -> None:
     cur.execute(
         """
@@ -237,8 +251,9 @@ def upsert_law(cur, meta: dict) -> None:
     )
 
 
-def _upsert_article_row(cur, law_id: str, mst: str, row: dict,
-                        parent_pk: int | None = None) -> tuple[int, str]:
+def _upsert_article_row(
+    cur, law_id: str, mst: str, row: dict, parent_pk: int | None = None
+) -> tuple[int, str]:
     """열린 행(valid_to IS NULL) 기준 upsert. 반환: (pk, 'new'|'changed'|'unchanged')."""
     chash = _content_hash(row["content"])
     is_current = row["valid_from"] <= date.today()
@@ -261,8 +276,18 @@ def _upsert_article_row(cur, law_id: str, mst: str, row: dict,
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL, %s, %s)
             RETURNING id
             """,
-            (law_id, row["article_no"], row["paragraph_no"], row["title"],
-             row["content"], chash, mst, row["valid_from"], is_current, parent_pk),
+            (
+                law_id,
+                row["article_no"],
+                row["paragraph_no"],
+                row["title"],
+                row["content"],
+                chash,
+                mst,
+                row["valid_from"],
+                is_current,
+                parent_pk,
+            ),
         )
         return cur.fetchone()[0], "new"
     pk, old_hash = hit
@@ -277,8 +302,7 @@ def _upsert_article_row(cur, law_id: str, mst: str, row: dict,
             parent_article_pk = %s
         WHERE id = %s
         """,
-        (row["title"], row["content"], chash, mst,
-         row["valid_from"], is_current, parent_pk, pk),
+        (row["title"], row["content"], chash, mst, row["valid_from"], is_current, parent_pk, pk),
     )
     return pk, "changed"
 
@@ -304,6 +328,7 @@ def load_law(cur, meta: dict, rows: list[dict]) -> dict:
 # valid_from) 반열림 구간으로 병행 적재해 원장을 완성한다. promote() 가 미래
 # 시행일에 자동 승격/강등한다.
 
+
 def effective_version_candidates(law_id: str, name: str) -> list[tuple[str, str]]:
     """오늘 이하 시행일의 (MST, 시행일자) 후보 — 시행일 내림차순, MST 중복 제거.
 
@@ -326,8 +351,14 @@ def effective_version_candidates(law_id: str, name: str) -> list[tuple[str, str]
     return [(m, e) for m, e in cands if not (m in seen or seen.add(m))]
 
 
-def _backfill_row(cur, law_id: str, mst: str, row: dict, law_future_start: date | None,
-                  parent_pk: int | None = None) -> tuple[int | None, str]:
+def _backfill_row(
+    cur,
+    law_id: str,
+    mst: str,
+    row: dict,
+    law_future_start: date | None,
+    parent_pk: int | None = None,
+) -> tuple[int | None, str]:
     """오늘을 덮는 버전이 없는 조문 키에 현행 버전 행 삽입. 반환 (pk, status).
 
     valid_to 경계: 같은 키의 가장 이른 미래 버전 valid_from. 미래 버전에 이 키가
@@ -370,8 +401,18 @@ def _backfill_row(cur, law_id: str, mst: str, row: dict, law_future_start: date 
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s)
         RETURNING id
         """,
-        (law_id, row["article_no"], row["paragraph_no"], row["title"], row["content"],
-         _content_hash(row["content"]), mst, row["valid_from"], valid_to, parent_pk),
+        (
+            law_id,
+            row["article_no"],
+            row["paragraph_no"],
+            row["title"],
+            row["content"],
+            _content_hash(row["content"]),
+            mst,
+            row["valid_from"],
+            valid_to,
+            parent_pk,
+        ),
     )
     return cur.fetchone()[0], "inserted"
 
@@ -395,8 +436,13 @@ def backfill_effective_current(cur, law_id: str, name: str) -> dict | None:
             (law_id,),
         )
         law_future_start = cur.fetchone()[0]
-        stats = {"inserted": 0, "covered": 0, "future": 0, "mst": mst,
-                 "enforcement": meta["enforcement_date"]}
+        stats = {
+            "inserted": 0,
+            "covered": 0,
+            "future": 0,
+            "mst": mst,
+            "enforcement": meta["enforcement_date"],
+        }
         for row in parse_articles(body, meta):
             pk, status = _backfill_row(cur, law_id, mst, row, law_future_start)
             stats[status] += 1
@@ -429,6 +475,7 @@ def backfill_all(cur) -> None:
 
 
 # ---------------------------------------------------------------- Qdrant 인덱싱
+
 
 def index_qdrant(batch_size: int = 64) -> int:
     """is_current 이고 아직 포인트 없는 조문(분할 부모 제외)을 임베딩→upsert."""
@@ -487,15 +534,14 @@ def index_qdrant(batch_size: int = 64) -> int:
             ids.append((pid, pk))
         qc.upsert(collection_name=COLLECTION, points=points)
         with connect() as conn, conn.cursor() as cur:
-            cur.executemany(
-                "UPDATE law_articles SET qdrant_point_id = %s WHERE id = %s", ids
-            )
+            cur.executemany("UPDATE law_articles SET qdrant_point_id = %s WHERE id = %s", ids)
         total += len(points)
         print(f"[qdrant] {total}/{len(pending)} upsert")
     return total
 
 
 # ---------------------------------------------------------------- 검증
+
 
 def verify() -> None:
     with connect() as conn, conn.cursor() as cur:
@@ -549,7 +595,8 @@ def main(argv: list[str]) -> int:
         body = lawgo.fetch_current_law(spec["law_id"], use_cache=use_cache)
         mst = resolve_current_mst(spec["law_id"], spec["name"])
         meta = build_meta(body, mst)
-        assert meta["law_id"] == spec["law_id"], f"법령ID 불일치: {meta}"
+        if meta["law_id"] != spec["law_id"]:
+            raise ValueError(f"법령ID 불일치: {meta}")
         rows = parse_articles(body, meta)
         with connect() as conn, conn.cursor() as cur:
             stats = load_law(cur, meta, rows)

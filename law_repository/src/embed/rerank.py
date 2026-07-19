@@ -29,10 +29,17 @@ def _get():
         try:
             from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-            _tok = AutoTokenizer.from_pretrained(MODEL, revision=MODEL_REVISION)
-            _model = AutoModelForSequenceClassification.from_pretrained(
+            # B615 is suppressed only on these calls: MODEL_REVISION is a full
+            # immutable SHA from model_identity.py and lookup is cache-only.
+            _tok = AutoTokenizer.from_pretrained(  # nosec B615
                 MODEL,
                 revision=MODEL_REVISION,
+                local_files_only=True,
+            )
+            _model = AutoModelForSequenceClassification.from_pretrained(  # nosec B615
+                MODEL,
+                revision=MODEL_REVISION,
+                local_files_only=True,
             )
             _model.eval()
         except Exception as e:  # noqa: BLE001 — 어떤 실패든 degrade 가 계약

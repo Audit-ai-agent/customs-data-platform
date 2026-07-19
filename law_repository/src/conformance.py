@@ -4,6 +4,7 @@ This module is never selected by an environment variable and is not used by
 the production ``app``.  It proves request/response/header behavior without
 pretending that the required 58-law production corpus has been loaded.
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -43,7 +44,8 @@ class TestOnlyConformanceEvidenceBackend:
         return "test-only-conformance-snapshot"
 
     def snapshot_effective_date(self, snapshot_id: str) -> date:
-        assert snapshot_id == "test-only-conformance-snapshot"
+        if snapshot_id != "test-only-conformance-snapshot":
+            raise ValueError("test-only conformance snapshot mismatch")
         return self.effective_date
 
     def resolve_hsk(self, code: str | None) -> repository.HskResolution:
@@ -63,32 +65,31 @@ class TestOnlyConformanceEvidenceBackend:
         trade_type: str,
         as_of: date,
     ) -> RequirementLookup:
-        assert snapshot_id == "test-only-conformance-snapshot"
-        if (
-            hsk10 != "0303540000"
-            or trade_type != "import"
-            or as_of != self.effective_date
-        ):
+        if snapshot_id != "test-only-conformance-snapshot":
+            raise ValueError("test-only conformance snapshot mismatch")
+        if hsk10 != "0303540000" or trade_type != "import" or as_of != self.effective_date:
             return RequirementLookup(False, ())
-        return RequirementLookup(True, ({
-            "requirement_id": "test_only_ccct_req_0303540000",
-            "requirement_version_hash": "a" * 64,
-            "hsk10": "0303540000",
-            "trade_type": "import",
-            "law_code": "89",
-            "law_name": "수입식품안전관리 특별법",
-            "agency_code": "005",
-            "agency_name": "식품의약품안전처",
-            "document_code": "CCCT_DOC_IMPORT_CONFIRMATION",
-            "document_name": "수입식품등 수입신고확인증",
-            "valid_from": date(2020, 4, 6),
-            "valid_to": None,
-            "source_record_id": "test_only_ccct_src_0303540000",
-            "source_uri": (
-                "https://apis.data.go.kr/example"
-                "?hsSgn=0303540000&imexTpcd=2"
+        return RequirementLookup(
+            True,
+            (
+                {
+                    "requirement_id": "test_only_ccct_req_0303540000",
+                    "requirement_version_hash": "a" * 64,
+                    "hsk10": "0303540000",
+                    "trade_type": "import",
+                    "law_code": "89",
+                    "law_name": "수입식품안전관리 특별법",
+                    "agency_code": "005",
+                    "agency_name": "식품의약품안전처",
+                    "document_code": "CCCT_DOC_IMPORT_CONFIRMATION",
+                    "document_name": "수입식품등 수입신고확인증",
+                    "valid_from": date(2020, 4, 6),
+                    "valid_to": None,
+                    "source_record_id": "test_only_ccct_src_0303540000",
+                    "source_uri": ("https://apis.data.go.kr/example?hsSgn=0303540000&imexTpcd=2"),
+                },
             ),
-        },))
+        )
 
     def search_law_articles(
         self,

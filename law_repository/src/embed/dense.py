@@ -25,9 +25,15 @@ def _get_model():
                 from FlagEmbedding import BGEM3FlagModel
                 from huggingface_hub import snapshot_download
 
-                model_path = snapshot_download(
+                # B615 is suppressed only at this exact call: model_identity.py
+                # pins a full 40-character revision and runtime is cache-only.
+                model_path = snapshot_download(  # nosec B615
                     repo_id=DENSE_MODEL.model_id,
                     revision=DENSE_MODEL.revision,
+                    # Production images prefetch this immutable revision during
+                    # their build. Runtime lookup must never contact or trust a
+                    # mutable remote model repository.
+                    local_files_only=True,
                 )
                 _model = BGEM3FlagModel(
                     model_path,

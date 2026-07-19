@@ -398,7 +398,15 @@ def main() -> int:
     if not rerank.available():
         print("[webapp] reranker 불가 — /api/retrieve 는 RRF 순위로 동작 (reranked=false)")
     print(f"[webapp] 준비 완료 — 팀원 접속: http://<이 PC의 IP>:{port}")
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+    # This is the explicitly non-production team demo.  Production uses the
+    # authenticated ingress-only factory in src.production.
+    uvicorn.run(
+        app,
+        # Explicit non-production LAN demo; production uses authenticated ingress.
+        host="0.0.0.0",  # nosec B104
+        port=port,
+        log_level="warning",
+    )
     return 0
 
 
