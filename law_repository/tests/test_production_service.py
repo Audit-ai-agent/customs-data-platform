@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from src.config import Settings as DataStoreSettings
 from src.conformance import TestOnlyConformanceEvidenceBackend
 from src.production import (
+    create_production_evidence_application,
     create_test_production_shell_application,
 )
 from src.production_settings import (
@@ -234,6 +235,33 @@ def test_mounted_data_store_secrets_are_resolved_without_logging(
     assert "postgres-file-secret" not in serialized
     assert "qdrant-file-secret" not in serialized
     assert "neo4j-file-secret" not in serialized
+
+
+def test_real_production_factory_cannot_enable_fixture_from_environment(
+    monkeypatch,
+) -> None:
+    from src import production
+    from src.evidence import DatabaseEvidenceBackend
+
+    safe_values = {
+        "postgres_host": "db.internal",
+        "postgres_password": "runtime-postgres-credential",
+        "postgres_sslmode": "verify-full",
+        "qdrant_url": "https://qdrant.internal:6333",
+        "qdrant_api_key": "runtime-qdrant-credential",
+        "neo4j_uri": "neo4j+s://neo4j.internal:7687",
+        "neo4j_password": "runtime-neo4j-credential",
+    }
+    for name, value in safe_values.items():
+        monkeypatch.setattr(production.data_store_settings, name, value)
+    monkeypatch.setenv("EVIDENCE_BACKEND", "conformance")
+    monkeypatch.setenv("EVIDENCE_TEST_FIXTURE", "true")
+
+    app = create_production_evidence_application(_settings())
+
+    assert app.state.test_only_conformance is False
+    assert app.state.test_only_production_shell is False
+    assert isinstance(app.state.evidence_backend_factory(), DatabaseEvidenceBackend)
 
 
 def test_liveness_is_public_but_still_requires_tls() -> None:
