@@ -1,0 +1,5 @@
+# False positive: prose spanning "container access," and
+# "missing/duplicate/wrong bearer" in the production runbook.  This exact
+# historical fingerprint is not a credential; no rule, path, or commit-wide
+# suppression is permitted.
+d5cda036a90235fbe1e6d828e726456a1d9d2af6:law_repository/deploy/production/README.md:generic-api-key:85

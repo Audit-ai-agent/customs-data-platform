@@ -1,0 +1,22 @@
+title = "customs-data-platform secret scanning"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Ignored local environments, caches, and generated build outputs are not release inputs."
+paths = [
+  '''(^|[\\/])\.venv[\\/]''',
+  '''(^|[\\/])venv[\\/]''',
+  '''(^|[\\/])(?:build|dist|htmlcov|outputs)[\\/]''',
+  '''(^|[\\/])\.(?:pytest|mypy|ruff)_cache[\\/]''',
+  '''(^|[\\/])\.pytest[^\\/]*[\\/]''',
+  '''(^|[\\/])pytest-cache-files-[^\\/]+[\\/]''',
+]
+
+[[allowlists]]
+description = "Exact non-secret negative-test prose in the production runbook."
+condition = "AND"
+regexTarget = "match"
+paths = ['''^law_repository[\\/]deploy[\\/]production[\\/]README\.md$''']
+regexes = ['''(?m)access,\r?\nmissing/duplicate/wrong bearer''']
