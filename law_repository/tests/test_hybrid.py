@@ -114,6 +114,7 @@ def test_retrieve_degrades_to_rrf_when_reranker_unavailable(monkeypatch):
 
 # ------------------------------------------------------------ 실데이터 스모크
 
+@pytest.mark.live
 def test_live_retrieve_anchor_hits_enforcement_decree_233():
     """골든셋 앵커(2026-07-12 실측): '세관장확인대상물품' → 시행령 제233조
     (구비조건의 확인 — 관세법 제226조의 위임 조문)가 RRF 상위에 와야 한다.
