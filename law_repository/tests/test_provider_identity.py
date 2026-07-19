@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+from starlette.datastructures import Headers
 
 from src.provider_identity import (
     HEADER_PROVIDER_BUILD_SHA256,
@@ -35,11 +36,13 @@ def _write_bundle(root: Path):
         "law_repository/src/sample.py",
     ):
         payload = (root / relative_path).read_bytes()
-        entries.append({
-            "path": relative_path,
-            "sha256": hashlib.sha256(payload).hexdigest(),
-            "bytes": len(payload),
-        })
+        entries.append(
+            {
+                "path": relative_path,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "bytes": len(payload),
+            }
+        )
     manifest = {
         "schema_version": "1.0",
         "source_repository": "customs-data-platform",
@@ -138,6 +141,30 @@ def test_exact_binding_headers_are_complete_and_mismatch_is_named(tmp_path: Path
     lowered = {key.lower(): value for key, value in expected.items()}
     assert binding_header_mismatches(lowered, identity) == ()
     lowered[HEADER_PROVIDER_REVISION.lower()] = "2" * 40
-    assert binding_header_mismatches(lowered, identity) == (
-        HEADER_PROVIDER_REVISION,
+    assert binding_header_mismatches(lowered, identity) == (HEADER_PROVIDER_REVISION,)
+
+
+def test_starlette_raw_headers_require_one_field_per_binding_name(tmp_path: Path) -> None:
+    identity = _write_bundle(tmp_path)
+    raw = [
+        (name.lower().encode("ascii"), value.encode("ascii"))
+        for name, value in identity.binding_headers().items()
+    ]
+    singular = Headers(raw=raw)
+    assert singular.getlist(HEADER_SCHEMA_SHA256) == [identity.schema_sha256]
+    assert binding_header_mismatches(singular, identity) == ()
+
+    duplicated = Headers(
+        raw=[
+            *raw,
+            (
+                HEADER_SCHEMA_SHA256.lower().encode("ascii"),
+                identity.schema_sha256.encode("ascii"),
+            ),
+        ]
     )
+    assert duplicated.getlist(HEADER_SCHEMA_SHA256) == [
+        identity.schema_sha256,
+        identity.schema_sha256,
+    ]
+    assert binding_header_mismatches(duplicated, identity) == (HEADER_SCHEMA_SHA256,)

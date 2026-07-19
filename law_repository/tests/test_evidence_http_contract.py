@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from datetime import date
 
@@ -41,13 +42,15 @@ def _request_body() -> dict:
         "jurisdiction": "KR",
         "trade_type": "import",
         "top_k": 5,
-        "items": [{
-            "item_id": "invoice:1",
-            "description": "Frozen mackerel",
-            "hs_code": "0303540000",
-            "origin_country": "NO",
-            "destination_country": "KR",
-        }],
+        "items": [
+            {
+                "item_id": "invoice:1",
+                "description": "Frozen mackerel",
+                "hs_code": "0303540000",
+                "origin_country": "NO",
+                "destination_country": "KR",
+            }
+        ],
         "uploaded_requirement_document_codes": [],
         "validation_issue_codes": [],
         "query_intent": "required_import_documents",
@@ -110,6 +113,197 @@ def test_post_rejects_missing_or_mismatched_binding_before_backend_creation(
     assert backend.retrieve_calls == 0
 
 
+@pytest.mark.parametrize(
+    "duplicated_header",
+    [
+        HEADER_SCHEMA_SHA256,
+        HEADER_PROVIDER_RELEASE,
+        HEADER_PROVIDER_REVISION,
+        HEADER_PROVIDER_BUILD_SHA256,
+    ],
+)
+def test_post_rejects_duplicate_binding_before_backend_creation(
+    duplicated_header: str,
+) -> None:
+    identity = _identity()
+    backend = TestOnlyConformanceEvidenceBackend()
+    app = create_test_conformance_application(identity=identity, backend=backend)
+    factory_calls = 0
+
+    def backend_factory():
+        nonlocal factory_calls
+        factory_calls += 1
+        return backend
+
+    app.state.evidence_backend_factory = backend_factory
+    headers = list(identity.binding_headers().items())
+    headers.append((duplicated_header, identity.binding_headers()[duplicated_header]))
+    response = TestClient(app).post(
+        "/internal/rag/v1/retrieve",
+        json=_request_body(),
+        headers=headers,
+    )
+
+    assert response.status_code == 412
+    assert response.json() == {"detail": "Evidence provider build binding does not match"}
+    assert factory_calls == 0
+    assert backend.retrieve_calls == 0
+
+
+@pytest.mark.parametrize("binding", ["missing", "mismatch", "duplicate"])
+def test_binding_rejection_precedes_malformed_oversized_body(binding: str) -> None:
+    identity = _identity()
+    backend = TestOnlyConformanceEvidenceBackend()
+    app = create_test_conformance_application(identity=identity, backend=backend)
+    factory_calls = 0
+
+    def backend_factory():
+        nonlocal factory_calls
+        factory_calls += 1
+        return backend
+
+    app.state.evidence_backend_factory = backend_factory
+    if binding == "missing":
+        headers: list[tuple[str, str]] = []
+    else:
+        headers = list(identity.binding_headers().items())
+        if binding == "mismatch":
+            headers = [
+                (name, "mismatch" if name == HEADER_PROVIDER_REVISION else value)
+                for name, value in headers
+            ]
+        else:
+            headers.append((HEADER_PROVIDER_REVISION, identity.provider_revision))
+    malformed_oversized_body = b'{"items":[' + (b'{"x":"' + b"x" * 1_100_000)
+    response = TestClient(app).post(
+        "/internal/rag/v1/retrieve",
+        content=malformed_oversized_body,
+        headers=[*headers, ("Content-Type", "application/json")],
+    )
+
+    assert response.status_code == 412
+    assert factory_calls == 0
+    assert backend.retrieve_calls == 0
+
+
+def test_exact_binding_allows_body_validation_to_return_422() -> None:
+    identity = _identity()
+    backend = TestOnlyConformanceEvidenceBackend()
+    app = create_test_conformance_application(identity=identity, backend=backend)
+    factory_calls = 0
+
+    def backend_factory():
+        nonlocal factory_calls
+        factory_calls += 1
+        return backend
+
+    app.state.evidence_backend_factory = backend_factory
+    response = TestClient(app).post(
+        "/internal/rag/v1/retrieve",
+        content=b'{"items":[',
+        headers={
+            **identity.binding_headers(),
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 422
+    assert factory_calls == 0
+    assert backend.retrieve_calls == 0
+
+
+@pytest.mark.parametrize("binding", ["missing", "mismatch", "duplicate"])
+def test_invalid_binding_is_rejected_without_receiving_asgi_body(
+    binding: str,
+) -> None:
+    identity = _identity()
+    app = create_test_conformance_application(identity=identity)
+    received_body = False
+    sent_messages: list[dict] = []
+    raw_headers = [
+        (name.lower().encode("ascii"), value.encode("ascii"))
+        for name, value in identity.binding_headers().items()
+    ]
+    if binding == "missing":
+        raw_headers = []
+    elif binding == "mismatch":
+        raw_headers = [
+            (
+                name,
+                b"mismatch" if name == HEADER_PROVIDER_REVISION.lower().encode("ascii") else value,
+            )
+            for name, value in raw_headers
+        ]
+    else:
+        raw_headers.append(
+            (
+                HEADER_PROVIDER_REVISION.lower().encode("ascii"),
+                identity.provider_revision.encode("ascii"),
+            )
+        )
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/internal/rag/v1/retrieve",
+        "raw_path": b"/internal/rag/v1/retrieve",
+        "query_string": b"",
+        "headers": raw_headers,
+        "client": ("127.0.0.1", 12345),
+        "server": ("127.0.0.1", 80),
+        "root_path": "",
+        "state": {},
+    }
+
+    async def receive():
+        nonlocal received_body
+        received_body = True
+        raise AssertionError("binding rejection must not receive the request body")
+
+    async def send(message):
+        sent_messages.append(message)
+
+    asyncio.run(app(scope, receive, send))
+
+    assert received_body is False
+    assert sent_messages[0]["type"] == "http.response.start"
+    assert sent_messages[0]["status"] == 412
+
+
+def test_post_identity_loader_failure_is_generic_503_before_body_validation() -> None:
+    identity = _identity()
+    backend = TestOnlyConformanceEvidenceBackend()
+    app = create_test_conformance_application(identity=identity, backend=backend)
+    factory_calls = 0
+
+    def failing_identity():
+        raise RuntimeError("C:/secret/provider-build.json token=do-not-return")
+
+    def backend_factory():
+        nonlocal factory_calls
+        factory_calls += 1
+        return backend
+
+    app.state.provider_identity_loader = failing_identity
+    app.state.evidence_backend_factory = backend_factory
+    response = TestClient(app).post(
+        "/internal/rag/v1/retrieve",
+        content=b'{"items":[' + b"x" * 1_100_000,
+        headers={
+            **identity.binding_headers(),
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Evidence provider build identity is unavailable"}
+    assert "secret" not in response.text
+    assert factory_calls == 0
+    assert backend.retrieve_calls == 0
+
+
 def test_matching_post_returns_same_four_headers_and_complete_cited_evidence() -> None:
     identity = _identity()
     backend = TestOnlyConformanceEvidenceBackend()
@@ -124,7 +318,8 @@ def test_matching_post_returns_same_four_headers_and_complete_cited_evidence() -
     for name, value in identity.binding_headers().items():
         assert response.headers[name] == value
     assert {
-        name for name in (
+        name
+        for name in (
             HEADER_SCHEMA_SHA256,
             HEADER_PROVIDER_RELEASE,
             HEADER_PROVIDER_REVISION,
@@ -153,9 +348,10 @@ def test_matching_post_returns_same_four_headers_and_complete_cited_evidence() -
     assert evidence["version_hash"] == "a" * 64
     assert evidence["required_document_code"]
     assert evidence["required_document_name"]
-    expected_id = "ev_" + hashlib.sha256(
-        ("test_only_ccct_src_0303540000\x1f" + "a" * 64).encode()
-    ).hexdigest()
+    expected_id = (
+        "ev_"
+        + hashlib.sha256(("test_only_ccct_src_0303540000\x1f" + "a" * 64).encode()).hexdigest()
+    )
     assert evidence["evidence_id"] == expected_id
     assert backend.retrieve_calls == 1
 
@@ -180,9 +376,7 @@ def test_identity_and_readiness_failures_return_generic_503_without_raw_error() 
     app.state.provider_identity_loader = failing_identity
     response = TestClient(app).get("/internal/rag/v1/health/ready")
     assert response.status_code == 503
-    assert response.json() == {
-        "detail": "Evidence provider build identity is unavailable"
-    }
+    assert response.json() == {"detail": "Evidence provider build identity is unavailable"}
     assert "secret" not in response.text
 
     class FailingReadinessBackend(TestOnlyConformanceEvidenceBackend):
@@ -199,34 +393,95 @@ def test_identity_and_readiness_failures_return_generic_503_without_raw_error() 
     assert "password" not in response.text
 
 
+def test_retrieval_backend_exception_is_generic_in_public_http_body() -> None:
+    secret = "postgresql://user:password@example.invalid/db?token=do-not-return"
+
+    class FailingRetrievalBackend(TestOnlyConformanceEvidenceBackend):
+        def current_snapshot_id(self):
+            raise RuntimeError(secret)
+
+    app = create_test_conformance_application(
+        identity=_identity(),
+        backend=FailingRetrievalBackend(),
+    )
+    response = TestClient(app).post(
+        "/internal/rag/v1/retrieve",
+        json=_request_body(),
+        headers=_identity().binding_headers(),
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "failed"
+    assert payload["errors"] == [
+        {
+            "code": "KNOWLEDGE_STORE_UNAVAILABLE",
+            "message": "Knowledge store is unavailable",
+            "retryable": True,
+        }
+    ]
+    assert secret not in response.text
+    assert "password" not in response.text
+    assert "token" not in response.text
+
+
 def test_conformance_runner_requires_explicit_flag_bundle_and_loopback() -> None:
     parser = build_parser()
     with pytest.raises(SystemExit):
-        parser.parse_args([
+        parser.parse_args(
+            [
+                "--bundle-root",
+                ".",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "18010",
+            ]
+        )
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "--test-only-conformance",
+                "--bundle-root",
+                ".",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "18010",
+            ]
+        )
+    args = parser.parse_args(
+        [
+            "--test-only-conformance",
             "--bundle-root",
             ".",
             "--host",
             "127.0.0.1",
             "--port",
             "18010",
-        ])
-    with pytest.raises(SystemExit):
-        parser.parse_args([
-            "--test-only-conformance",
-            "--bundle-root",
-            ".",
-            "--host",
-            "0.0.0.0",
-            "--port",
-            "18010",
-        ])
-    args = parser.parse_args([
-        "--test-only-conformance",
-        "--bundle-root",
-        ".",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        "18010",
-    ])
+        ]
+    )
     assert args.test_only_conformance is True
+
+
+@pytest.mark.parametrize("port", ["0", "65536", "not-a-port"])
+def test_conformance_runner_rejects_invalid_port_without_enumerating_all_ports(
+    port: str,
+    capsys,
+) -> None:
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "--test-only-conformance",
+                "--bundle-root",
+                ".",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                port,
+            ]
+        )
+    error = capsys.readouterr().err
+    assert "port must be an integer from 1 to 65535" in error
+    assert len(error) < 2_000

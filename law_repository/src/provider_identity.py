@@ -4,6 +4,7 @@ The retrieval JSON body remains Evidence schema v1.0.  Provider release/build
 identity is bound out-of-band through readiness and HTTP headers so an Agent
 cannot accidentally combine one readiness check with another deployed build.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -230,7 +231,11 @@ def _verify_source_manifest(
         seen.add(relative_path)
         if not isinstance(expected_sha, str) or not _SHA256_PATTERN.fullmatch(expected_sha):
             raise ProviderIdentityError("source manifest contains an invalid SHA-256")
-        if not isinstance(expected_bytes, int) or isinstance(expected_bytes, bool) or expected_bytes < 0:
+        if (
+            not isinstance(expected_bytes, int)
+            or isinstance(expected_bytes, bool)
+            or expected_bytes < 0
+        ):
             raise ProviderIdentityError("source manifest contains an invalid byte count")
         path = _safe_manifest_path(bundle_root, relative_path)
         try:
@@ -288,10 +293,21 @@ def binding_header_mismatches(
     headers: Mapping[str, str],
     identity: ProviderBuildIdentity,
 ) -> tuple[str, ...]:
-    """Return exact build-binding headers that are absent or do not match."""
-    normalized = {key.lower(): value for key, value in headers.items()}
+    """Return binding headers that are absent, duplicated, or do not match.
+
+    Starlette's ``Headers`` preserves duplicate raw ASGI header fields and
+    exposes them through ``getlist``.  A plain mapping is also accepted for
+    build tooling and unit tests, where each key is necessarily singular.
+    """
+    getlist = getattr(headers, "getlist", None)
+
+    def values_for(name: str) -> tuple[str, ...]:
+        if callable(getlist):
+            return tuple(getlist(name))
+        return tuple(value for key, value in headers.items() if key.lower() == name.lower())
+
     return tuple(
         name
         for name, expected in identity.binding_headers().items()
-        if normalized.get(name.lower()) != expected
+        if values_for(name) != (expected,)
     )

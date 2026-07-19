@@ -5,6 +5,7 @@ leaf 마스터를 사용한다. 정확한 HSK10 또는 단일 leaf로 해소된 
 finding 자격 evidence를 반환한다. 모호·장애·커버리지 누락은 빈 결과가
 아니라 명시적 상태와 오류로 반환한다.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -22,6 +23,8 @@ from src.db.neo4j import driver as make_driver
 from src.db.postgres import connect
 
 SCHEMA_VERSION = "1.0"
+_QDRANT_SCROLL_PAGE_SIZE = 256
+_QDRANT_READINESS_MAX_POINTS = 1_000_000
 
 NonEmpty128 = Annotated[str, Field(min_length=1, max_length=128)]
 NonEmpty500 = Annotated[str, Field(min_length=1, max_length=500)]
@@ -77,10 +80,7 @@ class RetrieveRequest(ContractModel):
             raise ValueError("uploaded_requirement_document_codes는 중복될 수 없음")
         if len(self.validation_issue_codes) != len(set(self.validation_issue_codes)):
             raise ValueError("validation_issue_codes는 중복될 수 없음")
-        if any(
-            not code or len(code) > 128
-            for code in self.uploaded_requirement_document_codes
-        ):
+        if any(not code or len(code) > 128 for code in self.uploaded_requirement_document_codes):
             raise ValueError("uploaded_requirement_document_codes 항목은 1..128자여야 함")
         if any(not code or len(code) > 128 for code in self.validation_issue_codes):
             raise ValueError("validation_issue_codes 항목은 1..128자여야 함")
@@ -112,9 +112,9 @@ class Evidence(ContractModel):
     required_document_code: NullableNonEmpty
     required_document_name: NullableNonEmpty
     agencies: list[NonEmpty500] = Field(json_schema_extra={"uniqueItems": True})
-    retrieval_methods: list[
-        Literal["exact_hs", "dense", "bm25", "graph"]
-    ] = Field(min_length=1, json_schema_extra={"uniqueItems": True})
+    retrieval_methods: list[Literal["exact_hs", "dense", "bm25", "graph"]] = Field(
+        min_length=1, json_schema_extra={"uniqueItems": True}
+    )
     eligibility: Literal["finding", "supporting", "blocked"]
     score: float | None = Field(ge=0, le=1)
     raw_scores: dict[str, float]
@@ -301,50 +301,97 @@ class DatabaseEvidenceBackend:
             return RequirementLookup(True, tuple(dict(row) for row in cur.fetchall()))
 
     def _verify_target_law_coverage(self) -> dict[str, int]:
-        """Require every configured law to have at least one current article."""
+        """Require a complete and byte-attested current target-law corpus."""
         from src.ingest.laws import TARGET_LAWS
 
         expected_ids = {law["law_id"] for law in TARGET_LAWS}
         with connect() as conn, conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT l.law_id,
-                       count(a.id) FILTER (
-                         WHERE a.is_current
-                           AND a.content IS NOT NULL
-                           AND btrim(a.content) <> ''
-                           AND a.content_hash ~ '^[0-9a-f]{64}$'
-                           AND btrim(a.version_mst) <> ''
-                           AND EXISTS (
-                             SELECT 1
-                             FROM law_versions v
-                             WHERE v.law_id=a.law_id AND v.mst=a.version_mst
-                           )
-                       ) AS verified_current_articles
+                SELECT l.law_id, a.id, a.content, a.content_hash, a.version_mst,
+                       EXISTS (
+                         SELECT 1
+                         FROM law_versions v
+                         WHERE v.law_id=a.law_id AND v.mst=a.version_mst
+                       ) AS has_law_version
                 FROM laws l
-                LEFT JOIN law_articles a ON a.law_id=l.law_id
+                LEFT JOIN law_articles a
+                  ON a.law_id=l.law_id AND a.is_current
                 WHERE l.law_id = ANY(%s)
-                GROUP BY l.law_id
+                ORDER BY l.law_id, a.id
                 """,
                 (sorted(expected_ids),),
             )
             rows = tuple(cur.fetchall())
         loaded_ids = {row[0] for row in rows}
-        article_backed_ids = {row[0] for row in rows if int(row[1] or 0) > 0}
+        article_backed_ids = {row[0] for row in rows if row[1] is not None}
+        invalid_current_articles = 0
+        for _law_id, article_id, content, content_hash, version_mst, has_version in rows:
+            if article_id is None:
+                continue
+            actual_hash = (
+                hashlib.sha256(content.encode("utf-8")).hexdigest()
+                if isinstance(content, str) and content.strip()
+                else None
+            )
+            if (
+                actual_hash is None
+                or content_hash != actual_hash
+                or not isinstance(version_mst, str)
+                or not version_mst.strip()
+                or not has_version
+            ):
+                invalid_current_articles += 1
         missing = expected_ids - loaded_ids
         without_articles = loaded_ids - article_backed_ids
-        if missing or without_articles:
+        if missing or without_articles or invalid_current_articles:
             raise RuntimeError(
                 "law corpus incomplete: "
                 f"expected={len(expected_ids)}, loaded={len(loaded_ids)}, "
                 f"article_backed={len(article_backed_ids)}, "
-                f"missing={len(missing)}, without_current_articles={len(without_articles)}"
+                f"missing={len(missing)}, without_current_articles={len(without_articles)}, "
+                f"invalid_current_articles={invalid_current_articles}"
             )
         return {
             "expected": len(expected_ids),
             "loaded": len(loaded_ids),
             "article_backed": len(article_backed_ids),
         }
+
+    @staticmethod
+    def _scroll_qdrant_point_ids(qdrant, collection: str, exact_count: int) -> list[str]:
+        """Read the complete point-id set with finite pagination guards."""
+        if exact_count < 0 or exact_count > _QDRANT_READINESS_MAX_POINTS:
+            raise RuntimeError(
+                "law index unreadable: "
+                f"qdrant_count={exact_count}, "
+                f"readiness_limit={_QDRANT_READINESS_MAX_POINTS}"
+            )
+        point_ids: list[str] = []
+        offset = None
+        seen_offsets: set[str] = set()
+        max_pages = exact_count + 1
+        for _ in range(max_pages):
+            records, next_offset = qdrant.scroll(
+                collection_name=collection,
+                limit=_QDRANT_SCROLL_PAGE_SIZE,
+                offset=offset,
+                with_payload=False,
+                with_vectors=False,
+            )
+            if len(records) > _QDRANT_SCROLL_PAGE_SIZE:
+                raise RuntimeError("law index unreadable: oversized qdrant scroll page")
+            point_ids.extend(str(record.id) for record in records)
+            if len(point_ids) > exact_count:
+                raise RuntimeError("law index incomplete: qdrant scroll exceeded exact count")
+            if next_offset is None:
+                return point_ids
+            offset_marker = str(next_offset)
+            if offset_marker in seen_offsets:
+                raise RuntimeError("law index unreadable: qdrant pagination loop")
+            seen_offsets.add(offset_marker)
+            offset = next_offset
+        raise RuntimeError("law index unreadable: qdrant pagination exceeded exact count")
 
     def _verify_law_index(self) -> dict[str, int]:
         """Require complete Qdrant retrieval and Neo4j article projections."""
@@ -375,6 +422,18 @@ class DatabaseEvidenceBackend:
             expected, indexed, graph_articles = cur.fetchone()
             cur.execute(
                 """
+                SELECT a.qdrant_point_id::text
+                FROM law_articles a
+                WHERE a.is_current
+                  AND a.qdrant_point_id IS NOT NULL
+                  AND NOT EXISTS (
+                    SELECT 1 FROM law_articles c WHERE c.parent_article_pk=a.id
+                  )
+                """
+            )
+            postgres_qdrant_point_ids = [str(row[0]) for row in cur.fetchall()]
+            cur.execute(
+                """
                 SELECT id
                 FROM law_articles
                 WHERE is_current AND paragraph_no IS NULL
@@ -383,29 +442,44 @@ class DatabaseEvidenceBackend:
             postgres_graph_ids = {int(row[0]) for row in cur.fetchall()}
         from src.db.qdrant import COLLECTION, client as qdrant_client
 
-        qdrant_count = qdrant_client().count(COLLECTION, exact=True).count
+        qdrant = qdrant_client()
+        qdrant_count = int(qdrant.count(COLLECTION, exact=True).count)
+        qdrant_point_ids = self._scroll_qdrant_point_ids(qdrant, COLLECTION, qdrant_count)
+        postgres_qdrant_ids = set(postgres_qdrant_point_ids)
+        actual_qdrant_ids = set(qdrant_point_ids)
+        postgres_duplicate_ids = len(postgres_qdrant_point_ids) - len(postgres_qdrant_ids)
+        qdrant_duplicate_ids = len(qdrant_point_ids) - len(actual_qdrant_ids)
+        qdrant_missing_ids = postgres_qdrant_ids - actual_qdrant_ids
+        qdrant_orphaned_ids = actual_qdrant_ids - postgres_qdrant_ids
         drv = make_driver()
         try:
             with drv.session() as session:
-                graph_rows = list(session.run(
-                    "MATCH (a:Article) RETURN a.article_pk AS article_pk"
-                ))
+                graph_rows = list(
+                    session.run("MATCH (a:Article) RETURN a.article_pk AS article_pk")
+                )
         finally:
             drv.close()
-        neo4j_ids = {
-            int(row["article_pk"])
-            for row in graph_rows
-            if row["article_pk"] is not None
-        }
+        neo4j_ids = {int(row["article_pk"]) for row in graph_rows if row["article_pk"] is not None}
         neo4j_count = len(graph_rows)
         missing_ids = postgres_graph_ids - neo4j_ids
-        orphaned_count = len(neo4j_ids - postgres_graph_ids) + (
-            neo4j_count - len(neo4j_ids)
-        )
-        if expected != indexed or expected != qdrant_count:
+        orphaned_count = len(neo4j_ids - postgres_graph_ids) + (neo4j_count - len(neo4j_ids))
+        if (
+            expected != indexed
+            or expected != qdrant_count
+            or qdrant_count != len(qdrant_point_ids)
+            or postgres_duplicate_ids
+            or qdrant_duplicate_ids
+            or qdrant_missing_ids
+            or qdrant_orphaned_ids
+        ):
             raise RuntimeError(
                 "law index incomplete: "
-                f"expected={expected}, postgres_indexed={indexed}, qdrant={qdrant_count}"
+                f"expected={expected}, postgres_indexed={indexed}, "
+                f"qdrant={qdrant_count}, qdrant_scrolled={len(qdrant_point_ids)}, "
+                f"missing={len(qdrant_missing_ids)}, "
+                f"orphaned={len(qdrant_orphaned_ids)}, "
+                f"postgres_duplicates={postgres_duplicate_ids}, "
+                f"qdrant_duplicates={qdrant_duplicate_ids}"
             )
         if (
             graph_articles != len(postgres_graph_ids)
@@ -508,10 +582,7 @@ class DatabaseEvidenceBackend:
             if row is None:
                 continue
             text_tokens = set(re.findall(r"[0-9A-Za-z가-힣]{2,}", row["content"].lower()))
-            lexical = (
-                len(query_tokens & text_tokens) / len(query_tokens)
-                if query_tokens else 0.0
-            )
+            lexical = len(query_tokens & text_tokens) / len(query_tokens) if query_tokens else 0.0
             rrf_normalized = min(1.0, candidate["rrf"] / theoretical_rrf_max)
             score = min(1.0, 0.85 * rrf_normalized + 0.15 * lexical)
             raw_scores = {
@@ -520,8 +591,7 @@ class DatabaseEvidenceBackend:
                 "lexical_overlap": float(lexical),
             }
             method_order = tuple(
-                method for method in ("dense", "bm25", "graph")
-                if method in candidate["methods"]
+                method for method in ("dense", "bm25", "graph") if method in candidate["methods"]
             )
             matches.append(LawArticleMatch(row, method_order, score, raw_scores))
         matches.sort(key=lambda match: (-match.score, match.row["article_pk"]))
@@ -536,6 +606,21 @@ def _evidence_id(source_record_id: str, version_hash: str) -> str:
 
 def _error(code: str, message: str, *, retryable: bool = False) -> EvidenceError:
     return EvidenceError(code=code, message=message, retryable=retryable)
+
+
+_BACKEND_ERROR_MESSAGES = {
+    "KNOWLEDGE_SNAPSHOT_MISMATCH": "Knowledge snapshot consistency check failed",
+    "KNOWLEDGE_STORE_UNAVAILABLE": "Knowledge store is unavailable",
+    "KNOWLEDGE_SNAPSHOT_METADATA_UNAVAILABLE": ("Knowledge snapshot metadata is unavailable"),
+    "HS_MASTER_UNAVAILABLE": "HS master is unavailable",
+    "REQUIREMENT_LOOKUP_FAILED": "Requirement lookup failed",
+    "LAW_RETRIEVAL_FAILED": "Law retrieval failed",
+}
+
+
+def _backend_error(code: str) -> EvidenceError:
+    """Return a fixed public message; backend exception text stays server-side."""
+    return _error(code, _BACKEND_ERROR_MESSAGES[code], retryable=True)
 
 
 def _row_to_evidence(item_id: str, row: dict) -> Evidence:
@@ -587,14 +672,11 @@ def _law_match_to_evidence(
         article_label += f" 제{row['paragraph_no']}항"
     title_suffix = f"({row['title']})" if row.get("title") else ""
     source_uri = (
-        f"https://www.law.go.kr/%EB%B2%95%EB%A0%B9/{quote(row['law_name'])}/"
-        f"{quote(article_label)}"
+        f"https://www.law.go.kr/%EB%B2%95%EB%A0%B9/{quote(row['law_name'])}/{quote(article_label)}"
     )
     # law_articles uses a half-open valid_to.  The Evidence wire exposes the
     # last applicable calendar date so every consumer uses one convention.
-    wire_valid_to = (
-        row["valid_to"] - timedelta(days=1) if row.get("valid_to") else None
-    )
+    wire_valid_to = row["valid_to"] - timedelta(days=1) if row.get("valid_to") else None
     return Evidence(
         evidence_id=_evidence_id(source_record_id, row["content_hash"]),
         source_record_id=source_record_id,
@@ -625,16 +707,20 @@ def _law_query(request: RetrieveRequest, item: RetrieveItem, hsk10: str) -> str:
     direction = "수입" if request.trade_type == "import" else "수출"
     issues = " ".join(request.validation_issue_codes)
     return " ".join(
-        part for part in (
+        part
+        for part in (
             item.description,
             f"HSK {hsk10}",
             f"{direction} 신고 제출서류 세관장 확인 관세법",
             issues,
-        ) if part
+        )
+        if part
     )
 
 
-def _unavailable_results(request: RetrieveRequest, error: EvidenceError) -> list[ItemEvidenceResult]:
+def _unavailable_results(
+    request: RetrieveRequest, error: EvidenceError
+) -> list[ItemEvidenceResult]:
     return [
         ItemEvidenceResult(
             item_id=item.item_id,
@@ -667,16 +753,18 @@ def _unsupported_as_of_results(
                 None,
                 (),
             )
-        results.append(ItemEvidenceResult(
-            item_id=item.item_id,
-            hs_resolution=resolution.status,
-            resolved_hsk10=resolution.resolved_hsk10,
-            candidate_hsk10s=list(resolution.candidate_hsk10s),
-            coverage="unknown",
-            requirements_found=False,
-            evidence=[],
-            errors=[error],
-        ))
+        results.append(
+            ItemEvidenceResult(
+                item_id=item.item_id,
+                hs_resolution=resolution.status,
+                resolved_hsk10=resolution.resolved_hsk10,
+                candidate_hsk10s=list(resolution.candidate_hsk10s),
+                coverage="unknown",
+                requirements_found=False,
+                evidence=[],
+                errors=[error],
+            )
+        )
     return results
 
 
@@ -693,7 +781,7 @@ def retrieve_evidence(
             if isinstance(exc, KnowledgeSnapshotMismatch)
             else "KNOWLEDGE_STORE_UNAVAILABLE"
         )
-        err = _error(code, str(exc), retryable=True)
+        err = _backend_error(code)
         return RetrieveResponse(
             schema_version=SCHEMA_VERSION,
             request_id=request.request_id,
@@ -715,8 +803,8 @@ def retrieve_evidence(
 
     try:
         supported_as_of = backend.snapshot_effective_date(snapshot_id)
-    except Exception as exc:
-        err = _error("KNOWLEDGE_SNAPSHOT_METADATA_UNAVAILABLE", str(exc), retryable=True)
+    except Exception:
+        err = _backend_error("KNOWLEDGE_SNAPSHOT_METADATA_UNAVAILABLE")
         return RetrieveResponse(
             schema_version=SCHEMA_VERSION,
             request_id=request.request_id,
@@ -748,19 +836,21 @@ def retrieve_evidence(
     for item in request.items:
         try:
             resolution = backend.resolve_hsk(item.hs_code)
-        except Exception as exc:
+        except Exception:
             partial = True
-            err = _error("HS_MASTER_UNAVAILABLE", str(exc), retryable=True)
-            results.append(ItemEvidenceResult(
-                item_id=item.item_id,
-                hs_resolution="missing" if not item.hs_code else "invalid",
-                resolved_hsk10=None,
-                candidate_hsk10s=[],
-                coverage="unknown",
-                requirements_found=False,
-                evidence=[],
-                errors=[err],
-            ))
+            err = _backend_error("HS_MASTER_UNAVAILABLE")
+            results.append(
+                ItemEvidenceResult(
+                    item_id=item.item_id,
+                    hs_resolution="missing" if not item.hs_code else "invalid",
+                    resolved_hsk10=None,
+                    candidate_hsk10s=[],
+                    coverage="unknown",
+                    requirements_found=False,
+                    evidence=[],
+                    errors=[err],
+                )
+            )
             continue
 
         if resolution.resolved_hsk10 is None:
@@ -775,35 +865,39 @@ def retrieve_evidence(
                 "invalid": "HS Code가 현행 HSK leaf로 해소되지 않음",
                 "ambiguous": "HS6의 HSK10 하위 leaf가 여러 개라 자동 확정할 수 없음",
             }[resolution.status]
-            results.append(ItemEvidenceResult(
-                item_id=item.item_id,
-                hs_resolution=resolution.status,
-                resolved_hsk10=None,
-                candidate_hsk10s=list(resolution.candidate_hsk10s),
-                coverage="unknown",
-                requirements_found=False,
-                evidence=[],
-                errors=[_error(code, message)],
-            ))
+            results.append(
+                ItemEvidenceResult(
+                    item_id=item.item_id,
+                    hs_resolution=resolution.status,
+                    resolved_hsk10=None,
+                    candidate_hsk10s=list(resolution.candidate_hsk10s),
+                    coverage="unknown",
+                    requirements_found=False,
+                    evidence=[],
+                    errors=[_error(code, message)],
+                )
+            )
             continue
 
         try:
             lookup = backend.lookup_requirements(
                 snapshot_id, resolution.resolved_hsk10, request.trade_type, request.review_as_of
             )
-        except Exception as exc:
+        except Exception:
             partial = True
-            err = _error("REQUIREMENT_LOOKUP_FAILED", str(exc), retryable=True)
-            results.append(ItemEvidenceResult(
-                item_id=item.item_id,
-                hs_resolution=resolution.status,
-                resolved_hsk10=resolution.resolved_hsk10,
-                candidate_hsk10s=list(resolution.candidate_hsk10s),
-                coverage="partial",
-                requirements_found=False,
-                evidence=[],
-                errors=[err],
-            ))
+            err = _backend_error("REQUIREMENT_LOOKUP_FAILED")
+            results.append(
+                ItemEvidenceResult(
+                    item_id=item.item_id,
+                    hs_resolution=resolution.status,
+                    resolved_hsk10=resolution.resolved_hsk10,
+                    candidate_hsk10s=list(resolution.candidate_hsk10s),
+                    coverage="partial",
+                    requirements_found=False,
+                    evidence=[],
+                    errors=[err],
+                )
+            )
             continue
 
         if not lookup.covered:
@@ -813,16 +907,18 @@ def retrieve_evidence(
                 f"{resolution.resolved_hsk10}/{request.trade_type} 공식 API 조회 커버리지가 없음",
                 retryable=True,
             )
-            results.append(ItemEvidenceResult(
-                item_id=item.item_id,
-                hs_resolution=resolution.status,
-                resolved_hsk10=resolution.resolved_hsk10,
-                candidate_hsk10s=list(resolution.candidate_hsk10s),
-                coverage="partial",
-                requirements_found=False,
-                evidence=[],
-                errors=[err],
-            ))
+            results.append(
+                ItemEvidenceResult(
+                    item_id=item.item_id,
+                    hs_resolution=resolution.status,
+                    resolved_hsk10=resolution.resolved_hsk10,
+                    candidate_hsk10s=list(resolution.candidate_hsk10s),
+                    coverage="partial",
+                    requirements_found=False,
+                    evidence=[],
+                    errors=[err],
+                )
+            )
             continue
 
         requirement_evidence = [_row_to_evidence(item.item_id, row) for row in lookup.rows]
@@ -840,33 +936,34 @@ def retrieve_evidence(
                     _law_match_to_evidence(item.item_id, request.trade_type, match)
                     for match in matches
                 ]
-            except Exception as exc:
+            except Exception:
                 partial = True
                 item_coverage = "partial"
-                item_errors.append(_error(
-                    "LAW_RETRIEVAL_FAILED",
-                    str(exc),
-                    retryable=True,
-                ))
+                item_errors.append(_backend_error("LAW_RETRIEVAL_FAILED"))
         evidence = [*requirement_evidence, *law_evidence]
-        results.append(ItemEvidenceResult(
-            item_id=item.item_id,
-            hs_resolution=resolution.status,
-            resolved_hsk10=resolution.resolved_hsk10,
-            candidate_hsk10s=list(resolution.candidate_hsk10s),
-            coverage=item_coverage,
-            requirements_found=bool(requirement_evidence),
-            evidence=evidence,
-            errors=item_errors,
-        ))
+        results.append(
+            ItemEvidenceResult(
+                item_id=item.item_id,
+                hs_resolution=resolution.status,
+                resolved_hsk10=resolution.resolved_hsk10,
+                candidate_hsk10s=list(resolution.candidate_hsk10s),
+                coverage=item_coverage,
+                requirements_found=bool(requirement_evidence),
+                evidence=evidence,
+                errors=item_errors,
+            )
+        )
 
     top_errors = (
-        [_error(
-            "PARTIAL_RESULTS",
-            "일부 품목의 지식 조회를 완료하지 못함",
-            retryable=any(error.retryable for result in results for error in result.errors),
-        )]
-        if partial else []
+        [
+            _error(
+                "PARTIAL_RESULTS",
+                "일부 품목의 지식 조회를 완료하지 못함",
+                retryable=any(error.retryable for result in results for error in result.errors),
+            )
+        ]
+        if partial
+        else []
     )
     return RetrieveResponse(
         schema_version=SCHEMA_VERSION,

@@ -4,6 +4,7 @@ This command is test infrastructure, not a production backend selector.  It
 requires an opt-in argv flag and a sealed provider bundle; no environment
 variable can turn the production application into this fixture.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -19,6 +20,16 @@ from src.webapp import create_test_conformance_application  # noqa: E402
 LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
 
 
+def _port(value: str) -> int:
+    try:
+        port = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("port must be an integer from 1 to 65535") from None
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError("port must be an integer from 1 to 65535")
+    return port
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -29,7 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--bundle-root", type=Path, required=True)
     parser.add_argument("--host", choices=LOOPBACK_HOSTS, required=True)
-    parser.add_argument("--port", type=int, choices=range(1, 65536), required=True)
+    parser.add_argument("--port", type=_port, required=True)
     return parser
 
 
