@@ -105,11 +105,33 @@ jobs:
         id: install
         run: uv sync --locked --group dev
 
+      - name: Audit the exact locked dependency graph
+        if: github.event_name != 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv lock --check
+          mkdir -p ci-evidence
+          uv export --locked --all-groups --no-emit-project --no-emit-local \
+            --no-sources --format requirements.txt \
+            --output-file ci-evidence/locked-requirements.txt
+          uv run --isolated --no-project --with "pip-audit==2.9.0" \
+            pip-audit --require-hashes --disable-pip \
+            -r ci-evidence/locked-requirements.txt
+
       - name: Compile and lint
         id: compile_lint
         run: |
           uv run --locked python -m compileall -q law_repository/src evals tools
           uv run --locked ruff check law_repository/src law_repository/tests evals tools
+
+      - name: Production service SAST
+        if: github.event_name != 'workflow_dispatch'
+        run: >-
+          uv run --locked ruff check --select S,B,E,F,I,UP
+          law_repository/src/production.py
+          law_repository/src/production_settings.py
+          tools/build_production_context.py
 
       - name: Check provider contract drift
         id: contract_drift
@@ -125,6 +147,13 @@ jobs:
           law_repository/tests/test_ccct_p0.py
           law_repository/tests/test_bm25.py
           law_repository/tests/test_hf_space_deploy.py
+
+      - name: Verify production service, security boundary, and sealed deploy context
+        if: github.event_name != 'workflow_dispatch'
+        run: >-
+          uv run --locked pytest -q
+          law_repository/tests/test_production_service.py
+          law_repository/tests/test_production_deploy.py
 
       - name: Create exact-release provenance proof
         id: create_proof

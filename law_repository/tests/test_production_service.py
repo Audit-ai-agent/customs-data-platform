@@ -20,6 +20,7 @@ from src.production import (
 from src.production_settings import (
     ProductionConfigurationError,
     ProductionSettings,
+    apply_runtime_data_store_secrets,
     validate_production_data_store_settings,
 )
 from src.provider_identity import (
@@ -198,10 +199,41 @@ def test_data_store_validation_rejects_weak_or_cleartext_remote_settings() -> No
         postgres_password="strong-postgres-secret",
         postgres_sslmode="verify-full",
         qdrant_url="https://qdrant.internal:6333",
+        qdrant_api_key="strong-qdrant-api-key",
         neo4j_uri="neo4j+s://neo4j.internal:7687",
         neo4j_password="strong-neo4j-secret",
     )
     validate_production_data_store_settings(service, encrypted)
+
+
+def test_mounted_data_store_secrets_are_resolved_without_logging(
+    tmp_path: Path,
+) -> None:
+    paths = {}
+    for name, value in {
+        "postgres": "postgres-file-secret",
+        "qdrant": "qdrant-file-secret",
+        "neo4j": "neo4j-file-secret",
+    }.items():
+        path = tmp_path / name
+        path.write_text(value + "\n", encoding="utf-8")
+        paths[name] = path.resolve()
+    service = _settings(
+        postgres_password_file=paths["postgres"],
+        qdrant_api_key_file=paths["qdrant"],
+        neo4j_password_file=paths["neo4j"],
+    )
+    data = DataStoreSettings(_env_file=None)
+
+    apply_runtime_data_store_secrets(service, data)
+
+    assert data.postgres_password == "postgres-file-secret"
+    assert data.qdrant_api_key == "qdrant-file-secret"
+    assert data.neo4j_password == "neo4j-file-secret"
+    serialized = repr(service)
+    assert "postgres-file-secret" not in serialized
+    assert "qdrant-file-secret" not in serialized
+    assert "neo4j-file-secret" not in serialized
 
 
 def test_liveness_is_public_but_still_requires_tls() -> None:
@@ -293,7 +325,8 @@ def test_successful_retrieval_preserves_contract_and_binding_headers() -> None:
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
     assert response.json()["request_id"] == "req-production-1"
-    assert response.headers["x-service-request-id"] == "req-production-1"
+    assert response.headers["x-service-request-id"].startswith("svc-")
+    assert response.headers["x-service-request-id"] != "req-production-1"
     for name, value in _identity().binding_headers().items():
         assert response.headers[name] == value
 
@@ -382,6 +415,7 @@ async def _invoke(
     raw_headers: list[tuple[bytes, bytes]],
     chunks: list[bytes] | None = None,
     receive_must_not_run: bool = False,
+    client_host: str = "127.0.0.1",
 ) -> list[dict[str, Any]]:
     pending = list(chunks or [b""])
     sent: list[dict[str, Any]] = []
@@ -395,7 +429,7 @@ async def _invoke(
         "raw_path": path.encode("ascii"),
         "query_string": b"",
         "headers": raw_headers,
-        "client": ("127.0.0.1", 12345),
+        "client": (client_host, 12345),
         "server": ("127.0.0.1", 443),
         "root_path": "",
         "state": {},
@@ -416,6 +450,57 @@ async def _invoke(
 
     await app(scope, receive, send)
     return sent
+
+
+def test_trusted_proxy_requires_exact_cidr_and_single_https_assertion() -> None:
+    app = _app(
+        settings=_settings(
+            transport_mode="trusted_proxy_tls",
+            trusted_proxy_cidrs="10.42.0.0/24",
+        )
+    )
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            accepted = await _invoke(
+                app,
+                method="GET",
+                path=_LIVENESS_PATH,
+                raw_headers=[
+                    (b"host", b"evidence.internal"),
+                    (b"x-forwarded-proto", b"https"),
+                ],
+                client_host="10.42.0.9",
+            )
+            untrusted = await _invoke(
+                app,
+                method="GET",
+                path=_LIVENESS_PATH,
+                raw_headers=[
+                    (b"host", b"evidence.internal"),
+                    (b"x-forwarded-proto", b"https"),
+                ],
+                client_host="10.43.0.9",
+            )
+            duplicate = await _invoke(
+                app,
+                method="GET",
+                path=_LIVENESS_PATH,
+                raw_headers=[
+                    (b"host", b"evidence.internal"),
+                    (b"x-forwarded-proto", b"https"),
+                    (b"x-forwarded-proto", b"https"),
+                ],
+                client_host="10.42.0.9",
+            )
+            return accepted, untrusted, duplicate
+
+    accepted, untrusted, duplicate = asyncio.run(run())
+    assert _response_status(accepted) == 200
+    assert _response_status(untrusted) == 426
+    assert _response_json(untrusted)["error"]["code"] == "TLS_REQUIRED"
+    assert _response_status(duplicate) == 400
+    assert _response_json(duplicate)["error"]["code"] == "INVALID_HEADERS"
 
 
 def _raw_retrieval_headers(
@@ -675,6 +760,7 @@ def test_metrics_openapi_and_logs_do_not_expose_body_or_token(caplog) -> None:
         assert "security" not in schema["paths"][_LIVENESS_PATH]["get"]
 
     logs = caplog.text
+    assert "req-safe-observability" not in logs
     assert "case-secret-canary" not in logs
     assert "document-secret-canary" not in logs
     assert _TOKEN not in logs

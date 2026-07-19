@@ -96,3 +96,9 @@ TCP port에 올바른 제품이 뜨 있는지까지 증명하지 않으므로, E
 `/health/ready`, 3-store Live suite, no-skip Gate를 모두 통과해야 Release PASS입니다.
 
 구조와 경계는 [ARCHITECTURE.md](ARCHITECTURE.md), 비밀·데이터 정책은 [docs/SECURITY.md](docs/SECURITY.md)를 참고합니다.
+
+운영 Evidence API는 팀 데모 `src.webapp`과 분리된
+`python -m src.production`만 사용합니다. 인증·TLS ingress·요청 제한·비식별
+관측성·read-only container 배포 기준은
+[production deployment](law_repository/deploy/production/README.md), 장애·회전·rollback
+절차는 [production runbook](docs/RUNBOOK_EVIDENCE_PRODUCTION.md)을 따릅니다.

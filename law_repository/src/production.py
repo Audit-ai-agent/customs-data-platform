@@ -26,7 +26,7 @@ import threading
 import time
 import uuid
 from collections import Counter
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -42,6 +42,7 @@ from src.evidence import DatabaseEvidenceBackend, ReadinessBackend
 from src.production_settings import (
     ProductionSettings,
     RuntimeSecrets,
+    apply_runtime_data_store_secrets,
     validate_production_data_store_settings,
 )
 from src.provider_identity import (
@@ -132,10 +133,10 @@ def _single_header(
     return values[0] if values else None
 
 
-def _request_id(scope: Scope) -> str:
+def _client_request_id(scope: Scope) -> str | None:
     value = _single_header(scope, b"x-request-id")
     if value is None:
-        return f"svc-{uuid.uuid4().hex}"
+        return None
     try:
         decoded = value.decode("ascii")
     except UnicodeDecodeError as exc:
@@ -656,7 +657,7 @@ class ProductionBoundaryMiddleware:
         request_id = f"svc-{uuid.uuid4().hex}"
         admitted = False
         try:
-            request_id = _request_id(scope)
+            client_request_id = _client_request_id(scope)
             scope.setdefault("state", {})["service_request_id"] = request_id
             _single_header(scope, b"host", required=True)
             if scope.get("query_string", b""):
@@ -685,10 +686,8 @@ class ProductionBoundaryMiddleware:
                 )
                 _validate_strict_json(
                     body,
-                    request_id,
-                    enforce_request_id_match=bool(
-                        _raw_header_values(scope, b"x-request-id")
-                    ),
+                    client_request_id or "",
+                    enforce_request_id_match=client_request_id is not None,
                 )
                 receive = _replay_body(body)
 
@@ -828,8 +827,16 @@ class ProductionBoundaryMiddleware:
     async def _finish_after_timeout(self, task: asyncio.Task[Any]) -> None:
         try:
             await task
-        except BaseException:
-            pass
+        except BaseException as exc:
+            _LOGGER.warning(
+                json.dumps(
+                    {
+                        "event": "timed_out_work_finished_with_error",
+                        "exception_type": type(exc).__name__,
+                    },
+                    sort_keys=True,
+                )
+            )
         finally:
             await self.service_state.admission.release()
 
@@ -1030,6 +1037,7 @@ def create_production_evidence_application(
     """Create the real Database-backed service; fixture env switches do not exist."""
 
     selected = service_settings or ProductionSettings()
+    apply_runtime_data_store_secrets(selected, data_store_settings)
     validate_production_data_store_settings(selected, data_store_settings)
     return _create_application(
         service_settings=selected,

@@ -66,12 +66,15 @@ class ProductionSettings(BaseSettings):
 
     service_token: SecretStr | None = None
     service_token_file: Path | None = None
+    postgres_password_file: Path | None = None
+    qdrant_api_key_file: Path | None = None
+    neo4j_password_file: Path | None = None
 
     transport_mode: TransportMode = "trusted_proxy_tls"
     trusted_proxy_cidrs: str = ""
     allow_insecure_loopback_dev: bool = False
 
-    bind_host: str = "0.0.0.0"
+    bind_host: str = "0.0.0.0"  # noqa: S104 - ingress-only container listener
     port: int = Field(default=8010, ge=1, le=65535)
     max_request_body_bytes: int = Field(
         default=1_048_576,
@@ -91,7 +94,7 @@ class ProductionSettings(BaseSettings):
     log_level: str = "info"
 
     @model_validator(mode="after")
-    def validate_security_boundary(self) -> "ProductionSettings":
+    def validate_security_boundary(self) -> ProductionSettings:
         configured = int(self.service_token is not None) + int(
             self.service_token_file is not None
         )
@@ -102,6 +105,14 @@ class ProductionSettings(BaseSettings):
             )
         if self.service_token_file is not None and not self.service_token_file.is_absolute():
             raise ValueError("EVIDENCE_SERVICE_TOKEN_FILE must be an absolute path")
+        for field_name in (
+            "postgres_password_file",
+            "qdrant_api_key_file",
+            "neo4j_password_file",
+        ):
+            path = getattr(self, field_name)
+            if path is not None and not path.is_absolute():
+                raise ValueError(f"EVIDENCE_{field_name.upper()} must be an absolute path")
 
         self.log_level = self.log_level.lower()
         if self.log_level not in _SAFE_LOG_LEVELS:
@@ -139,7 +150,8 @@ class ProductionSettings(BaseSettings):
         if self.service_token is not None:
             candidate = self.service_token.get_secret_value()
         else:
-            assert self.service_token_file is not None
+            if self.service_token_file is None:
+                raise ProductionConfigurationError("service token is unavailable")
             try:
                 if self.service_token_file.is_symlink():
                     raise ProductionConfigurationError(
@@ -239,5 +251,42 @@ def validate_production_data_store_settings(
         raise ProductionConfigurationError("remote PostgreSQL must require TLS")
     if urlsplit(data.qdrant_url).scheme.lower() != "https":
         raise ProductionConfigurationError("remote Qdrant must use HTTPS")
+    if not data.qdrant_api_key:
+        raise ProductionConfigurationError("remote Qdrant requires an API key")
     if urlsplit(data.neo4j_uri).scheme.lower() not in {"bolt+s", "neo4j+s"}:
         raise ProductionConfigurationError("remote Neo4j must use an encrypted URI")
+
+
+def _read_secret_file(path: Path, *, label: str) -> str:
+    try:
+        if path.is_symlink():
+            raise ProductionConfigurationError(f"{label} file must not be a symbolic link")
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise ProductionConfigurationError(f"{label} file is unavailable") from exc
+    if not raw or len(raw) > 4_096:
+        raise ProductionConfigurationError(f"{label} file has an invalid size")
+    try:
+        value = raw.decode("utf-8").rstrip("\r\n")
+    except UnicodeDecodeError as exc:
+        raise ProductionConfigurationError(f"{label} file must be UTF-8") from exc
+    if not value or "\x00" in value or "\r" in value or "\n" in value:
+        raise ProductionConfigurationError(f"{label} file is malformed")
+    return value
+
+
+def apply_runtime_data_store_secrets(
+    service: ProductionSettings,
+    data: DataStoreSettings,
+) -> None:
+    """Resolve optional mounted DB secret files into the shared process config."""
+
+    mappings = (
+        ("postgres_password_file", "postgres_password", "PostgreSQL password"),
+        ("qdrant_api_key_file", "qdrant_api_key", "Qdrant API key"),
+        ("neo4j_password_file", "neo4j_password", "Neo4j password"),
+    )
+    for path_field, target_field, label in mappings:
+        path = getattr(service, path_field)
+        if path is not None:
+            setattr(data, target_field, _read_secret_file(path, label=label))

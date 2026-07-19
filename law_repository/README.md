@@ -97,7 +97,9 @@ python -m src.repository    # 스모크 데모
 
 ## AI Agent 내부 Evidence API v1
 
-`python -m src.webapp`으로 실행한 뒤 Agent는
+로컬 demo·contract 확인에는 `python -m src.webapp`을 사용할 수 있지만 이것은
+운영 서비스가 아니다. 운영에서 Agent는 인증·TLS·제한·lifecycle을 적용한
+`python -m src.production`으로 실행되는 서비스의
 `POST /internal/rag/v1/retrieve`를 호출한다. wire trade type은 `import|export`,
 jurisdiction은 `KR`이다. HSK10은 `exact`, HS6는 하위 leaf가 하나일 때만
 `unique_descendant`로 확정하며, 여러 leaf면 `ambiguous`로 반환한다.
@@ -129,6 +131,8 @@ src/
   evidence.py       Agent 내부 Evidence API v1 계약·조합·오류 의미
   cli.py            대화형 CLI
   webapp.py         팀 데모 웹서버 (FastAPI)
+  production.py     운영 전용 인증·제한·관측성·lifecycle ASGI 경계
+  production_settings.py 운영 fail-closed 설정과 secret/TLS/DB 검증
 migrations/         Postgres DDL (유효구간 EXCLUDE 제약 포함)
 tests/              스키마/적재/Evidence 계약/델타/그래프/cross-store 정합성
 ```

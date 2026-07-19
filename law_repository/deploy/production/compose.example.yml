@@ -1,0 +1,76 @@
+name: customs-evidence-production
+
+# This file deploys only the Evidence service shell.  It deliberately does not
+# create, delete, migrate, or expose the team's PostgreSQL/Qdrant/Neo4j stack.
+# The immutable image must be built from tools/build_production_context.py and
+# supplied by digest.
+services:
+  evidence:
+    image: ${EVIDENCE_IMAGE:?set immutable image}@${EVIDENCE_IMAGE_DIGEST:?set sha256 digest}
+    init: true
+    restart: unless-stopped
+    read_only: true
+    user: "65532:65532"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=64m,mode=1777,noexec,nosuid,nodev
+    expose:
+      - "8010"
+    networks:
+      - ingress
+    secrets:
+      - evidence_service_token
+      - postgres_password
+      - qdrant_api_key
+      - neo4j_password
+    environment:
+      EVIDENCE_SERVICE_TOKEN_FILE: /run/secrets/evidence_service_token
+      EVIDENCE_POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      EVIDENCE_QDRANT_API_KEY_FILE: /run/secrets/qdrant_api_key
+      EVIDENCE_NEO4J_PASSWORD_FILE: /run/secrets/neo4j_password
+      EVIDENCE_TRANSPORT_MODE: trusted_proxy_tls
+      EVIDENCE_TRUSTED_PROXY_CIDRS: ${EVIDENCE_TRUSTED_PROXY_CIDRS:?set exact ingress CIDR}
+      EVIDENCE_BIND_HOST: 0.0.0.0
+      EVIDENCE_PORT: "8010"
+      EVIDENCE_MAX_REQUEST_BODY_BYTES: "1048576"
+      EVIDENCE_MAX_RESPONSE_BODY_BYTES: "2097152"
+      EVIDENCE_MAX_CONCURRENCY: "8"
+      EVIDENCE_REQUEST_DEADLINE_SECONDS: "30"
+      EVIDENCE_SHUTDOWN_GRACE_SECONDS: "30"
+      EVIDENCE_ENABLE_OPENAPI: "false"
+      EVIDENCE_LOG_LEVEL: info
+      POSTGRES_HOST: ${POSTGRES_HOST:?set PostgreSQL host}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:?set PostgreSQL database}
+      POSTGRES_USER: ${POSTGRES_USER:?set read-only API role}
+      POSTGRES_SSLMODE: verify-full
+      QDRANT_URL: ${QDRANT_URL:?set HTTPS Qdrant URL}
+      NEO4J_URI: ${NEO4J_URI:?set neo4j+s URI}
+      NEO4J_USER: ${NEO4J_USER:?set read-only Neo4j role}
+    stop_grace_period: 45s
+    deploy:
+      resources:
+        limits:
+          cpus: "${EVIDENCE_CPU_LIMIT:-4.0}"
+          memory: ${EVIDENCE_MEMORY_LIMIT:-8G}
+        reservations:
+          cpus: "${EVIDENCE_CPU_RESERVATION:-1.0}"
+          memory: ${EVIDENCE_MEMORY_RESERVATION:-2G}
+
+networks:
+  ingress:
+    external: true
+    name: ${EVIDENCE_INGRESS_NETWORK:?set approved ingress network}
+
+secrets:
+  evidence_service_token:
+    external: true
+  postgres_password:
+    external: true
+  qdrant_api_key:
+    external: true
+  neo4j_password:
+    external: true
