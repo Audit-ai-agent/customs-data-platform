@@ -33,8 +33,10 @@ class _Cursor:
     def fetchone(self) -> tuple[Any, ...] | None:
         if "show transaction_read_only" in self._query:
             return ("on",)
-        if "count(distinct law_id)" in self._query:
+        if "count(distinct law_id)" in self._query and "where law_id = any" in self._query:
             return (3,)
+        if "count(distinct law_id)" in self._query:
+            return (4,)
         if "count(*) from law_articles" in self._query:
             return (1_007,)
         return None
@@ -74,6 +76,7 @@ def test_readonly_audit_records_incomplete_corpus_and_generation_tables() -> Non
     )
 
     assert audit.target_law_count == 3
+    assert audit.total_law_count == 4
     assert audit.article_count == 1_007
     assert audit.generation_tables_present == ()
     assert audit.generation_tables_missing == runner.GENERATION_TABLES
@@ -110,7 +113,9 @@ def test_parser_requires_explicit_ack_and_loopback(tmp_path: Path) -> None:
 
 
 def test_real_v2_boundary_returns_503_and_records_zero_retrievals(tmp_path: Path) -> None:
-    audit_output = tmp_path / "external" / "preserved-audit.json"
+    output_root = tmp_path / "external"
+    output_root.mkdir()
+    audit_output = output_root / "preserved-audit.json"
     app = runner.create_preserved_data_diagnostic_application(
         production_context=tmp_path / "context",
         service_token_file=_token_file(tmp_path),
@@ -144,6 +149,9 @@ def test_real_v2_boundary_returns_503_and_records_zero_retrievals(tmp_path: Path
     assert app.state.test_only_runtime_conformance is False
     assert app.state.test_only_preserved_readonly_diagnostic is True
     assert app.state.release_ready is False
+    delegate = app.state.runtime_release_loader._delegate
+    assert delegate._active_loader._connection_factory is _connection_factory
+    assert delegate._metadata_loader._connection_factory is _connection_factory
     assert audit_output.exists()
     assert '"target_law_count": 3' in audit_output.read_text(encoding="utf-8")
 
@@ -152,6 +160,7 @@ def test_audit_output_refuses_repository_and_existing_paths(tmp_path: Path) -> N
     audit = runner.PreservedDataAudit(
         provider_revision=_REVISION,
         target_law_count=3,
+        total_law_count=4,
         article_count=1_007,
         generation_tables_present=(),
     )
@@ -162,3 +171,57 @@ def test_audit_output_refuses_repository_and_existing_paths(tmp_path: Path) -> N
     runner.write_audit_json(audit, output)
     with pytest.raises(runner.PreservedDataDiagnosticError, match="new regular"):
         runner.write_audit_json(audit, output)
+
+
+def test_audit_output_refuses_production_context_and_symlink_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    audit = runner.PreservedDataAudit(
+        provider_revision=_REVISION,
+        target_law_count=3,
+        total_law_count=4,
+        article_count=1_007,
+        generation_tables_present=(),
+    )
+    context = tmp_path / "context"
+    context.mkdir()
+    with pytest.raises(runner.PreservedDataDiagnosticError, match="production context"):
+        runner.write_audit_json(
+            audit,
+            context / "audit.json",
+            forbidden_roots=(runner.ROOT, context),
+        )
+
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.mkdir()
+    monkeypatch.setattr(runner, "_has_symlink_component", lambda _path: True)
+    with pytest.raises(runner.PreservedDataDiagnosticError, match="non-symlink"):
+        runner.write_audit_json(audit, linked_parent / "audit.json")
+
+
+def test_main_redacts_configuration_error_paths(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    missing_context = tmp_path / "private-endpoint-and-context"
+    exit_code = runner.main(
+        [
+            "--test-only-preserved-readonly-diagnostic",
+            "--production-context",
+            str(missing_context),
+            "--service-token-file",
+            str(tmp_path / "missing-secret-token"),
+            "--audit-output",
+            str(tmp_path / "audit.json"),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "18011",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 78
+    assert "Traceback" not in captured.err
+    assert str(tmp_path) not in captured.err
+    assert "private-endpoint-and-context" not in captured.err

@@ -31,11 +31,13 @@ for import_root in (ROOT, ROOT / "law_repository"):
 from src.db import postgres  # noqa: E402
 from src.deadline import RequestDeadline  # noqa: E402
 from src.generation_runtime import ActiveGenerationLoader  # noqa: E402
+from src.ingest.laws import TARGET_LAWS  # noqa: E402
 from src.production import create_test_runtime_v2_application  # noqa: E402
 from src.production_settings import ProductionSettings  # noqa: E402
 from src.provider_identity import load_runtime_provider_build_identity  # noqa: E402
 from src.runtime_release import (  # noqa: E402
     GenerationRequestLease,
+    PostgresGenerationMetadataLoader,
     RuntimeReleaseError,
     RuntimeReleaseLoader,
 )
@@ -45,7 +47,8 @@ from tools.run_evidence_v2_conformance_server import (  # noqa: E402
     load_verified_provider_runtime_lock,
 )
 
-EXPECTED_LAW_COUNT = 58
+TARGET_LAW_IDS = tuple(sorted(str(item["law_id"]) for item in TARGET_LAWS))
+EXPECTED_LAW_COUNT = len(TARGET_LAW_IDS)
 GENERATION_TABLES = (
     "knowledge_generation_active_pointer",
     "knowledge_generation_articles",
@@ -66,6 +69,7 @@ class PreservedDataDiagnosticError(RuntimeError):
 class PreservedDataAudit:
     provider_revision: str
     target_law_count: int
+    total_law_count: int
     article_count: int
     generation_tables_present: tuple[str, ...]
 
@@ -85,6 +89,7 @@ class PreservedDataAudit:
             "database_write_attempted": False,
             "expected_law_count": EXPECTED_LAW_COUNT,
             "target_law_count": self.target_law_count,
+            "total_law_count": self.total_law_count,
             "article_count": self.article_count,
             "generation_tables_expected": list(GENERATION_TABLES),
             "generation_tables_present": list(self.generation_tables_present),
@@ -141,8 +146,17 @@ def audit_preserved_postgres(
                     (list(GENERATION_TABLES),),
                 )
                 present = tuple(str(row[0]) for row in cursor.fetchall())
+                cursor.execute(
+                    """
+                    SELECT count(DISTINCT law_id)
+                    FROM laws
+                    WHERE law_id = ANY(%s)
+                    """,
+                    (list(TARGET_LAW_IDS),),
+                )
+                target_law_row = cursor.fetchone()
                 cursor.execute("SELECT count(DISTINCT law_id) FROM laws")
-                law_row = cursor.fetchone()
+                total_law_row = cursor.fetchone()
                 cursor.execute("SELECT count(*) FROM law_articles")
                 article_row = cursor.fetchone()
     except PreservedDataDiagnosticError:
@@ -151,15 +165,18 @@ def audit_preserved_postgres(
         raise PreservedDataDiagnosticError("read-only PostgreSQL audit failed") from exc
 
     if (
-        law_row is None
+        target_law_row is None
+        or total_law_row is None
         or article_row is None
-        or not isinstance(law_row[0], int)
+        or not isinstance(target_law_row[0], int)
+        or not isinstance(total_law_row[0], int)
         or not isinstance(article_row[0], int)
     ):
         raise PreservedDataDiagnosticError("read-only PostgreSQL audit returned invalid counts")
     audit = PreservedDataAudit(
         provider_revision=provider_revision,
-        target_law_count=law_row[0],
+        target_law_count=target_law_row[0],
+        total_law_count=total_law_row[0],
         article_count=article_row[0],
         generation_tables_present=present,
     )
@@ -203,15 +220,34 @@ def _is_within(path: Path, parent: Path) -> bool:
         return False
 
 
-def write_audit_json(audit: PreservedDataAudit, output: Path) -> None:
+def _has_symlink_component(path: Path) -> bool:
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        if current.is_symlink():
+            return True
+    return False
+
+
+def write_audit_json(
+    audit: PreservedDataAudit,
+    output: Path,
+    *,
+    forbidden_roots: tuple[Path, ...] = (ROOT,),
+) -> None:
     """Exclusively create a non-secret audit outside every source checkout."""
 
     if not output.is_absolute():
         raise PreservedDataDiagnosticError("audit output path must be absolute")
-    destination = output.resolve()
-    if _is_within(destination, ROOT):
-        raise PreservedDataDiagnosticError("audit output must be outside the Data repository")
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    if output.is_symlink() or not output.parent.is_dir() or _has_symlink_component(output.parent):
+        raise PreservedDataDiagnosticError(
+            "audit output parent must be an existing non-symlink directory"
+        )
+    destination = output.parent.resolve() / output.name
+    if any(_is_within(destination, root) for root in forbidden_roots):
+        raise PreservedDataDiagnosticError(
+            "audit output must be outside source and production context roots"
+        )
     if destination.exists() or destination.is_symlink():
         raise PreservedDataDiagnosticError("audit output must be a new regular file")
     payload = (
@@ -224,18 +260,32 @@ def write_audit_json(audit: PreservedDataAudit, output: Path) -> None:
         )
         + "\n"
     ).encode("utf-8")
+    descriptor: int | None = None
+    created = False
     try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(
             destination,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            flags,
             0o600,
         )
+        created = True
+        opened = os.fstat(descriptor)
+        linked = os.stat(destination, follow_symlinks=False)
+        if (opened.st_dev, opened.st_ino) != (linked.st_dev, linked.st_ino):
+            raise OSError("audit output identity changed")
         with os.fdopen(descriptor, "wb") as stream:
+            descriptor = None
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
         os.chmod(destination, 0o600)
     except OSError as exc:
+        if descriptor is not None:
+            os.close(descriptor)
+        if created:
+            destination.unlink(missing_ok=True)
         raise PreservedDataDiagnosticError("audit output could not be created") from exc
 
 
@@ -263,7 +313,11 @@ def create_preserved_data_diagnostic_application(
         provider_revision=str(verified_lock.provider_revision),
         connection_factory=connection_factory,
     )
-    write_audit_json(audit, audit_output)
+    write_audit_json(
+        audit,
+        audit_output,
+        forbidden_roots=(ROOT, context),
+    )
 
     active_loader = ActiveGenerationLoader(
         connection_factory=connection_factory,
@@ -272,6 +326,9 @@ def create_preserved_data_diagnostic_application(
     delegate = RuntimeReleaseLoader(
         provider_loader=lambda: provider_identity_loader(context),
         active_generation_loader=active_loader,
+        metadata_loader=PostgresGenerationMetadataLoader(
+            connection_factory=connection_factory,
+        ),
     )
     runtime_loader = _FailClosedDiagnosticRuntimeLoader(delegate)
     settings = ProductionSettings(
@@ -338,13 +395,26 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    application = create_preserved_data_diagnostic_application(
-        production_context=args.production_context,
-        service_token_file=args.service_token_file,
-        audit_output=args.audit_output,
-        host=args.host,
-        port=args.port,
-    )
+    try:
+        application = create_preserved_data_diagnostic_application(
+            production_context=args.production_context,
+            service_token_file=args.service_token_file,
+            audit_output=args.audit_output,
+            host=args.host,
+            port=args.port,
+        )
+    except Exception as exc:
+        print(
+            json.dumps(
+                {
+                    "event": "preserved_data_diagnostic_configuration_failed",
+                    "exception_type": type(exc).__name__,
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 78
     audit = application.state.preserved_data_audit
     print(
         json.dumps(
@@ -362,15 +432,28 @@ def main(argv: list[str] | None = None) -> int:
 
     import uvicorn
 
-    uvicorn.run(
-        application,
-        host=args.host,
-        port=args.port,
-        log_level="warning",
-        access_log=False,
-        proxy_headers=False,
-        server_header=False,
-    )
+    try:
+        uvicorn.run(
+            application,
+            host=args.host,
+            port=args.port,
+            log_level="warning",
+            access_log=False,
+            proxy_headers=False,
+            server_header=False,
+        )
+    except Exception as exc:
+        print(
+            json.dumps(
+                {
+                    "event": "preserved_data_diagnostic_runtime_failed",
+                    "exception_type": type(exc).__name__,
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 70
     return 0
 
 
