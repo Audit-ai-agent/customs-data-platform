@@ -57,6 +57,10 @@ image scanner, SBOM, signature, provenance Gate 중 하나라도 실패하면 �
 ## 과부하와 장애
 
 - liveness는 process 생존만 의미하며 readiness의 대체가 아니다.
+- 보존 개발 volume의 incomplete 상태를 확인할 때는
+  `tools/run_preserved_data_v2_diagnostic.py`만 명시적인 test-only/read-only 모드로
+  사용한다. audit JSON은 저장소 밖에 새 파일로 만들고, readiness 503 및 retrieval POST 0을
+  확인한다. 이 결과를 RAG 품질 또는 release PASS로 기록하지 않는다.
 - inflight가 한도에 붙으면 새 요청은 즉시 503으로 닫힌다. Agent retry에는
   exponential backoff와 jitter가 있어야 하며 무제한 retry를 금지한다.
 - deadline 이후에도 underlying sync 작업이 끝날 때까지 admission slot이 유지된다.

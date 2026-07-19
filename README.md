@@ -33,6 +33,20 @@ X-Evidence-Provider-Build-SHA256
 manifest가 누락·변조되면 readiness와 POST는 `503`으로 닫힙니다. retrieval v1
 JSON body는 이 결속을 추가하면서도 변경하지 않습니다.
 
+## Production runtime v2 binding
+
+운영 Agent는 v1 body를 유지한 `GET /internal/rag/v2/health/ready`와
+`POST /internal/rag/v2/retrieve`를 사용합니다. v2는 위 네 build header에
+knowledge generation, generation attestation, evaluation, runtime release를 더한
+총 여덟 header를 GET과 POST 사이에 exact binding합니다. PostgreSQL/Qdrant/Neo4j가
+하나의 sealed generation을 가리키고, 사람 검토 Gold 평가와 provider context가 모두
+일치할 때만 readiness 200을 반환합니다.
+
+현재 보존된 팀 Data처럼 58개 중 일부 법령만 있고 generation metadata가 없는 상태는
+readiness 503이 정상입니다. 빈 법령을 추가하거나 expected count를 낮춰 통과시키지 않습니다.
+test-only conformance identity는 HTTP 상호운용만 증명하며 제품 runtime lock이나 RAG release로
+승격할 수 없습니다.
+
 ## 로컬 준비
 
 Python 3.11과 [uv](https://docs.astral.sh/uv/)를 사용합니다.
@@ -65,6 +79,37 @@ uv run --locked python tools/run_evidence_conformance_server.py `
   --test-only-conformance --bundle-root <EMPTY_EXTERNAL_BUNDLE> `
   --host 127.0.0.1 --port 18010
 ```
+
+runtime v2 Agent 상호운용은 exact clean commit에서 production context를 만든 뒤 별도의
+loopback runner로 검증합니다. token 값은 argv나 저장소에 넣지 않습니다.
+
+```powershell
+uv run --locked python tools/build_production_context.py `
+  --repository . --output <EMPTY_EXTERNAL_CONTEXT>
+uv run --locked python tools/run_evidence_v2_conformance_server.py `
+  --test-only-conformance `
+  --production-context <EMPTY_EXTERNAL_CONTEXT> `
+  --service-token-file <ABSOLUTE_EXTERNAL_TOKEN_FILE> `
+  --identity-output <NEW_EXTERNAL_IDENTITY_JSON> `
+  --host 127.0.0.1 --port 18010
+```
+
+보존 팀 Data가 실제로 incomplete임을 볼륨 수정 없이 확인할 때만 다음 진단 runner를
+사용합니다. 이 runner는 PostgreSQL transaction을 강제로 read-only로 만들고 실제 v2
+인증·readiness·metrics 경계를 사용하지만, model을 시작하거나 identity를 합성하지 않으며
+항상 release-ready를 거부합니다. DB 접속정보는 process environment/secret으로만 주입합니다.
+
+```powershell
+uv run --locked python tools/run_preserved_data_v2_diagnostic.py `
+  --test-only-preserved-readonly-diagnostic `
+  --production-context <EMPTY_EXTERNAL_CONTEXT> `
+  --service-token-file <ABSOLUTE_EXTERNAL_TOKEN_FILE> `
+  --audit-output <NEW_EXTERNAL_AUDIT_JSON> `
+  --host 127.0.0.1 --port 18011
+```
+
+이 진단의 성공 기준은 readiness `503`, retrieval POST `0`, audit의
+`release_ready=false`입니다. 이는 실제 RAG 성공이나 세 store 정합성 PASS가 아닙니다.
 
 3-store 통합 검증은 Docker 서비스를 기동하고 migration·ingestion을 완료한 별도 환경에서 실행합니다. 연결 실패나 미적재 상태의 skip은 Live Gate 통과가 아닙니다.
 
