@@ -5,7 +5,7 @@
 
 | 저장소 | 역할 |
 |---|---|
-| Postgres (`:5432`) | 시간버전 법령 + CCCT 조회·raw item·Requirement 무손실 원장 |
+| Postgres (`:55432`, 설정 가능) | 시간버전 법령 + CCCT 조회·raw item·Requirement 무손실 원장 |
 | Qdrant (`:6333`) | 현행 조문 검색 인덱스 — 의미검색(bge-m3 dense) + 키워드(BM25) |
 | Neo4j (`:7474`/`:7687`) | 그래프 — 조문 위임/인용, HSK→Requirement→법령/서류/기관 |
 
@@ -35,6 +35,7 @@ cd law_repository
 
 cp .env.example .env        # 비밀번호 등 값 채우기 (기본값으로도 로컬 구동 가능)
 docker compose up -d        # Postgres / Qdrant / Neo4j 기동
+uv run --project .. --locked python ../tools/live_preflight.py --phase services
 uv run --project .. --locked python scripts/migrate.py   # 스키마 적용
 
 uv run --project .. --locked python -m src.ingest.hsk
@@ -44,6 +45,11 @@ uv run --project .. --locked python -m src.ingest.graph
 
 uv run --project .. --locked pytest tests/   # 단위 + 3-store 통합 검증
 ```
+
+로컬 host port는 `.env`의 `POSTGRES_PORT`, `QDRANT_HTTP_PORT`,
+`QDRANT_GRPC_PORT`, `NEO4J_HTTP_PORT`, `NEO4J_BOLT_PORT`로 변경할 수 있다.
+컨테이너 내부 표준 포트는 바뀌지 않는다. 다른 프로젝트가 `5432`를 사용 중이라도
+그 컨테이너를 중단하지 말고 기본 `55432` 또는 다른 빈 port를 사용한다.
 
 - ③에서 `--load-only` 를 빼면 관세청 API 전수 재수집을 시도하는데, 일일 쿼터(1만건) 때문에
   3일 걸린다. 레포에 커밋된 `data/ccct_progress.jsonl` 이 그 결과물이니 그대로 적재하면 된다.
@@ -91,7 +97,9 @@ python -m src.repository    # 스모크 데모
 
 ## AI Agent 내부 Evidence API v1
 
-`python -m src.webapp`으로 실행한 뒤 Agent는
+로컬 demo·contract 확인에는 `python -m src.webapp`을 사용할 수 있지만 이것은
+운영 서비스가 아니다. 운영에서 Agent는 인증·TLS·제한·lifecycle을 적용한
+`python -m src.production`으로 실행되는 서비스의
 `POST /internal/rag/v1/retrieve`를 호출한다. wire trade type은 `import|export`,
 jurisdiction은 `KR`이다. HSK10은 `exact`, HS6는 하위 leaf가 하나일 때만
 `unique_descendant`로 확정하며, 여러 leaf면 `ambiguous`로 반환한다.
@@ -123,6 +131,8 @@ src/
   evidence.py       Agent 내부 Evidence API v1 계약·조합·오류 의미
   cli.py            대화형 CLI
   webapp.py         팀 데모 웹서버 (FastAPI)
+  production.py     운영 전용 인증·제한·관측성·lifecycle ASGI 경계
+  production_settings.py 운영 fail-closed 설정과 secret/TLS/DB 검증
 migrations/         Postgres DDL (유효구간 EXCLUDE 제약 포함)
 tests/              스키마/적재/Evidence 계약/델타/그래프/cross-store 정합성
 ```

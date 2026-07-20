@@ -2,6 +2,7 @@
 
 시나리오: 개정(닫기+새버전) → 공포≠시행 pre-load → 승격 → 시점쿼리 → 멱등 재실행.
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -13,6 +14,7 @@ from src.config import settings
 from src.sync.delta import _reconcile_article, promote
 
 LAW = "TEST_DELTA"
+pytestmark = pytest.mark.live
 
 
 @pytest.fixture()
@@ -92,7 +94,7 @@ def test_point_in_time_exactly_one_version(cur):
     for probe, expect in [
         (date(2050, 6, 15), "v1"),
         (date(2098, 12, 31), "v1"),
-        (date(2099, 1, 1), "v2"),   # 시행일 당일부터 신버전
+        (date(2099, 1, 1), "v2"),  # 시행일 당일부터 신버전
         (date(2120, 1, 1), "v2"),
     ]:
         cur.execute(

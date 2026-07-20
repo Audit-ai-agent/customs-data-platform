@@ -41,7 +41,8 @@ def test_hf_space_dockerfile_has_no_remote_clone_or_token_argument() -> None:
     assert "github_token" not in combined
     assert "github_pat" not in combined
     assert "copy law_repository/requirements.txt" in dockerfile.lower()
-    assert "copy law_repository/src ./src" in dockerfile.lower()
+    assert "copy . /app" in dockerfile.lower()
+    assert "workdir /app/law_repository" in dockerfile.lower()
 
 
 def test_dockerignore_excludes_secret_and_local_runtime_boundaries() -> None:
@@ -60,6 +61,8 @@ def test_context_builder_exports_committed_allowlist_with_checksums(tmp_path: Pa
         "law_repository/deploy/hf_space/Dockerfile": "COPY law_repository/src ./src\n",
         "law_repository/deploy/hf_space/README.md": "private space\n",
         "law_repository/requirements.txt": "fastapi==1\n",
+        "contracts/evidence/v1/rag_retrieval_v1.schema.json": "{}\n",
+        "contracts/evidence/v1/readiness_v1.schema.json": "{}\n",
         "law_repository/src/webapp.py": "print('ready')\n",
         "law_repository/src/webui.html": "<main>ready</main>\n",
         "law_repository/tests/not-runtime.txt": "excluded\n",
@@ -84,6 +87,9 @@ def test_context_builder_exports_committed_allowlist_with_checksums(tmp_path: Pa
         ".dockerignore",
         "Dockerfile",
         "README.md",
+        "contracts/evidence/v1/rag_retrieval_v1.schema.json",
+        "contracts/evidence/v1/readiness_v1.schema.json",
+        "provider-build.json",
         "source-manifest.json",
         "law_repository/requirements.txt",
         "law_repository/src/webapp.py",
@@ -96,3 +102,9 @@ def test_context_builder_exports_committed_allowlist_with_checksums(tmp_path: Pa
     serialized = json.dumps(manifest)
     assert str(repo) not in serialized
     assert "TOKEN" not in serialized
+    provider_build = json.loads((output / "provider-build.json").read_text(encoding="utf-8"))
+    assert provider_build["provider_revision"] == _git(repo, "rev-parse", "HEAD")
+    assert provider_build["provider_release"] == "evidence-api-v1.1.0"
+    assert provider_build["source_manifest_sha256"] == hashlib.sha256(
+        (output / "source-manifest.json").read_bytes()
+    ).hexdigest()

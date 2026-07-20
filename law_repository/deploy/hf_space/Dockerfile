@@ -13,7 +13,10 @@ COPY law_repository/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
  && pip install --no-cache-dir -r requirements.txt
 
-COPY law_repository/src ./src
+# Context is an allowlist bundle generated from one clean commit.  Preserve its
+# paths so provider_identity can verify every manifest entry at runtime.
+COPY . /app
+WORKDIR /app/law_repository
 
 # bge-m3 + bge-reranker-v2-m3(A1 rerank) 를 이미지에 미리 다운로드 — 콜드스타트에서 모델 받는 시간 제거.
 # 익명 다운로드는 HF Hub rate limit 로 빌드가 죽을 수 있어(2026-07-13 실측 BUILD_ERROR)

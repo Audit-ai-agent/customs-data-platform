@@ -11,6 +11,7 @@ Qdrant 네이티브 sparse + `modifier: idf`(1.15.2+) 조합:
 
 토큰 → 인덱스 는 md5 앞 4바이트(uint32) — 결정적이라 재적재에 안전.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -34,7 +35,10 @@ def tokenize(text: str) -> list[str]:
 
 
 def token_id(token: str) -> int:
-    return int.from_bytes(hashlib.md5(token.encode("utf-8")).digest()[:4], "little")
+    # Qdrant sparse-vector feature IDs require a stable 32-bit mapping.  This
+    # digest is not used for authentication, signatures, or integrity.
+    digest = hashlib.md5(token.encode("utf-8"), usedforsecurity=False).digest()
+    return int.from_bytes(digest[:4], "little")
 
 
 def encode_doc(text: str) -> tuple[list[int], list[float]]:

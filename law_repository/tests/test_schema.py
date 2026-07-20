@@ -3,6 +3,7 @@
 전제: docker compose up + python scripts/migrate.py 로 스키마 적용된 상태.
 Docker 미기동 시 접속 실패로 skip 됨.
 """
+
 from __future__ import annotations
 
 import psycopg
@@ -11,6 +12,7 @@ import pytest
 from src.config import settings
 
 _SEED_LAW = ("TEST_LAW", "테스트법", "법률", "테스트부")
+pytestmark = pytest.mark.live
 
 
 @pytest.fixture()

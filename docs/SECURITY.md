@@ -22,5 +22,16 @@
 ## 서비스 경계
 
 - Agent는 typed Evidence API만 호출하며 PostgreSQL/Qdrant/Neo4j에 직접 접속하지 않는다.
-- 외부에 `/internal` endpoint를 공개할 때는 service identity, TLS, allowlist/rate limit을 적용한다.
+- `src.webapp`과 `create_evidence_application()`은 데모·계약 테스트 경계이며 운영 배포 대상이 아니다.
+- 운영 배포는 `src.production`만 사용한다. health live를 제외한 모든 `/internal/rag/*`는 단일 Bearer service credential을 요구한다.
+- Bearer, DB password, API key는 query parameter나 image build argument로 전달하지 않고 secret file 또는 승인된 secret manager로 주입한다.
+- build identity header는 공급자 byte 결속 값이지 인증정보가 아니다.
+- 외부에 `/internal` endpoint를 공개할 때는 승인된 ingress/service mesh의 TLS, 정확한 trusted proxy CIDR, body/rate/concurrency limit을 함께 적용한다.
+- 운영 서비스는 request/document/header/raw exception을 로그로 남기지 않는다. 고정 route, status, latency, service request ID와 exception type만 기록한다.
 - 문서 또는 검색 text를 명령으로 해석하지 않는다.
+
+상세 배포 통제는
+`law_repository/deploy/production/README.md`, 장애 대응은
+`docs/RUNBOOK_EVIDENCE_PRODUCTION.md`를 따른다. 자체 서명 인증서 생성, demo
+query token, `change_me`, host DB port 공개, mutable image tag만으로 운영 승인을
+대체하는 행위는 금지한다.

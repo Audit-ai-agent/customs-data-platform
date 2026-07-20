@@ -22,6 +22,7 @@ Neo4j 그래프)를 잇지만 융합·rerank 는 하지 않는다 — 설계 §4
 
 실행(스모크): law_repository/ 에서  python -m src.repository
 """
+
 from __future__ import annotations
 
 import re
@@ -29,6 +30,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Iterable, Literal
 
+from psycopg import sql
 from psycopg.rows import dict_row
 
 from src.db.neo4j import driver as make_driver
@@ -42,12 +44,14 @@ ARMS = (DENSE_VECTOR, BM25_VECTOR)
 @dataclass
 class Hit:
     """arm 반환 규격(설계 §4.2). 융합·rerank 없이 이 셋만 노출."""
+
     article_pk: int
     score: float
     text: str
 
 
 # ------------------------------------------------------- temporal (유일 생성 지점)
+
 
 def _temporal_predicate(as_of: date | None) -> tuple[str, dict]:
     """모든 PG 시점 조회가 거치는 유일한 temporal predicate 생성 지점 (설계 §6).
@@ -71,21 +75,23 @@ def resolve_as_of(
     pred, params = _temporal_predicate(as_of)
     with connect() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            f"""
+            sql.SQL(
+                """
             SELECT id AS article_pk, law_id, article_no, paragraph_no, title,
                    content, version_mst, valid_from, valid_to, is_current
             FROM law_articles
             WHERE law_id = %(law_id)s AND article_no = %(article_no)s
               AND paragraph_no IS NOT DISTINCT FROM %(paragraph_no)s
-              AND {pred}
-            """,
-            {"law_id": law_id, "article_no": article_no,
-             "paragraph_no": paragraph_no, **params},
+              AND {temporal_predicate}
+            """
+            ).format(temporal_predicate=sql.SQL(pred)),
+            {"law_id": law_id, "article_no": article_no, "paragraph_no": paragraph_no, **params},
         )
         return cur.fetchone()
 
 
 # ------------------------------------------------------------------- arm 검색
+
 
 def _arm_query(qc, arm: str, query: str, limit: int):
     """단일 arm(dense|bm25) Qdrant 조회. 인코더는 적재와 동일 모듈 공유."""
@@ -127,8 +133,10 @@ def search(
     out: list[Hit] = []
     for p in points:
         row = resolve_as_of(
-            p.payload["law_id"], p.payload["article_no"],
-            p.payload.get("paragraph_no"), as_of,
+            p.payload["law_id"],
+            p.payload["article_no"],
+            p.payload.get("paragraph_no"),
+            as_of,
         )
         if row:
             out.append(Hit(row["article_pk"], p.score, row["content"]))
@@ -243,9 +251,7 @@ RETURN h.name_ko AS name_ko, h.name_en AS name_en,
 """
 
 
-def hsk_requirements(
-    code: str, trade_type: str | None = None, as_of: date | None = None
-) -> dict:
+def hsk_requirements(code: str, trade_type: str | None = None, as_of: date | None = None) -> dict:
     """HSK 필요 서류: HSK → Requirement → 법령/기관/서류.
 
     요건은 valid_from/valid_to 기준일에 유효한 것만 반환하고, trade_type은
@@ -291,22 +297,24 @@ def hsk_requirements(
             continue  # 아직 시행 전 요건 제외 (요건도 temporal)
         if r["valid_to"] and r["valid_to"] < as_of_str:
             continue
-        requirements.append({
-            "trade_type": r["trade_type"],
-            "requirement_id": r["requirement_id"],
-            "law_code": r["law_code"],
-            "law_name": r["law_name"],
-            "document": r["document"],
-            "document_code": r["document_code"],
-            "agencies": [r["agency_name"]] if r["agency_name"] else [],
-            "agency_codes": [r["agency_code"]] if r["agency_code"] else [],
-            "valid_from": r["valid_from"],
-            "valid_to": r["valid_to"],
-            "version_hash": r["version_hash"],
-            "knowledge_snapshot_id": r["snapshot_id"],
-            "source": "direct",
-            "level": 10,
-        })
+        requirements.append(
+            {
+                "trade_type": r["trade_type"],
+                "requirement_id": r["requirement_id"],
+                "law_code": r["law_code"],
+                "law_name": r["law_name"],
+                "document": r["document"],
+                "document_code": r["document_code"],
+                "agencies": [r["agency_name"]] if r["agency_name"] else [],
+                "agency_codes": [r["agency_code"]] if r["agency_code"] else [],
+                "valid_from": r["valid_from"],
+                "valid_to": r["valid_to"],
+                "version_hash": r["version_hash"],
+                "knowledge_snapshot_id": r["snapshot_id"],
+                "source": "direct",
+                "level": 10,
+            }
+        )
 
     return {
         "hs_resolution": resolution.status,
@@ -316,12 +324,15 @@ def hsk_requirements(
         "name_ko": ident["name_ko"] if ident else None,
         "name_en": ident["name_en"] if ident else None,
         "ancestors": {
-            "chapter2": {"code": params["chapter2"],
-                         "name": ident["chapter2_name"] if ident else None},
-            "heading4": {"code": params["heading4"],
-                         "name": ident["heading4_name"] if ident else None},
-            "hs6": {"code": params["hs6"],
-                    "name": ident["hs6_name"] if ident else None},
+            "chapter2": {
+                "code": params["chapter2"],
+                "name": ident["chapter2_name"] if ident else None,
+            },
+            "heading4": {
+                "code": params["heading4"],
+                "name": ident["heading4_name"] if ident else None,
+            },
+            "hs6": {"code": params["hs6"], "name": ident["hs6_name"] if ident else None},
         },
         "requirements": requirements,
     }
@@ -354,6 +365,7 @@ def expand_article(article_pk: int) -> list[dict]:
 
 # ------------------------------------------------------------------ 스모크
 
+
 def _demo() -> int:
     print("[repository/dense] '수입신고 시 세관장 확인이 필요한 물품'")
     for h in search("수입신고 시 세관장 확인이 필요한 물품", arm=DENSE_VECTOR, limit=3):
@@ -367,17 +379,22 @@ def _demo() -> int:
     drv = make_driver()
     with drv.session() as s:
         rec = s.run(
-            "MATCH (h:HSK)-[:HAS_REQUIREMENT]->(:Requirement) "
-            "RETURN h.code AS c LIMIT 1"
+            "MATCH (h:HSK)-[:HAS_REQUIREMENT]->(:Requirement) RETURN h.code AS c LIMIT 1"
         ).single()
     drv.close()
     if rec:
         req = hsk_requirements(rec["c"])
         anc = req["ancestors"]
-        print(f"[repository/hsk] {req['hsk10']} ({req['name_ko']}) — 요건 {len(req['requirements'])}건")
+        print(
+            f"[repository/hsk] {req['hsk10']} ({req['name_ko']}) — 요건 {len(req['requirements'])}건"
+        )
         for q in req["requirements"][:3]:
-            print(f"  [{q['trade_type']}/{q['source']}] {q['law_name']} / {q['document']} / {q['agencies']}")
-        print(f"  조상: {anc['chapter2']['name']} > {anc['heading4']['name']} > {anc['hs6']['name']}")
+            print(
+                f"  [{q['trade_type']}/{q['source']}] {q['law_name']} / {q['document']} / {q['agencies']}"
+            )
+        print(
+            f"  조상: {anc['chapter2']['name']} > {anc['heading4']['name']} > {anc['hs6']['name']}"
+        )
     return 0
 
 

@@ -18,8 +18,11 @@ pinned: false
 
 Docker build 중 GitHub repository를 clone하지 않는다. 검토된 Data commit에서
 `tools/build_hf_space_context.py`가 생성한 allowlist context 전체를 Space에 게시한다.
-context에는 `requirements.txt`, `src/**`, Dockerfile, 메타데이터와 SHA-256 manifest만
-포함되며 Git history, `.env`, raw Data, test, migration은 포함되지 않는다.
+context에는 `requirements.txt`, `src/**`, 고정 계약 Schema, Dockerfile,
+`source-manifest.json`, `provider-build.json`만 포함되며 Git history, `.env`,
+raw Data, test, migration은 포함되지 않는다. 런타임은 manifest의 모든 파일,
+Evidence Schema SHA-256, provider revision/build SHA-256이 일치해야 readiness를
+통과한다.
 
 Public Space는 포함된 Python source도 공개한다. `DEMO_TOKEN`은 HTTP 접근만
 제한하며 source 공개를 막지 못하므로, 기본 배포 대상은 **private Space**다.
@@ -33,7 +36,8 @@ Public Space는 포함된 Python source도 공개한다. `DEMO_TOKEN`은 HTTP �
    uv run --locked python tools/build_hf_space_context.py --output <EXTERNAL_CONTEXT_DIR>
    ```
 
-3. `source-manifest.json` 안의 `source_commit`과 파일 SHA-256을 release 증거에 보존한다.
+3. `source-manifest.json`의 `source_commit`과 파일 SHA-256 및
+   `provider-build.json`의 `provider_build_sha256`을 release 증거에 보존한다.
 4. huggingface.co → New Space → SDK: **Docker** → visibility: **Private**로 생성한다.
 5. 호스트에 주입된 HF credential로 context 전체를 Space repository에 게시한다.
    GitHub PAT를 Dockerfile, URL, build argument에 넣지 않는다.

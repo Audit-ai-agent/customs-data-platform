@@ -11,16 +11,21 @@ http://<호스트IP>:8010 을 열면 검색/품목요건/조문조회를 바로 
   팀원에겐 http://<주소>/?token=<값> 링크를 공유하면 UI 가 알아서 붙인다.
   (LAN 데모는 비워도 되지만, 공개 인터넷에 올릴 땐 반드시 설정하거나 Space 를 private 으로.)
 """
+
 from __future__ import annotations
 
 import os
 import sys
 import threading
+from collections.abc import Callable, Mapping
 from datetime import date, datetime
 from pathlib import Path
+from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, FastAPI, HTTPException, Request, Response
+from fastapi.responses import HTMLResponse, JSONResponse
+from starlette.datastructures import Headers
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from src import hybrid
 from src import repository as repo
@@ -28,15 +33,81 @@ from src.cli import LAW_ALIAS, _parse_article_no
 from src.db.qdrant import BM25_VECTOR, DENSE_VECTOR
 from src.evidence import (
     DatabaseEvidenceBackend,
+    ReadinessBackend,
     RetrieveRequest,
     RetrieveResponse,
     retrieve_evidence,
 )
+from src.provider_identity import (
+    ProviderBuildIdentity,
+    ReadinessResponse,
+    binding_header_mismatches,
+    load_provider_build_identity,
+)
 
 app = FastAPI(title="관세법령 저장소 데모")
+_internal_router = APIRouter()
 _encode_lock = threading.Lock()
 _INDEX_HTML = (Path(__file__).parent / "webui.html").read_text(encoding="utf-8")
 _DEMO_TOKEN = os.environ.get("DEMO_TOKEN", "")
+_EVIDENCE_RETRIEVE_PATH = "/internal/rag/v1/retrieve"
+_BOUND_IDENTITY_STATE_KEY = "_evidence_provider_build_identity"
+
+
+def _binding_preflight(
+    *,
+    provider_app: FastAPI,
+    headers: Mapping[str, str],
+) -> tuple[ProviderBuildIdentity | None, JSONResponse | None]:
+    """Validate provider identity using headers only, before body consumption."""
+    try:
+        identity = provider_app.state.provider_identity_loader()
+    except Exception as exc:
+        # Response/logs deliberately omit the raw exception: it can contain a
+        # deployment path or secret and is not useful to an Agent.
+        print(
+            f"[evidence] provider identity unavailable: {type(exc).__name__}",
+            file=sys.stderr,
+        )
+        return None, JSONResponse(
+            {"detail": "Evidence provider build identity is unavailable"},
+            status_code=503,
+        )
+    if binding_header_mismatches(headers, identity):
+        return None, JSONResponse(
+            {"detail": "Evidence provider build binding does not match"},
+            status_code=412,
+        )
+    return identity, None
+
+
+class _EvidenceBindingMiddleware:
+    """Fail closed at the raw ASGI boundary without receiving a request body."""
+
+    def __init__(self, app: ASGIApp, *, provider_app: FastAPI) -> None:
+        self.app = app
+        self.provider_app = provider_app
+
+    async def __call__(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+    ) -> None:
+        if (
+            scope["type"] == "http"
+            and scope.get("method") == "POST"
+            and scope.get("path") == _EVIDENCE_RETRIEVE_PATH
+        ):
+            identity, rejection = _binding_preflight(
+                provider_app=self.provider_app,
+                headers=Headers(scope=scope),
+            )
+            if rejection is not None:
+                await rejection(scope, receive, send)
+                return
+            scope.setdefault("state", {})[_BOUND_IDENTITY_STATE_KEY] = identity
+        await self.app(scope, receive, send)
 
 
 @app.middleware("http")
@@ -44,9 +115,18 @@ async def _token_guard(request: Request, call_next):
     if _DEMO_TOKEN and request.url.path.startswith(("/api", "/internal")):
         supplied = request.query_params.get("token") or request.headers.get("x-demo-token")
         if supplied != _DEMO_TOKEN:
-            from fastapi.responses import JSONResponse
-
             return JSONResponse({"detail": "token 필요 (?token=... 링크로 접속)"}, status_code=401)
+    # The shared demo app already owns this outer token middleware.  Perform
+    # the Evidence preflight here, after authentication, so the demo's access
+    # behavior stays unchanged while invalid bindings still precede body reads.
+    if request.method == "POST" and request.url.path == _EVIDENCE_RETRIEVE_PATH:
+        identity, rejection = _binding_preflight(
+            provider_app=app,
+            headers=request.headers,
+        )
+        if rejection is not None:
+            return rejection
+        setattr(request.state, _BOUND_IDENTITY_STATE_KEY, identity)
     return await call_next(request)
 
 
@@ -72,8 +152,12 @@ def api_search(q: str, limit: int = 5, as_of: str | None = None) -> dict:
         for arm in (DENSE_VECTOR, BM25_VECTOR):
             hits = repo.search(q, arm=arm, limit=min(limit, 20), as_of=d)
             out[arm] = [
-                {"pk": h.article_pk, "score": round(h.score, 4),
-                 "head": h.text.splitlines()[0].strip(), "text": h.text}
+                {
+                    "pk": h.article_pk,
+                    "score": round(h.score, 4),
+                    "head": h.text.splitlines()[0].strip(),
+                    "text": h.text,
+                }
                 for h in hits
             ]
     return out
@@ -125,23 +209,137 @@ def _resolve_law(law: str) -> str | None:
     return next((i for i, n in _law_names.items() if n.replace(" ", "") == squashed), None)
 
 
-@app.post("/internal/rag/v1/retrieve", response_model=RetrieveResponse)
-def internal_retrieve(payload: RetrieveRequest) -> RetrieveResponse:
+def _request_identity(request: Request) -> ProviderBuildIdentity:
+    bound_identity: Any = getattr(
+        request.state,
+        _BOUND_IDENTITY_STATE_KEY,
+        None,
+    )
+    if isinstance(bound_identity, ProviderBuildIdentity):
+        return bound_identity
+    try:
+        return request.app.state.provider_identity_loader()
+    except Exception as exc:
+        # Response/logs deliberately omit the raw exception: it can contain a
+        # deployment path and is not needed by an Agent to decide fail-closed.
+        print(
+            f"[evidence] provider identity unavailable: {type(exc).__name__}",
+            file=sys.stderr,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Evidence provider build identity is unavailable",
+        ) from None
+
+
+@_internal_router.post("/internal/rag/v1/retrieve", response_model=RetrieveResponse)
+def internal_retrieve(
+    payload: RetrieveRequest,
+    request: Request,
+    response: Response,
+) -> RetrieveResponse:
     """AI Agent와 Data/RAG 경계의 버전 고정 Evidence API."""
-    return retrieve_evidence(payload)
+    identity = _request_identity(request)
+    if binding_header_mismatches(request.headers, identity):
+        raise HTTPException(
+            status_code=412,
+            detail="Evidence provider build binding does not match",
+        )
+    backend = request.app.state.evidence_backend_factory()
+    result = retrieve_evidence(payload, backend)
+    for name, value in identity.binding_headers().items():
+        response.headers[name] = value
+    return result
 
 
-@app.get("/internal/rag/v1/health/live")
+@_internal_router.get("/internal/rag/v1/health/live")
 def internal_liveness() -> dict:
     return {"status": "alive"}
 
 
-@app.get("/internal/rag/v1/health/ready")
-def internal_readiness() -> dict:
+@_internal_router.get(
+    "/internal/rag/v1/health/ready",
+    response_model=ReadinessResponse,
+)
+def internal_readiness(request: Request) -> ReadinessResponse:
+    identity = _request_identity(request)
     try:
-        return DatabaseEvidenceBackend().readiness()
+        readiness = request.app.state.evidence_backend_factory().readiness()
+        return ReadinessResponse.model_validate(
+            {**readiness, "evidence_contract": identity.model_dump()}
+        )
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        print(
+            f"[evidence] readiness failed: {type(exc).__name__}",
+            file=sys.stderr,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Evidence provider is not ready",
+        ) from None
+
+
+def _configure_evidence_application(
+    target: FastAPI,
+    *,
+    backend_factory: Callable[[], ReadinessBackend],
+    identity_loader: Callable[[], ProviderBuildIdentity],
+    test_only_conformance: bool,
+    install_binding_middleware: bool = True,
+) -> FastAPI:
+    target.state.evidence_backend_factory = backend_factory
+    target.state.provider_identity_loader = identity_loader
+    target.state.test_only_conformance = test_only_conformance
+    target.include_router(_internal_router)
+    if target is not app and install_binding_middleware:
+        target.add_middleware(
+            _EvidenceBindingMiddleware,
+            provider_app=target,
+        )
+    return target
+
+
+def create_evidence_application() -> FastAPI:
+    """Create the bare contract app with no fixture activation path.
+
+    This factory intentionally preserves the v1.1 contract test boundary.  It
+    does not provide service authentication, transport enforcement, admission,
+    or lifecycle controls and therefore must not be deployed directly.  Use
+    ``src.production.create_production_evidence_application`` for deployment.
+    """
+    target = FastAPI(title="Customs Evidence API")
+    return _configure_evidence_application(
+        target,
+        backend_factory=DatabaseEvidenceBackend,
+        identity_loader=load_provider_build_identity,
+        test_only_conformance=False,
+    )
+
+
+def create_test_conformance_application(
+    *,
+    identity: ProviderBuildIdentity,
+    backend: ReadinessBackend | None = None,
+) -> FastAPI:
+    """Create an isolated test-only app; production never calls this factory."""
+    from src.conformance import TestOnlyConformanceEvidenceBackend
+
+    selected_backend = backend or TestOnlyConformanceEvidenceBackend()
+    target = FastAPI(title="TEST ONLY — Evidence API conformance")
+    return _configure_evidence_application(
+        target,
+        backend_factory=lambda: selected_backend,
+        identity_loader=lambda: identity,
+        test_only_conformance=True,
+    )
+
+
+_configure_evidence_application(
+    app,
+    backend_factory=DatabaseEvidenceBackend,
+    identity_loader=load_provider_build_identity,
+    test_only_conformance=False,
+)
 
 
 @app.get("/api/article")
@@ -159,10 +357,15 @@ def api_article(law: str, no: str, as_of: str | None = None) -> dict:
     edges = []
     for e in repo.expand_article(row["article_pk"]):
         t_no = e["article_no"]
-        label = (f"{_law_names.get(e['law_id'], e['law_id'])} 제{t_no // 100}조"
-                 + (f"의{t_no % 100}" if t_no % 100 else "")) if t_no else (e["title"] or "")
-        edges.append({"rel": e["rel"], "pk": e["article_pk"],
-                      "label": label, "title": e["title"]})
+        label = (
+            (
+                f"{_law_names.get(e['law_id'], e['law_id'])} 제{t_no // 100}조"
+                + (f"의{t_no % 100}" if t_no % 100 else "")
+            )
+            if t_no
+            else (e["title"] or "")
+        )
+        edges.append({"rel": e["rel"], "pk": e["article_pk"], "label": label, "title": e["title"]})
     return {
         "found": True,
         "pk": row["article_pk"],
@@ -195,7 +398,15 @@ def main() -> int:
     if not rerank.available():
         print("[webapp] reranker 불가 — /api/retrieve 는 RRF 순위로 동작 (reranked=false)")
     print(f"[webapp] 준비 완료 — 팀원 접속: http://<이 PC의 IP>:{port}")
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+    # This is the explicitly non-production team demo.  Production uses the
+    # authenticated ingress-only factory in src.production.
+    uvicorn.run(
+        app,
+        # Explicit non-production LAN demo; production uses authenticated ingress.
+        host="0.0.0.0",  # nosec B104
+        port=port,
+        log_level="warning",
+    )
     return 0
 
 

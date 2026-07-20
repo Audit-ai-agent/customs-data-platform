@@ -2,6 +2,7 @@
 
 전제: python -m src.ingest.laws 완료 상태. 미적재/미기동 시 skip.
 """
+
 from __future__ import annotations
 
 import psycopg
@@ -9,6 +10,8 @@ import pytest
 
 from src.config import settings
 from src.db.qdrant import COLLECTION, client as qdrant_client
+
+pytestmark = pytest.mark.live
 
 
 @pytest.fixture(scope="module")
@@ -111,12 +114,17 @@ def test_qdrant_payload_schema(cur):
         pytest.skip(f"Qdrant 접속 불가: {e}")
     if not pts:
         pytest.skip("Qdrant 미인덱싱")
-    required = {"article_pk", "law_id", "law_name", "hierarchy", "article_no",
-                "enforcement_date", "text"}
+    required = {
+        "article_pk",
+        "law_id",
+        "law_name",
+        "hierarchy",
+        "article_no",
+        "enforcement_date",
+        "text",
+    }
     for p in pts:
         assert required <= set(p.payload), f"payload 필드 누락: {required - set(p.payload)}"
-        cur.execute(
-            "SELECT is_current FROM law_articles WHERE id = %s", (p.payload["article_pk"],)
-        )
+        cur.execute("SELECT is_current FROM law_articles WHERE id = %s", (p.payload["article_pk"],))
         row = cur.fetchone()
         assert row is not None and row[0], "Qdrant 포인트가 비현행/미존재 조문을 가리킴"

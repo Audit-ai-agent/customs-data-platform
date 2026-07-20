@@ -2,11 +2,14 @@
 
 전제: python -m src.ingest.ccct 적재 완료(부분이라도). 미적재/미기동 시 skip.
 """
+
 from __future__ import annotations
 
 import pytest
 
 from src.db.neo4j import driver as make_driver
+
+pytestmark = pytest.mark.live
 
 
 @pytest.fixture(scope="module")
@@ -18,7 +21,10 @@ def session():
         drv.close()
         pytest.skip(f"Neo4j 접속 불가: {e}")
     with drv.session() as s:
-        if s.run("MATCH (r:Requirement {source_type: 'ccct'}) RETURN count(r) AS c").single()["c"] == 0:
+        if (
+            s.run("MATCH (r:Requirement {source_type: 'ccct'}) RETURN count(r) AS c").single()["c"]
+            == 0
+        ):
             pytest.skip("Requirement 미적재 (python -m src.ingest.ccct 필요)")
         yield s
     drv.close()

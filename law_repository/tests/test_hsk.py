@@ -3,11 +3,14 @@
 전제: docker compose up + python -m src.ingest.hsk 적재 완료 상태.
 Neo4j 미기동/미적재 시 skip.
 """
+
 from __future__ import annotations
 
 import pytest
 
 from src.db.neo4j import driver as make_driver
+
+pytestmark = pytest.mark.live
 
 
 @pytest.fixture(scope="module")

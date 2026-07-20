@@ -9,9 +9,13 @@ FlagEmbedding 의 FlagReranker 는 transformers 5.x 에서 깨진다
 로드/추론 실패 시 None 을 반환해 호출부(A1)가 RRF 순위로 degrade 하게
 한다 — 검색 자체는 죽지 않는다.
 """
+
 from __future__ import annotations
 
-MODEL = "BAAI/bge-reranker-v2-m3"
+from src.embed.model_identity import RERANK_MODEL
+
+MODEL = RERANK_MODEL.model_id
+MODEL_REVISION = RERANK_MODEL.revision
 _BATCH = 4  # CPU 메모리 상한 (568M 파라미터 × max_length 토큰)
 
 _tok = None
@@ -25,8 +29,18 @@ def _get():
         try:
             from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-            _tok = AutoTokenizer.from_pretrained(MODEL)
-            _model = AutoModelForSequenceClassification.from_pretrained(MODEL)
+            # B615 is suppressed only on these calls: MODEL_REVISION is a full
+            # immutable SHA from model_identity.py and lookup is cache-only.
+            _tok = AutoTokenizer.from_pretrained(  # nosec B615
+                MODEL,
+                revision=MODEL_REVISION,
+                local_files_only=True,
+            )
+            _model = AutoModelForSequenceClassification.from_pretrained(  # nosec B615
+                MODEL,
+                revision=MODEL_REVISION,
+                local_files_only=True,
+            )
             _model.eval()
         except Exception as e:  # noqa: BLE001 — 어떤 실패든 degrade 가 계약
             print(f"[rerank] {MODEL} 로드 실패 — RRF 순위로 degrade: {e}")
@@ -53,9 +67,12 @@ def scores(query: str, passages: list[str], max_length: int = 1024) -> list[floa
             for i in range(0, len(passages), _BATCH):
                 chunk = passages[i : i + _BATCH]
                 batch = _tok(
-                    [query] * len(chunk), chunk,
-                    padding=True, truncation=True,
-                    max_length=max_length, return_tensors="pt",
+                    [query] * len(chunk),
+                    chunk,
+                    padding=True,
+                    truncation=True,
+                    max_length=max_length,
+                    return_tensors="pt",
                 )
                 logits = _model(**batch).logits.squeeze(-1)
                 out.extend(torch.sigmoid(logits).tolist())

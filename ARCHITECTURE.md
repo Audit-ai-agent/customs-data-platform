@@ -10,6 +10,11 @@
 4. 장애·모호성·커버리지 누락은 `partial|failed`로 반환하며 “요건 없음”으로 바꾸지 않는다.
 5. Structured CCCT Requirement는 `top_k`로 자르지 않는다. Hybrid 법령 결과만 순위를 사용한다.
 6. 설정된 대상 법령 corpus가 일부만 적재되면 readiness와 Hybrid 법령 검색은 fail-closed 한다.
+7. 대상 58개 법령은 비어 있지 않은 현행 조문과 content hash·version provenance가
+   있어야 하며, PostgreSQL/Qdrant index count 및 PostgreSQL/Neo4j article_pk
+   양방향 집합이 일치해야 한다.
+8. readiness에서 확인한 provider build와 POST 요청·응답의 네 결속 헤더가 다르면
+   Evidence 본문을 사용하지 않는다.
 
 ## 데이터 흐름
 
@@ -27,10 +32,13 @@
 
 ## 계약 변경 정책
 
-- canonical schema: `contracts/evidence/v1/rag_retrieval_v1.schema.json`
+- retrieval canonical schema: `contracts/evidence/v1/rag_retrieval_v1.schema.json`
+- readiness canonical schema: `contracts/evidence/v1/readiness_v1.schema.json`
 - OpenAPI와 canonical schema의 wire keyword 차이는 `tools/check_contract_drift.py`가 실패시킨다.
 - v1 breaking change는 금지한다. 필요한 경우 `contracts/evidence/v2`와 새 endpoint를 추가한다.
-- 소비자는 release/tag와 schema SHA-256을 함께 고정한다.
+- 소비자는 provider release/revision/build와 retrieval schema SHA-256을 함께 고정한다.
+- production app은 Database backend만 만들며 test-only conformance backend를 환경변수로
+  활성화할 수 없다.
 
 ## 평가 기준
 

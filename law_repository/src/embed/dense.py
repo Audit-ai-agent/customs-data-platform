@@ -3,10 +3,13 @@
 모델 로드가 무거우므로 lazy 싱글턴. 인덱싱·검색(Phase 5) 양쪽이 이걸 공유해야
 같은 공간에서 비교된다.
 """
+
 from __future__ import annotations
 
 import numpy as np
 from threading import Lock
+
+from src.embed.model_identity import DENSE_MODEL
 
 _model = None
 _model_lock = Lock()
@@ -20,9 +23,21 @@ def _get_model():
             if _model is None:
                 import torch
                 from FlagEmbedding import BGEM3FlagModel
+                from huggingface_hub import snapshot_download
 
+                # B615 is suppressed only at this exact call: model_identity.py
+                # pins a full 40-character revision and runtime is cache-only.
+                model_path = snapshot_download(  # nosec B615
+                    repo_id=DENSE_MODEL.model_id,
+                    revision=DENSE_MODEL.revision,
+                    # Production images prefetch this immutable revision during
+                    # their build. Runtime lookup must never contact or trust a
+                    # mutable remote model repository.
+                    local_files_only=True,
+                )
                 _model = BGEM3FlagModel(
-                    "BAAI/bge-m3", use_fp16=torch.cuda.is_available()
+                    model_path,
+                    use_fp16=torch.cuda.is_available(),
                 )
     return _model
 
