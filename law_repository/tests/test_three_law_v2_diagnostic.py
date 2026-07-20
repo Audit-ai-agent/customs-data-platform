@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
 from src.conformance import TestOnlyConformanceEvidenceBackend
+from src.deadline import DeadlineExceeded, RequestDeadline
 from src.runtime_api import RUNTIME_READINESS_PATH, RUNTIME_RETRIEVE_PATH
 from tools import run_three_law_v2_diagnostic as runner
 from tools.run_evidence_v2_conformance_server import VerifiedProviderRuntimeLock
@@ -57,6 +60,9 @@ def _observation(
         qdrant_point_ids_sha256=qdrant_ids_digest,
         postgres_graph_ids_sha256=graph_ids_digest,
         neo4j_article_ids_sha256=graph_ids_digest,
+        postgres_retrieval_state_sha256=_digest("postgres-state", content_version),
+        qdrant_retrieval_state_sha256=_digest("qdrant-state", content_version),
+        neo4j_retrieval_state_sha256=_digest("neo4j-state", content_version),
     )
 
 
@@ -143,7 +149,8 @@ def _app(
         port=18012,
         observation_loader=observation_loader,
         provider_lock_loader=lambda _context: _provider_lock(),
-        database_backend_factory=_ReadyBackend,
+        database_backend_factory=lambda observation, _deadline: _ReadyBackend(observation),
+        executing_repository_attestor=lambda _deadline=None: None,
         install_readonly_boundary=False,
     )
 
@@ -213,13 +220,258 @@ def test_domain_separated_identity_changes_when_content_changes_at_same_count() 
     assert first.identity.knowledge_generation_id != changed.identity.knowledge_generation_id
 
 
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"payload": {"article_pk": 7, "text": "changed"}},
+        {"vector": {"dense": [0.1, 0.200001], "bm25": {"indices": [1], "values": [1.0]}}},
+        {"vector": {"dense": [0.1, 0.2], "bm25": {"indices": [2], "values": [1.0]}}},
+        {"vector": {"dense": [0.1, 0.2], "bm25": {"indices": [1], "values": [0.9]}}},
+    ],
+)
+def test_qdrant_payload_dense_and_sparse_state_mutations_change_identity(
+    changed: dict[str, Any],
+) -> None:
+    baseline_state = {
+        "collection": {"vectors": {"dense": {"size": 2}}, "sparse_vectors": {"bm25": {}}},
+        "points": [
+            {
+                "id": "point-1",
+                "payload": {"article_pk": 7, "text": "original"},
+                "vector": {
+                    "dense": [0.1, 0.2],
+                    "bm25": {"indices": [1], "values": [1.0]},
+                },
+            }
+        ],
+    }
+    mutated_state = json.loads(json.dumps(baseline_state))
+    mutated_state["points"][0].update(changed)
+    first_digest = runner._state_sha256(b"qdrant-retrieval", baseline_state)
+    changed_digest = runner._state_sha256(b"qdrant-retrieval", mutated_state)
+    assert first_digest != changed_digest
+
+    first = runner.derive_three_law_runtime_lease(
+        _provider_lock(),
+        replace(_observation(), qdrant_retrieval_state_sha256=first_digest),
+    )
+    second = runner.derive_three_law_runtime_lease(
+        _provider_lock(),
+        replace(_observation(), qdrant_retrieval_state_sha256=changed_digest),
+    )
+    assert first.identity.runtime_release_sha256 != second.identity.runtime_release_sha256
+
+
+@pytest.mark.parametrize(
+    ("label", "baseline", "changed"),
+    [
+        (
+            b"postgres-retrieval",
+            {
+                "ccct_requirements": [{"version_hash": "a", "source_uri": "https://a"}],
+                "law_articles": [{"id": 1, "content": "old", "valid_to": "2026-01-01"}],
+            },
+            {
+                "ccct_requirements": [{"version_hash": "b", "source_uri": "https://a"}],
+                "law_articles": [{"id": 1, "content": "old", "valid_to": "2026-01-01"}],
+            },
+        ),
+        (
+            b"postgres-retrieval",
+            {
+                "ccct_queries": [{"hsk10": "0303540000", "covered": True}],
+                "ccct_source_records": [{"source_uri": "https://source-a"}],
+            },
+            {
+                "ccct_queries": [],
+                "ccct_source_records": [{"source_uri": "https://source-b"}],
+            },
+        ),
+        (
+            b"postgres-retrieval",
+            {"law_versions": [{"mst": "1"}], "law_articles": [{"content": "history-a"}]},
+            {"law_versions": [{"mst": "2"}], "law_articles": [{"content": "history-b"}]},
+        ),
+        (
+            b"neo4j-retrieval",
+            {
+                "nodes": [{"labels": ["HSK"], "properties": {"code": "0303540000"}}],
+                "relationships": [{"source": "a", "type": "CITES", "target": "b"}],
+            },
+            {
+                "nodes": [{"labels": ["HSK"], "properties": {"code": "0303550000"}}],
+                "relationships": [{"source": "b", "type": "CITES", "target": "a"}],
+            },
+        ),
+    ],
+)
+def test_every_response_affecting_store_state_mutation_changes_digest(
+    label: bytes,
+    baseline: object,
+    changed: object,
+) -> None:
+    assert runner._state_sha256(label, baseline) != runner._state_sha256(label, changed)
+
+
+def test_every_eligible_leaf_requires_one_non_null_unique_qdrant_mapping() -> None:
+    valid = (
+        (
+            7,
+            "point-7",
+            "001556",
+            1,
+            None,
+            None,
+            "content",
+            "law",
+            "법률",
+            date(2026, 1, 1),
+        ),
+    )
+    point_ids, projection = runner._eligible_law_leaf_projection(valid)
+    assert point_ids == ("point-7",)
+    assert projection["point-7"]["article_pk"] == 7
+
+    with pytest.raises(runner.ThreeLawDiagnosticError, match="no Qdrant point"):
+        runner._eligible_law_leaf_projection(((*valid[0][:1], None, *valid[0][2:]),))
+    with pytest.raises(runner.ThreeLawDiagnosticError, match="unique"):
+        runner._eligible_law_leaf_projection((valid[0], (8, *valid[0][1:])))
+
+
+def test_qdrant_scroll_rejects_null_point_identity() -> None:
+    class _Qdrant:
+        def scroll(self, **_kwargs):
+            return [SimpleNamespace(id=None, payload={}, vector={})], None
+
+    with pytest.raises(runner.ThreeLawDiagnosticError, match="without an identity"):
+        runner._scroll_qdrant_state(_Qdrant(), 1)
+
+
+def test_executing_repository_attestation_rejects_dirty_or_wrong_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner_bytes = Path(runner.__file__).read_bytes()
+
+    def clean_exact(_repository, *arguments, **_kwargs):
+        if arguments[0] == "status":
+            return ""
+        if arguments[0] == "rev-parse":
+            return _REVISION
+        return runner_bytes
+
+    monkeypatch.setattr(runner, "_git", clean_exact)
+    runner.attest_executing_repository(_provider_lock())
+
+    def dirty(_repository, *arguments, **_kwargs):
+        return " M tools/run_three_law_v2_diagnostic.py" if arguments[0] == "status" else ""
+
+    monkeypatch.setattr(runner, "_git", dirty)
+    with pytest.raises(runner.ThreeLawDiagnosticError, match="not clean"):
+        runner.attest_executing_repository(_provider_lock())
+
+    def wrong_revision(_repository, *arguments, **_kwargs):
+        if arguments[0] == "status":
+            return ""
+        return "b" * 40
+
+    monkeypatch.setattr(runner, "_git", wrong_revision)
+    with pytest.raises(runner.ThreeLawDiagnosticError, match="does not match"):
+        runner.attest_executing_repository(_provider_lock())
+
+
+def test_expired_deadline_starts_no_observation_or_attestation_work() -> None:
+    calls: list[str] = []
+    lease = runner.derive_three_law_runtime_lease(_provider_lock(), _observation())
+    expired = RequestDeadline.start(
+        started_at=0,
+        request_timeout_seconds=2,
+        store_timeout_seconds=1,
+        model_timeout_seconds=1,
+        completion_reserve_seconds=0.5,
+        clock=lambda: 3,
+    )
+    loader = runner._ObservedDiagnosticRuntimeLeaseLoader(
+        lease,
+        initial_observation=_observation(),
+        observation_loader=lambda _deadline=None: calls.append("observe") or _observation(),
+        executing_repository_attestor=(lambda _deadline=None: calls.append("attest")),
+        expected_loaded_law_count=3,
+    )
+
+    with pytest.raises(DeadlineExceeded):
+        loader.assert_unchanged(lease, expired)
+    assert calls == []
+
+
+def test_same_request_deadline_reaches_attestor_observer_backend_and_postcheck(
+    tmp_path: Path,
+) -> None:
+    observation = _observation()
+    observed_deadlines: list[RequestDeadline | None] = []
+    attested_deadlines: list[RequestDeadline | None] = []
+    backend_deadlines: list[RequestDeadline] = []
+
+    def observe(deadline: RequestDeadline | None = None) -> runner.ThreeLawObservation:
+        observed_deadlines.append(deadline)
+        return observation
+
+    def attest(deadline: RequestDeadline | None = None) -> None:
+        attested_deadlines.append(deadline)
+
+    def backend_factory(
+        current: runner.ThreeLawObservation,
+        deadline: RequestDeadline,
+    ) -> _ReadyBackend:
+        assert current == observation
+        backend_deadlines.append(deadline)
+        return _ReadyBackend(current)
+
+    context = tmp_path / "provider-context"
+    context.mkdir()
+    output_root = tmp_path / "artifacts"
+    output_root.mkdir()
+    app = runner.create_three_law_diagnostic_application(
+        diagnostic_only_ack=True,
+        provider_context=context,
+        service_token_file=_token_file(tmp_path),
+        diagnostic_manifest_output=output_root / "manifest.json",
+        host="127.0.0.1",
+        port=18012,
+        observation_loader=observe,
+        provider_lock_loader=lambda _context: _provider_lock(),
+        database_backend_factory=backend_factory,
+        executing_repository_attestor=attest,
+        install_readonly_boundary=False,
+    )
+    request_deadline = RequestDeadline.start(
+        started_at=0,
+        request_timeout_seconds=30,
+        store_timeout_seconds=10,
+        model_timeout_seconds=5,
+        completion_reserve_seconds=0.5,
+        clock=lambda: 1,
+    )
+    lease = app.state.runtime_release_loader.acquire(request_deadline)
+    app.state.runtime_backend_factory(lease, request_deadline)
+    app.state.runtime_release_loader.assert_unchanged(lease, request_deadline)
+
+    assert observed_deadlines[0] is not request_deadline
+    assert observed_deadlines[1:] == [request_deadline, request_deadline]
+    assert attested_deadlines[0] is not request_deadline
+    assert attested_deadlines[1:] == [request_deadline, request_deadline]
+    assert backend_deadlines == [request_deadline]
+
+
 def test_authenticated_readiness_and_retrieval_use_exact_diagnostic_identity(
     tmp_path: Path,
 ) -> None:
     observation = _observation()
     backend_instances: list[_ReadyBackend] = []
 
-    def backend_factory(current: runner.ThreeLawObservation) -> _ReadyBackend:
+    def backend_factory(
+        current: runner.ThreeLawObservation,
+        _deadline,
+    ) -> _ReadyBackend:
         backend = _ReadyBackend(current)
         backend_instances.append(backend)
         return backend
@@ -236,9 +488,10 @@ def test_authenticated_readiness_and_retrieval_use_exact_diagnostic_identity(
         diagnostic_manifest_output=manifest_output,
         host="127.0.0.1",
         port=18012,
-        observation_loader=lambda: observation,
+        observation_loader=lambda _deadline=None: observation,
         provider_lock_loader=lambda _context: _provider_lock(),
         database_backend_factory=backend_factory,
+        executing_repository_attestor=lambda _deadline=None: None,
         install_readonly_boundary=False,
     )
     identity = app.state.three_law_diagnostic_manifest["evidence_runtime_release"]
@@ -296,7 +549,7 @@ def test_authenticated_readiness_and_retrieval_use_exact_diagnostic_identity(
 
 def test_store_drift_fails_closed_before_readiness_or_retrieval(tmp_path: Path) -> None:
     observations = iter((_observation(), _observation(article_count=1_008)))
-    app = _app(tmp_path, observation_loader=lambda: next(observations))
+    app = _app(tmp_path, observation_loader=lambda _deadline=None: next(observations))
 
     with TestClient(
         app,
@@ -321,7 +574,8 @@ def test_lease_assertion_reobserves_after_backend_work() -> None:
     loader = runner._ObservedDiagnosticRuntimeLeaseLoader(
         lease,
         initial_observation=initial,
-        observation_loader=lambda: next(observations),
+        observation_loader=lambda _deadline=None: next(observations),
+        executing_repository_attestor=lambda _deadline=None: None,
         expected_loaded_law_count=3,
     )
 

@@ -1331,6 +1331,7 @@ def create_test_runtime_v2_application(
     runtime_release_loader: RuntimeLeaseLoader,
     backend_factory: RuntimeBackendFactory,
     runtime_closeables: tuple[Any, ...] = (),
+    model_supervisor: DenseModelSupervisor | None = None,
 ) -> FastAPI:
     """Explicit offline v2 conformance shell; production never calls it."""
 
@@ -1339,6 +1340,7 @@ def create_test_runtime_v2_application(
         runtime_release_loader=runtime_release_loader,
         backend_factory=backend_factory,
         test_only=True,
+        model_supervisor=model_supervisor,
         runtime_closeables=runtime_closeables,
     )
 
