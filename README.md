@@ -47,6 +47,25 @@ readiness 503이 정상입니다. 빈 법령을 추가하거나 expected count�
 test-only conformance identity는 HTTP 상호운용만 증명하며 제품 runtime lock이나 RAG release로
 승격할 수 없습니다.
 
+## Production-candidate runtime v3
+
+`/internal/rag/v3/*`는 v2의 sealed knowledge generation을 그대로 결박하면서,
+요건서류 코드의 **존재**와 실제 서류의 **검증 완료**를 분리합니다. v3 응답은
+각 요건서류에 `presence_only`, `content_match_required`,
+`external_verification_required`, `human_only` 중 하나의 승인된 정책과 원본 hash를
+제공합니다. 매핑이 없거나 승인되지 않은 코드는 항상 `human_only`입니다.
+
+저장소의 `contracts/evidence/v3/requirement-policy.lock.json`은 의도적으로
+`unreleased`이며 승인 자료가 아닙니다. 운영 v3는 두 독립 도메인 검수자의
+Ed25519 서명, adjudication, coverage matrix, 유효기간이 결박된 정책 JSON과 별도
+reviewer trust store를 read-only로 마운트해야 합니다. reviewer store의 SHA-256은
+provider image 안의 immutable lock에 미리 고정되므로 두 mount를 함께 임의 교체해도
+readiness가 열리지 않습니다. 현재 검수자가 없고 trust lock도 `unreleased`이므로
+구현 상태는 `Production candidate`이고 자동완료
+근거로 사용할 수 없습니다. 자세한 계약은
+[Evidence v3](contracts/evidence/v3/README.md), 결정 근거는
+[ADR-0001](docs/ADR-0001-EVIDENCE-V3-REQUIREMENT-POLICY.md)을 따릅니다.
+
 ## 로컬 준비
 
 Python 3.11과 [uv](https://docs.astral.sh/uv/)를 사용합니다.

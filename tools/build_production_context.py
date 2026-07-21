@@ -43,6 +43,27 @@ FIXED_FILES = {
     "contracts/evidence/v2/readiness_v2.schema.json": (
         "contracts/evidence/v2/readiness_v2.schema.json"
     ),
+    "contracts/evidence/v3/rag_retrieval_v3.schema.json": (
+        "contracts/evidence/v3/rag_retrieval_v3.schema.json"
+    ),
+    "contracts/evidence/v3/readiness_v3.schema.json": (
+        "contracts/evidence/v3/readiness_v3.schema.json"
+    ),
+    "contracts/evidence/v3/requirement_policy_v1.schema.json": (
+        "contracts/evidence/v3/requirement_policy_v1.schema.json"
+    ),
+    "contracts/evidence/v3/requirement-policy.lock.json": (
+        "contracts/evidence/v3/requirement-policy.lock.json"
+    ),
+    "contracts/evidence/v3/trusted_reviewer_store_v1.schema.json": (
+        "contracts/evidence/v3/trusted_reviewer_store_v1.schema.json"
+    ),
+    "contracts/evidence/v3/trusted_reviewer_lock_v1.schema.json": (
+        "contracts/evidence/v3/trusted_reviewer_lock_v1.schema.json"
+    ),
+    "contracts/evidence/v3/trusted-reviewers.lock.json": (
+        "contracts/evidence/v3/trusted-reviewers.lock.json"
+    ),
     "law_repository/deploy/production/Dockerfile": "Dockerfile",
     "law_repository/deploy/production/README.md": "README.md",
 }

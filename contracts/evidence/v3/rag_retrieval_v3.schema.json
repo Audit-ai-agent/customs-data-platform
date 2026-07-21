@@ -1,0 +1,642 @@
+{
+  "$defs": {
+    "EvidenceError": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        },
+        "retryable": {
+          "title": "Retryable",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "title": "EvidenceError",
+      "type": "object"
+    },
+    "EvidenceV3": {
+      "additionalProperties": false,
+      "properties": {
+        "agencies": {
+          "items": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Agencies",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "article_no": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Article No"
+        },
+        "eligibility": {
+          "enum": [
+            "finding",
+            "supporting",
+            "blocked"
+          ],
+          "title": "Eligibility",
+          "type": "string"
+        },
+        "evidence_id": {
+          "pattern": "^ev_[a-f0-9]{64}$",
+          "title": "Evidence Id",
+          "type": "string"
+        },
+        "item_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Item Id",
+          "type": "string"
+        },
+        "law_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Law Id"
+        },
+        "law_name": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Law Name"
+        },
+        "matched_hs_code": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9]{6}$",
+              "type": "string"
+            },
+            {
+              "pattern": "^[0-9]{10}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Matched Hs Code"
+        },
+        "raw_scores": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "title": "Raw Scores",
+          "type": "object"
+        },
+        "required_document_code": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Required Document Code"
+        },
+        "required_document_name": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Required Document Name"
+        },
+        "requirement_verification": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RequirementPolicyBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retrieval_methods": {
+          "items": {
+            "enum": [
+              "exact_hs",
+              "dense",
+              "bm25",
+              "graph"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Retrieval Methods",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "score": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Score"
+        },
+        "source_record_id": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Source Record Id",
+          "type": "string"
+        },
+        "source_type": {
+          "enum": [
+            "law_article",
+            "customs_requirement",
+            "hsk_entry",
+            "notice"
+          ],
+          "title": "Source Type",
+          "type": "string"
+        },
+        "source_uri": {
+          "format": "uri",
+          "minLength": 1,
+          "title": "Source Uri",
+          "type": "string"
+        },
+        "text": {
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "trade_type": {
+          "enum": [
+            "import",
+            "export"
+          ],
+          "title": "Trade Type",
+          "type": "string"
+        },
+        "valid_from": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Valid From"
+        },
+        "valid_to": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Valid To"
+        },
+        "version_hash": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Version Hash",
+          "type": "string"
+        }
+      },
+      "required": [
+        "evidence_id",
+        "source_record_id",
+        "source_type",
+        "item_id",
+        "title",
+        "text",
+        "law_id",
+        "law_name",
+        "article_no",
+        "source_uri",
+        "valid_from",
+        "valid_to",
+        "version_hash",
+        "matched_hs_code",
+        "trade_type",
+        "required_document_code",
+        "required_document_name",
+        "agencies",
+        "retrieval_methods",
+        "eligibility",
+        "score",
+        "raw_scores",
+        "requirement_verification"
+      ],
+      "title": "EvidenceV3",
+      "type": "object"
+    },
+    "ItemEvidenceResultV3": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_hsk10s": {
+          "items": {
+            "pattern": "^[0-9]{10}$",
+            "type": "string"
+          },
+          "title": "Candidate Hsk10S",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "coverage": {
+          "enum": [
+            "complete",
+            "partial",
+            "unknown"
+          ],
+          "title": "Coverage",
+          "type": "string"
+        },
+        "errors": {
+          "items": {
+            "$ref": "#/$defs/EvidenceError"
+          },
+          "title": "Errors",
+          "type": "array"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceV3"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "hs_resolution": {
+          "enum": [
+            "exact",
+            "unique_descendant",
+            "ambiguous",
+            "invalid",
+            "missing"
+          ],
+          "title": "Hs Resolution",
+          "type": "string"
+        },
+        "item_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Item Id",
+          "type": "string"
+        },
+        "requirements_found": {
+          "title": "Requirements Found",
+          "type": "boolean"
+        },
+        "resolved_hsk10": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9]{10}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Resolved Hsk10"
+        }
+      },
+      "required": [
+        "item_id",
+        "hs_resolution",
+        "resolved_hsk10",
+        "candidate_hsk10s",
+        "coverage",
+        "requirements_found",
+        "evidence",
+        "errors"
+      ],
+      "title": "ItemEvidenceResultV3",
+      "type": "object"
+    },
+    "RequirementPolicyBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "approved": {
+          "title": "Approved",
+          "type": "boolean"
+        },
+        "policy_release": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Policy Release",
+          "type": "string"
+        },
+        "policy_source_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Policy Source Sha256",
+          "type": "string"
+        },
+        "required_document_code": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Required Document Code",
+          "type": "string"
+        },
+        "verification_policy": {
+          "enum": [
+            "presence_only",
+            "content_match_required",
+            "external_verification_required",
+            "human_only"
+          ],
+          "title": "Verification Policy",
+          "type": "string"
+        }
+      },
+      "required": [
+        "required_document_code",
+        "verification_policy",
+        "policy_source_sha256",
+        "policy_release",
+        "approved"
+      ],
+      "title": "RequirementPolicyBinding",
+      "type": "object"
+    },
+    "RetrieveItem": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "destination_country": {
+          "pattern": "^[A-Z]{2}$",
+          "title": "Destination Country",
+          "type": "string"
+        },
+        "hs_code": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Hs Code"
+        },
+        "item_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Item Id",
+          "type": "string"
+        },
+        "origin_country": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Z]{2}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Origin Country"
+        }
+      },
+      "required": [
+        "item_id",
+        "description",
+        "hs_code",
+        "origin_country",
+        "destination_country"
+      ],
+      "title": "RetrieveItem",
+      "type": "object"
+    },
+    "RetrieveRequestV3": {
+      "additionalProperties": false,
+      "properties": {
+        "case_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Case Id",
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/RetrieveItem"
+          },
+          "maxItems": 100,
+          "minItems": 1,
+          "title": "Items",
+          "type": "array"
+        },
+        "jurisdiction": {
+          "const": "KR",
+          "title": "Jurisdiction",
+          "type": "string"
+        },
+        "query_intent": {
+          "default": "required_import_documents",
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Query Intent",
+          "type": "string"
+        },
+        "request_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Request Id",
+          "type": "string"
+        },
+        "review_as_of": {
+          "format": "date",
+          "title": "Review As Of",
+          "type": "string"
+        },
+        "review_run_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Review Run Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "3.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "top_k": {
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Top K",
+          "type": "integer"
+        },
+        "trade_type": {
+          "enum": [
+            "import",
+            "export"
+          ],
+          "title": "Trade Type",
+          "type": "string"
+        },
+        "uploaded_requirement_document_codes": {
+          "default": [],
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Uploaded Requirement Document Codes",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "validation_issue_codes": {
+          "default": [],
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Validation Issue Codes",
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "schema_version",
+        "request_id",
+        "case_id",
+        "review_run_id",
+        "review_as_of",
+        "jurisdiction",
+        "trade_type",
+        "top_k",
+        "items"
+      ],
+      "title": "RetrieveRequestV3",
+      "type": "object"
+    },
+    "RetrieveResponseV3": {
+      "additionalProperties": false,
+      "properties": {
+        "errors": {
+          "items": {
+            "$ref": "#/$defs/EvidenceError"
+          },
+          "title": "Errors",
+          "type": "array"
+        },
+        "knowledge_snapshot_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Knowledge Snapshot Id"
+        },
+        "request_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Request Id",
+          "type": "string"
+        },
+        "results": {
+          "items": {
+            "$ref": "#/$defs/ItemEvidenceResultV3"
+          },
+          "maxItems": 100,
+          "title": "Results",
+          "type": "array"
+        },
+        "schema_version": {
+          "const": "3.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "partial",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "request_id",
+        "status",
+        "knowledge_snapshot_id",
+        "results"
+      ],
+      "title": "RetrieveResponseV3",
+      "type": "object"
+    }
+  },
+  "$id": "https://customs-data-platform.invalid/contracts/evidence/v3/rag_retrieval_v3.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/RetrieveRequestV3"
+    },
+    {
+      "$ref": "#/$defs/RetrieveResponseV3"
+    }
+  ],
+  "title": "Customs Evidence Retrieval v3"
+}

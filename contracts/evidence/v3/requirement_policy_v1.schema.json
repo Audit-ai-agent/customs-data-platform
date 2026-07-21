@@ -1,0 +1,251 @@
+{
+  "$defs": {
+    "RequirementPolicyApproval": {
+      "additionalProperties": false,
+      "properties": {
+        "adjudication_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Adjudication Sha256",
+          "type": "string"
+        },
+        "approved_at": {
+          "format": "date",
+          "title": "Approved At",
+          "type": "string"
+        },
+        "reviewer_attestations": {
+          "items": {
+            "$ref": "#/$defs/ReviewerAttestation"
+          },
+          "maxItems": 10,
+          "minItems": 2,
+          "title": "Reviewer Attestations",
+          "type": "array"
+        },
+        "reviewer_trust_store_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Reviewer Trust Store Sha256",
+          "type": "string"
+        },
+        "subject_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Subject Sha256",
+          "type": "string"
+        },
+        "trust_store_release": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Trust Store Release",
+          "type": "string"
+        },
+        "valid_until": {
+          "format": "date",
+          "title": "Valid Until",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reviewer_attestations",
+        "adjudication_sha256",
+        "subject_sha256",
+        "trust_store_release",
+        "reviewer_trust_store_sha256",
+        "approved_at",
+        "valid_until"
+      ],
+      "title": "RequirementPolicyApproval",
+      "type": "object"
+    },
+    "RequirementPolicyEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "policy_source_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Policy Source Sha256",
+          "type": "string"
+        },
+        "required_document_code": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Required Document Code",
+          "type": "string"
+        },
+        "verification_policy": {
+          "enum": [
+            "presence_only",
+            "content_match_required",
+            "external_verification_required",
+            "human_only"
+          ],
+          "title": "Verification Policy",
+          "type": "string"
+        }
+      },
+      "required": [
+        "required_document_code",
+        "verification_policy",
+        "policy_source_sha256"
+      ],
+      "title": "RequirementPolicyEntry",
+      "type": "object"
+    },
+    "ReviewerAttestation": {
+      "additionalProperties": false,
+      "properties": {
+        "key_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Key Id",
+          "type": "string"
+        },
+        "review_reference_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Review Reference Sha256",
+          "type": "string"
+        },
+        "reviewer_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Reviewer Id",
+          "type": "string"
+        },
+        "signature_hex": {
+          "pattern": "^[0-9a-f]{128}$",
+          "title": "Signature Hex",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reviewer_id",
+        "key_id",
+        "review_reference_sha256",
+        "signature_hex"
+      ],
+      "title": "ReviewerAttestation",
+      "type": "object"
+    }
+  },
+  "$id": "https://customs-data-platform.invalid/contracts/evidence/v3/requirement_policy_v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "approval": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RequirementPolicyApproval"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "approval_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Approval Sha256"
+    },
+    "contract": {
+      "const": "requirement-verification-policy",
+      "title": "Contract",
+      "type": "string"
+    },
+    "coverage_matrix_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Coverage Matrix Sha256"
+    },
+    "knowledge_snapshot_id": {
+      "anyOf": [
+        {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Knowledge Snapshot Id"
+    },
+    "knowledge_source_manifest_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Knowledge Source Manifest Sha256"
+    },
+    "policies": {
+      "items": {
+        "$ref": "#/$defs/RequirementPolicyEntry"
+      },
+      "maxItems": 10000,
+      "title": "Policies",
+      "type": "array"
+    },
+    "policy_manifest_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Policy Manifest Sha256"
+    },
+    "policy_release": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Policy Release",
+      "type": "string"
+    },
+    "release_state": {
+      "enum": [
+        "unreleased",
+        "approved"
+      ],
+      "title": "Release State",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "contract",
+    "schema_version",
+    "release_state",
+    "policy_release",
+    "knowledge_source_manifest_sha256",
+    "coverage_matrix_sha256",
+    "policy_manifest_sha256",
+    "approval_sha256",
+    "approval",
+    "policies"
+  ],
+  "title": "RequirementPolicyRelease",
+  "type": "object"
+}
