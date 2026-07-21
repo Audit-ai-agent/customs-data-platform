@@ -63,6 +63,22 @@ Before publication, CI must:
 5. sign the image digest and attach build provenance;
 6. verify the image as UID 65532 with read-only rootfs and no Linux capabilities.
 
+The final read-only gate is `.github/workflows/evidence-v3-release.yml`. It can
+only run from an existing annotated `evidence-api-v3.*` tag and only accepts a
+bundle from `.github/workflows/evidence-v3-release-bundle.yml` at that same tag
+and source commit. It verifies the exact run attempt, artifact ID, API-reported
+SHA-256, safe archive inventory, and tagged provider bytes before invoking
+`tools/verify_evidence_v3_release.py`.
+
+Production admission is intentionally **not implemented**: the producer exits
+with `NOT_IMPLEMENTED_EXTERNAL_ATTESTATION` and emits no bundle, while the
+Production verifier always fails with the same blocker. Candidate structural
+validation has an explicit non-release status and non-zero exit. This remains
+in force until signed raw evidence, a protected producer provenance statement,
+an independently pinned release-attestor trust root, and two independent
+Ed25519 release signatures are implemented. No tag creation, push, image
+publication, deployment, generation promotion, rollback, or DB write occurs.
+
 The release manifest records the Data commit, image digest, provider build SHA,
 retrieval schema SHA, model revisions, SBOM digests, scanner results, and
 rollback image digest. A tag by itself is not a release identity.

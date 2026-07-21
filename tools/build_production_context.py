@@ -12,7 +12,12 @@ import hashlib
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "law_repository"))
+
+from src.production_context_inventory import FIXED_PRODUCTION_CONTEXT_FILES
 
 try:
     from tools.provider_build import (
@@ -30,43 +35,7 @@ except ModuleNotFoundError:  # direct execution with tools/ as sys.path[0]
     )
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-FIXED_FILES = {
-    ".dockerignore": ".dockerignore",
-    "pyproject.toml": "pyproject.toml",
-    "uv.lock": "uv.lock",
-    "contracts/evidence/v1/rag_retrieval_v1.schema.json": (
-        "contracts/evidence/v1/rag_retrieval_v1.schema.json"
-    ),
-    "contracts/evidence/v1/readiness_v1.schema.json": (
-        "contracts/evidence/v1/readiness_v1.schema.json"
-    ),
-    "contracts/evidence/v2/readiness_v2.schema.json": (
-        "contracts/evidence/v2/readiness_v2.schema.json"
-    ),
-    "contracts/evidence/v3/rag_retrieval_v3.schema.json": (
-        "contracts/evidence/v3/rag_retrieval_v3.schema.json"
-    ),
-    "contracts/evidence/v3/readiness_v3.schema.json": (
-        "contracts/evidence/v3/readiness_v3.schema.json"
-    ),
-    "contracts/evidence/v3/requirement_policy_v1.schema.json": (
-        "contracts/evidence/v3/requirement_policy_v1.schema.json"
-    ),
-    "contracts/evidence/v3/requirement-policy.lock.json": (
-        "contracts/evidence/v3/requirement-policy.lock.json"
-    ),
-    "contracts/evidence/v3/trusted_reviewer_store_v1.schema.json": (
-        "contracts/evidence/v3/trusted_reviewer_store_v1.schema.json"
-    ),
-    "contracts/evidence/v3/trusted_reviewer_lock_v1.schema.json": (
-        "contracts/evidence/v3/trusted_reviewer_lock_v1.schema.json"
-    ),
-    "contracts/evidence/v3/trusted-reviewers.lock.json": (
-        "contracts/evidence/v3/trusted-reviewers.lock.json"
-    ),
-    "law_repository/deploy/production/Dockerfile": "Dockerfile",
-    "law_repository/deploy/production/README.md": "README.md",
-}
+FIXED_FILES = FIXED_PRODUCTION_CONTEXT_FILES
 
 
 class ProductionContextError(RuntimeError):

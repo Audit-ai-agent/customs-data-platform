@@ -357,14 +357,14 @@ def approval_signature_message(subject_sha256: str) -> bytes:
     return APPROVAL_SIGNATURE_DOMAIN + bytes.fromhex(subject_sha256)
 
 
-def _strict_json_model(path: Path, model_type: type[PolicyContractModel], maximum: int):
+def _strict_json_model_bytes(
+    raw: bytes,
+    model_type: type[PolicyContractModel],
+    maximum: int,
+):
     try:
-        if path.is_symlink() or not path.is_file():
-            raise ValueError("release artifact must be a regular non-symlink file")
-        size = path.stat().st_size
-        if size < 1 or size > maximum:
+        if len(raw) < 1 or len(raw) > maximum:
             raise ValueError("release artifact has an invalid size")
-        raw = path.read_bytes()
 
         def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
             result: dict[str, object] = {}
@@ -388,11 +388,30 @@ def _strict_json_model(path: Path, model_type: type[PolicyContractModel], maximu
         raise ValueError("release artifact is unreadable") from exc
 
 
-def load_requirement_policy_release(path: Path) -> RequirementPolicyRelease:
-    """Parse and internally validate a policy; this does not grant approval."""
+def _strict_json_model(path: Path, model_type: type[PolicyContractModel], maximum: int):
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("release artifact must be a regular non-symlink file")
+        size = path.stat().st_size
+        if size < 1 or size > maximum:
+            raise ValueError("release artifact has an invalid size")
+        raw = path.read_bytes()
+        if len(raw) != size:
+            raise ValueError("release artifact changed during read")
+    except Exception as exc:
+        raise ValueError("release artifact is unreadable") from exc
+    return _strict_json_model_bytes(raw, model_type, maximum)
 
-    release = _strict_json_model(path, RequirementPolicyRelease, MAX_POLICY_RELEASE_BYTES)
-    if not isinstance(release, RequirementPolicyRelease):  # defensive typing boundary
+
+def parse_requirement_policy_release(raw: bytes) -> RequirementPolicyRelease:
+    """Parse one already-attested byte string without reopening its path."""
+
+    release = _strict_json_model_bytes(
+        raw,
+        RequirementPolicyRelease,
+        MAX_POLICY_RELEASE_BYTES,
+    )
+    if not isinstance(release, RequirementPolicyRelease):
         raise ValueError("requirement policy release type mismatch")
     if release.release_state == "approved":
         if (
@@ -409,19 +428,66 @@ def load_requirement_policy_release(path: Path) -> RequirementPolicyRelease:
     return release
 
 
-def load_trusted_reviewer_store(path: Path) -> TrustedReviewerStore:
-    store = _strict_json_model(path, TrustedReviewerStore, MAX_TRUST_STORE_BYTES)
+def parse_trusted_reviewer_store(raw: bytes) -> TrustedReviewerStore:
+    store = _strict_json_model_bytes(raw, TrustedReviewerStore, MAX_TRUST_STORE_BYTES)
     if not isinstance(store, TrustedReviewerStore):
         raise ValueError("trusted reviewer store type mismatch")
     store.assert_current()
     return store
 
 
-def load_trusted_reviewer_store_lock(path: Path) -> TrustedReviewerStoreLock:
-    lock = _strict_json_model(path, TrustedReviewerStoreLock, MAX_TRUST_LOCK_BYTES)
+def parse_trusted_reviewer_store_lock(raw: bytes) -> TrustedReviewerStoreLock:
+    lock = _strict_json_model_bytes(raw, TrustedReviewerStoreLock, MAX_TRUST_LOCK_BYTES)
     if not isinstance(lock, TrustedReviewerStoreLock):
         raise ValueError("trusted reviewer store lock type mismatch")
     return lock
+
+
+def load_requirement_policy_release(path: Path) -> RequirementPolicyRelease:
+    """Parse and internally validate a policy; this does not grant approval."""
+
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("release artifact must be a regular non-symlink file")
+        size = path.stat().st_size
+        if size < 1 or size > MAX_POLICY_RELEASE_BYTES:
+            raise ValueError("release artifact has an invalid size")
+        raw = path.read_bytes()
+        if len(raw) != size:
+            raise ValueError("release artifact changed during read")
+    except Exception as exc:
+        raise ValueError("release artifact is unreadable") from exc
+    return parse_requirement_policy_release(raw)
+
+
+def load_trusted_reviewer_store(path: Path) -> TrustedReviewerStore:
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("release artifact must be a regular non-symlink file")
+        size = path.stat().st_size
+        if size < 1 or size > MAX_TRUST_STORE_BYTES:
+            raise ValueError("release artifact has an invalid size")
+        raw = path.read_bytes()
+        if len(raw) != size:
+            raise ValueError("release artifact changed during read")
+    except Exception as exc:
+        raise ValueError("release artifact is unreadable") from exc
+    return parse_trusted_reviewer_store(raw)
+
+
+def load_trusted_reviewer_store_lock(path: Path) -> TrustedReviewerStoreLock:
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("release artifact must be a regular non-symlink file")
+        size = path.stat().st_size
+        if size < 1 or size > MAX_TRUST_LOCK_BYTES:
+            raise ValueError("release artifact has an invalid size")
+        raw = path.read_bytes()
+        if len(raw) != size:
+            raise ValueError("release artifact changed during read")
+    except Exception as exc:
+        raise ValueError("release artifact is unreadable") from exc
+    return parse_trusted_reviewer_store_lock(raw)
 
 
 def verify_requirement_policy_release(
@@ -556,6 +622,9 @@ __all__ = [
     "load_trusted_reviewer_store",
     "load_trusted_reviewer_store_lock",
     "load_verified_requirement_policy_release",
+    "parse_requirement_policy_release",
+    "parse_trusted_reviewer_store",
+    "parse_trusted_reviewer_store_lock",
     "policy_manifest_sha256",
     "policy_approval_subject_sha256",
     "trusted_reviewer_store_sha256",

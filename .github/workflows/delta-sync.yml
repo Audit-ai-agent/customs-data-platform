@@ -1,49 +1,27 @@
-# 법령 델타 동기화 — 클라우드 DB(Neon/Qdrant Cloud/Aura) 갱신.
-# ⚠️ 2026-07-06 실측: 법제처(law.go.kr)가 GitHub 러너(해외 IP)의 접속을 차단해
-#    스케줄 실행이 항상 ConnectTimeout 으로 실패 → 크론 비활성화.
-#    정기 동기화는 한국 IP 인 호스트 PC 의 작업 스케줄러가 담당
-#    (law_repository/scripts/register_delta_task.ps1). 이 워크플로우는
-#    한국 리전 self-hosted 러너를 붙일 경우를 위해 수동 트리거만 남긴다.
-# 필요한 Secrets (repo Settings > Secrets and variables > Actions):
-#   POSTGRES_HOST / POSTGRES_DB / POSTGRES_USER / POSTGRES_PASSWORD
-#   QDRANT_URL / QDRANT_API_KEY / NEO4J_URI / NEO4J_USER / NEO4J_PASSWORD / LAW_API_OC
-name: delta-sync
+# Legacy mutable delta sync is intentionally fail-closed.
+#
+# The preserved legacy delta implementation updates active PostgreSQL and
+# Qdrant state in place and does not build/seal/promote one immutable V3
+# generation across PostgreSQL, Qdrant, and Neo4j. Running it with production
+# credentials would therefore bypass the Evidence V3 release invariant. The
+# implementation remains in Git history for team provenance, but this workflow
+# must not receive credentials or execute mutations. A future replacement must
+# use the locked environment and the V3 new-generation builder/release Gate.
+name: legacy-delta-sync-disabled
 
 on:
-  workflow_dispatch:        # 수동 실행만 (크론은 위 사유로 비활성화)
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  delta:
+  explain-blocker:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    defaults:
-      run:
-        working-directory: law_repository
+    timeout-minutes: 2
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-          cache-dependency-path: law_repository/requirements.txt
-
-      - name: Install deps (CPU torch)
+      - name: Refuse mutable legacy sync
+        shell: bash
         run: |
-          pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
-          pip install --quiet -r requirements.txt
-
-      - name: Run delta sync (idempotent)
-        env:
-          POSTGRES_HOST: ${{ secrets.POSTGRES_HOST }}
-          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
-          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
-          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
-          POSTGRES_SSLMODE: require
-          QDRANT_URL: ${{ secrets.QDRANT_URL }}
-          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
-          NEO4J_URI: ${{ secrets.NEO4J_URI }}
-          NEO4J_USER: ${{ secrets.NEO4J_USER }}
-          NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
-          LAW_API_OC: ${{ secrets.LAW_API_OC }}
-        run: python -m src.sync.delta
+          echo "::error::Legacy active-store delta sync is disabled. Build, validate, seal, and promote a new Evidence V3 generation instead."
+          exit 1

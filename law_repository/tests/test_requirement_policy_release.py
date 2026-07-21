@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -8,12 +9,16 @@ import pytest
 
 from src.requirement_policy_release import (
     MAX_POLICY_RELEASE_BYTES,
+    MAX_TRUST_LOCK_BYTES,
+    MAX_TRUST_STORE_BYTES,
     RequirementPolicyRelease,
     TrustedReviewerStore,
     TrustedReviewerStoreLock,
     approval_sha256,
     approval_subject_sha256,
     load_requirement_policy_release,
+    load_trusted_reviewer_store,
+    load_trusted_reviewer_store_lock,
     load_verified_requirement_policy_release,
     verify_requirement_policy_release,
 )
@@ -276,6 +281,35 @@ def test_loader_rejects_oversized_policy_before_parse(tmp_path: Path) -> None:
     oversized.write_bytes(b" " * (MAX_POLICY_RELEASE_BYTES + 1))
     with pytest.raises(ValueError, match="unreadable"):
         load_requirement_policy_release(oversized)
+
+
+@pytest.mark.parametrize(
+    ("name", "maximum", "loader"),
+    [
+        ("policy.json", MAX_POLICY_RELEASE_BYTES, load_requirement_policy_release),
+        ("reviewers.json", MAX_TRUST_STORE_BYTES, load_trusted_reviewer_store),
+        ("reviewers-lock.json", MAX_TRUST_LOCK_BYTES, load_trusted_reviewer_store_lock),
+    ],
+)
+def test_loaders_reject_oversized_files_before_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    maximum: int,
+    loader: Callable[[Path], object],
+) -> None:
+    oversized = tmp_path / name
+    oversized.write_bytes(b" " * (maximum + 1))
+    original = Path.read_bytes
+
+    def guarded_read(path: Path) -> bytes:
+        if path == oversized:
+            pytest.fail("oversized release artifact was read before its bound was checked")
+        return original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", guarded_read)
+    with pytest.raises(ValueError, match="unreadable"):
+        loader(oversized)
 
 
 def test_loader_rejects_symlink_before_read(

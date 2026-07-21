@@ -1,0 +1,55 @@
+# Ephemeral self-hosted-runner stack. It deliberately has no container_name,
+# named volume, fixed host port, or reference to the preserved local Data stack.
+services:
+  postgres:
+    image: pgvector/pgvector:pg16@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb
+    environment:
+      POSTGRES_DB: trade_doc
+      POSTGRES_USER: trade
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?ephemeral password required}
+    ports:
+      - "127.0.0.1::5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trade -d trade_doc"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  qdrant:
+    image: qdrant/qdrant:v1.15.4@sha256:6ac4807063bbecddca0250bfbcff52acf18c22263b904d12919349e6d0a408f1
+    ports:
+      - "127.0.0.1::6333"
+      - "127.0.0.1::6334"
+    tmpfs:
+      - /qdrant/storage
+    healthcheck:
+      # The pinned Qdrant image has bash but deliberately ships no curl/wget.
+      # Opening the HTTP socket avoids adding mutable packages to the image.
+      test: ["CMD-SHELL", "bash -c ': > /dev/tcp/127.0.0.1/6333'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  neo4j:
+    image: neo4j:5@sha256:4bae36aff76271e27fd6a6ed0835413f86a284cd179cfb1cb7d188f5f7533aca
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:?ephemeral password required}
+    ports:
+      - "127.0.0.1::7474"
+      - "127.0.0.1::7687"
+    tmpfs:
+      - /data
+      - /logs
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/var/lib/neo4j/bin/cypher-shell -a bolt://127.0.0.1:7687 -u neo4j -p \"$${NEO4J_AUTH#*/}\" 'RETURN 1' >/dev/null 2>&1",
+        ]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 20s

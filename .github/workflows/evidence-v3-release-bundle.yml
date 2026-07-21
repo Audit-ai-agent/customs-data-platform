@@ -1,0 +1,60 @@
+name: Evidence v3 protected bundle producer (blocked)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing annotated Evidence v3 tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: evidence-v3-release-bundle
+  cancel-in-progress: false
+
+jobs:
+  refuse-incomplete-production-bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: evidence-v3-production-bundle
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      PRODUCER_REF: ${{ github.ref }}
+      PRODUCER_SHA: ${{ github.sha }}
+      PRODUCER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+      PRODUCER_WORKFLOW_REF: ${{ github.workflow_ref }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Validate exact protected tag execution
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^evidence-api-v3\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]
+          expected_ref="refs/tags/$RELEASE_TAG"
+          expected_workflow_ref="$GH_REPO/.github/workflows/evidence-v3-release-bundle.yml@$expected_ref"
+          [[ "$PRODUCER_REF" == "$expected_ref" ]]
+          [[ "$PRODUCER_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$PRODUCER_WORKFLOW_SHA" == "$PRODUCER_SHA" ]]
+          [[ "$PRODUCER_WORKFLOW_REF" == "$expected_workflow_ref" ]]
+
+      - name: Checkout exact producer tag target
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Verify annotated tag and refuse unimplemented evidence authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$PRODUCER_SHA" ]]
+          [[ "$(git cat-file -t "refs/tags/$RELEASE_TAG")" == "tag" ]]
+          [[ "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" == "$PRODUCER_SHA" ]]
+          [[ -z "$(git status --porcelain)" ]]
+          echo "::error::NOT_IMPLEMENTED_EXTERNAL_ATTESTATION: no Production bundle can be emitted until protected raw evidence and two independent release signatures are implemented."
+          exit 1

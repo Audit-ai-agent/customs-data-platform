@@ -50,6 +50,7 @@ def _fixture_repo(tmp_path: Path) -> Path:
         "contracts/evidence/v3/trusted_reviewer_store_v1.schema.json": "{}\n",
         "contracts/evidence/v3/trusted_reviewer_lock_v1.schema.json": "{}\n",
         "contracts/evidence/v3/trusted-reviewers.lock.json": "{}\n",
+        "contracts/evidence/v3/release_provenance_v1.schema.json": "{}\n",
         "law_repository/src/production.py": "print('production')\n",
         "law_repository/src/provider_identity.py": "PROVIDER = 'identity'\n",
         "law_repository/tests/not-runtime.txt": "excluded\n",
@@ -91,6 +92,7 @@ def test_production_context_exports_only_committed_runtime_allowlist(
         "contracts/evidence/v3/trusted_reviewer_store_v1.schema.json",
         "contracts/evidence/v3/trusted_reviewer_lock_v1.schema.json",
         "contracts/evidence/v3/trusted-reviewers.lock.json",
+        "contracts/evidence/v3/release_provenance_v1.schema.json",
         "law_repository/src/production.py",
         "law_repository/src/provider_identity.py",
         "provider-build.json",
@@ -168,6 +170,10 @@ def test_production_dockerfile_requires_immutable_inputs_and_non_root() -> None:
     )
     lowered = dockerfile.lower()
 
+    assert dockerfile.splitlines()[0] == (
+        "# syntax=docker/dockerfile:1.7@sha256:"
+        "a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e"
+    )
     assert "arg uv_image\n" in lowered
     assert "arg python_image\n" in lowered
     assert "from ${uv_image}" in lowered

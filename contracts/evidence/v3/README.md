@@ -11,6 +11,8 @@ The directory contains provider-owned canonical bytes:
 - `requirement_policy_v1.schema.json`: externally approved policy release;
 - `trusted_reviewer_store_v1.schema.json`: allowlisted domain-reviewer keys;
 - `trusted_reviewer_lock_v1.schema.json`: immutable image trust-root lock;
+- `release_provenance_v1.schema.json`: the complete, fail-closed Evidence v3
+  release bundle contract;
 - `requirement-policy.lock.json`: an intentionally **unreleased** repository
   sentinel, never a production approval;
 - `trusted-reviewers.lock.json`: an intentionally **unreleased** trust-root
@@ -46,3 +48,50 @@ mismatch.
 
 Changing v1 or v2 in place is prohibited. A breaking v3 change requires a new
 contract directory and release.
+
+## Exact release provenance gate
+
+`release_provenance_v1.schema.json` is additive and does not change the
+retrieval wire contract. `tools/verify_evidence_v3_release.py` currently has
+two deliberately different outcomes:
+
+- candidate structural validation checks one canonical manifest, exact tagged
+  provider bytes, and all referenced evidence, but exits with the explicit
+  non-release status `CANDIDATE_STRUCTURAL_VALID_ONLY_NOT_RELEASED`;
+- Production admission is unconditionally blocked with
+  `NOT_IMPLEMENTED_EXTERNAL_ATTESTATION`.
+
+The structural candidate verifier checks the following bindings:
+
+- an existing annotated tag object and its exact clean commit target;
+- immutable workflow file bytes, SHA, run ID, and run attempt;
+- the allowlisted production provider context and all V3 Schema hashes;
+- an exact 58-law, HSK, and CCCT generation with one matching PostgreSQL,
+  Qdrant, and Neo4j attestation, epoch, evaluation, and seal;
+- a no-skip Production RAG Gold/report that passes the existing recomputed
+  Structured and Hybrid thresholds;
+- an approved requirement policy, image-pinned reviewer trust root, coverage
+  matrix, and two distinct valid Ed25519 reviewer signatures;
+- passing secret/dependency/SAST reports, image digest, SBOM, build
+  provenance, tested rollback image/generation, and a real Agent HTTP
+  readiness/retrieval conformance result bound to the consumer lock.
+
+Missing, extra, expired, unreleased, non-HTTP, mock, unsigned, mismatched, or
+modified evidence fails closed. These consistency checks are not an authority:
+plain JSON fields such as `PASS`, `actual_http`, or `restore_tested` can never
+grant a Production release. Production admission remains blocked until a
+protected producer, signed raw execution evidence, an independently pinned
+release-attestor trust root, and two distinct Ed25519 release signatures over
+the complete evidence subject are implemented. The read-only
+`.github/workflows/evidence-v3-release.yml` downloads an externally produced
+immutable bundle, validates its API-reported artifact digest, and invokes the
+fail-closed verifier; it never creates or moves a tag, publishes an image,
+promotes a generation, deploys, or mutates a database. The allowlisted
+producer workflow is present but intentionally exits unsuccessfully and emits
+no bundle.
+
+The repository intentionally contains no complete Production release bundle,
+and its policy/trust locks remain `unreleased`. Therefore the release workflow
+cannot currently succeed. Synthetic bundles—including bundles signed with the
+public deterministic test keys—can only exercise candidate structural checks
+and are rejected by the Production entry point.

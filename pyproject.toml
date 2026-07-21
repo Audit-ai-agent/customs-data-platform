@@ -61,6 +61,8 @@ files = [
   "law_repository/src/requirement_policy_release.py",
   "law_repository/src/runtime_release_v3.py",
   "law_repository/src/runtime_api_v3.py",
+  "law_repository/src/release_provenance_v3.py",
+  "law_repository/src/production_context_inventory.py",
   "law_repository/src/production_v3.py",
   "law_repository/src/generation_evidence.py",
   "law_repository/src/generation_runtime.py",
@@ -73,6 +75,7 @@ files = [
   "tools/test_only_v3_policy.py",
   "tools/generate_evidence_v3_contracts.py",
   "tools/run_preserved_data_v2_diagnostic.py",
+  "tools/verify_evidence_v3_release.py",
 ]
 ignore_missing_imports = true
 follow_imports = "skip"
