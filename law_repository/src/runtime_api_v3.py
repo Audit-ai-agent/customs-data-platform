@@ -110,6 +110,10 @@ def runtime_v3_retrieve(
         raise HTTPException(503, "Evidence runtime v3 changed or became unavailable") from None
     for name, value in lease.identity.binding_headers().items():
         response.headers[name] = value
+    # Echo the caller-owned request identity separately from the service's
+    # own X-Service-Request-ID correlation value.  Consumers bind the body,
+    # response headers, and original request before accepting Evidence.
+    response.headers["X-Request-ID"] = payload.request_id
     return result
 
 

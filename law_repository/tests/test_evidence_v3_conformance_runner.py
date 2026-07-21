@@ -263,6 +263,8 @@ def test_actual_uvicorn_socket_serves_exact_get_and_17_header_post(
         assert ready.json()["evidence_runtime_release"] == identity.model_dump(mode="json")
         assert response.status_code == 200
         assert response.json()["status"] == "ok"
+        assert response.headers["X-Request-ID"] == "req-test-only-v3"
+        assert response.headers["X-Service-Request-ID"]
         requirement = response.json()["results"][0]["evidence"][0]
         assert requirement["requirement_verification"]["approved"] is True
         for name, expected in identity.binding_headers().items():

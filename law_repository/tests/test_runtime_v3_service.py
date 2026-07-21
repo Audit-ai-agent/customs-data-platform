@@ -176,6 +176,8 @@ def test_runtime_v3_readiness_and_retrieval_are_exactly_bound() -> None:
     assert readiness.status_code == 200
     assert readiness.json()["evidence_runtime_release"]["schema_version"] == "3.0"
     assert response.status_code == 200
+    assert response.headers["X-Request-ID"] == response.json()["request_id"]
+    assert response.headers["X-Service-Request-ID"]
     payload = response.json()
     requirement = next(
         row
