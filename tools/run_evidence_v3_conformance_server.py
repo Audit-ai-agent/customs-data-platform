@@ -45,6 +45,11 @@ from tools.test_only_v3_policy import build_test_only_policy_fixture  # noqa: E4
 
 _MAX_IDENTITY_BYTES = 64 * 1024
 _LITERAL_LOOPBACK_HOSTS = ("127.0.0.1", "::1")
+_PROFILE_WIRE_CONFORMANCE = "wire-conformance"
+_PROFILE_LOCAL_USER_UAT = "local-user-uat"
+_PROFILES = (_PROFILE_WIRE_CONFORMANCE, _PROFILE_LOCAL_USER_UAT)
+_LOCAL_USER_UAT_NO_REQUIREMENT_HSK10 = "7318151000"
+_UAT_READINESS_PATH = "/internal/rag/v3/health/uat-ready"
 
 
 def _is_within(path: Path, parent: Path) -> bool:
@@ -116,6 +121,7 @@ def create_test_only_v3_conformance_application(
     identity_output: Path,
     host: str,
     port: int,
+    profile: str = _PROFILE_WIRE_CONFORMANCE,
 ) -> Any:
     """Create the explicit synthetic V3 fixture with no production selectors."""
 
@@ -123,10 +129,15 @@ def create_test_only_v3_conformance_application(
         raise TestOnlyConformanceConfigurationError("host must be loopback-only")
     if not 1 <= port <= 65535:
         raise TestOnlyConformanceConfigurationError("port must be from 1 to 65535")
+    if profile not in _PROFILES:
+        raise TestOnlyConformanceConfigurationError("diagnostic profile is not supported")
     context = production_context.resolve()
     provider_lock = load_verified_provider_runtime_lock(context)
     token = load_bearer_token_file(service_token_file)
-    base_lease = derive_test_only_runtime_lease(provider_lock)
+    base_lease = derive_test_only_runtime_lease(
+        provider_lock,
+        diagnostic_profile=profile,
+    )
     policy_fixture = build_test_only_policy_fixture(
         knowledge_source_manifest_sha256=(base_lease.identity.knowledge_source_manifest_sha256),
         knowledge_snapshot_id=base_lease.identity.knowledge_snapshot_id,
@@ -170,6 +181,9 @@ def create_test_only_v3_conformance_application(
     backend = ReadyTestOnlyV2ConformanceBackend(
         snapshot_id=base_lease.identity.knowledge_snapshot_id,
         supported_review_as_of=base_lease.identity.supported_review_as_of,
+        no_requirement_hsk10=(
+            _LOCAL_USER_UAT_NO_REQUIREMENT_HSK10 if profile == _PROFILE_LOCAL_USER_UAT else None
+        ),
     )
 
     def backend_factory(
@@ -190,6 +204,28 @@ def create_test_only_v3_conformance_application(
     application.state.domain_reviewed = False
     application.state.release_ready = False
     application.state.automatic_completion_eligible = False
+    application.state.diagnostic_profile = profile
+    application.state.no_requirement_positive_control_hsk10 = (
+        _LOCAL_USER_UAT_NO_REQUIREMENT_HSK10 if profile == _PROFILE_LOCAL_USER_UAT else None
+    )
+
+    if profile == _PROFILE_LOCAL_USER_UAT:
+
+        @application.get(_UAT_READINESS_PATH, include_in_schema=False)
+        async def local_user_uat_readiness() -> dict[str, Any]:
+            return {
+                "status": "ready",
+                "mode": "LOCAL_USER_UAT_DIAGNOSTIC",
+                "diagnostic_profile": profile,
+                "claude_dependency": "owned_by_agent",
+                "data_source": "SYNTHETIC_V3_NO_RAG_QUALITY",
+                "no_requirement_positive_control_hsk10": (_LOCAL_USER_UAT_NO_REQUIREMENT_HSK10),
+                "release_ready": False,
+                "rag_quality_evaluated": False,
+                "automatic_completion_eligible": False,
+                "evidence_runtime_release": runtime_lease.identity.model_dump(mode="json"),
+            }
+
     return application
 
 
@@ -216,6 +252,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--identity-output", type=Path, required=True)
     parser.add_argument("--host", choices=_LITERAL_LOOPBACK_HOSTS, required=True)
     parser.add_argument("--port", type=_port, required=True)
+    parser.add_argument(
+        "--profile",
+        choices=_PROFILES,
+        default=_PROFILE_WIRE_CONFORMANCE,
+        help="explicit non-release fixture profile",
+    )
     return parser
 
 
@@ -227,6 +269,7 @@ def main(argv: list[str] | None = None) -> int:
         identity_output=args.identity_output,
         host=args.host,
         port=args.port,
+        profile=args.profile,
     )
     identity = application.state.runtime_v3_release_loader.acquire().identity
     print(
@@ -237,6 +280,7 @@ def main(argv: list[str] | None = None) -> int:
                 "event": "test_only_evidence_v3_conformance_starting",
                 "host": args.host,
                 "port": args.port,
+                "diagnostic_profile": args.profile,
                 "rag_quality_evaluated": False,
                 "release_ready": False,
                 "runtime_release_v3_sha256": identity.runtime_release_v3_sha256,

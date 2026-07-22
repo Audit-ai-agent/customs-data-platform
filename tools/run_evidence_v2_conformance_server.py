@@ -131,9 +131,15 @@ class ReadyTestOnlyV2ConformanceBackend:
         *,
         snapshot_id: str,
         supported_review_as_of: date,
+        no_requirement_hsk10: str | None = None,
     ) -> None:
+        if no_requirement_hsk10 is not None and (
+            len(no_requirement_hsk10) != 10 or not no_requirement_hsk10.isdigit()
+        ):
+            raise ValueError("no-requirement HSK must be exactly ten digits")
         self.snapshot_id = snapshot_id
         self.supported_review_as_of = supported_review_as_of
+        self.no_requirement_hsk10 = no_requirement_hsk10
 
     def validate_ready(self) -> None:
         if not self.snapshot_id.startswith("test-only-conformance.no-rag-quality."):
@@ -166,6 +172,17 @@ class ReadyTestOnlyV2ConformanceBackend:
     ) -> RequirementLookup:
         if snapshot_id != self.snapshot_id:
             raise ValueError("test-only conformance snapshot mismatch")
+        if (
+            self.no_requirement_hsk10 is not None
+            and hsk10 == self.no_requirement_hsk10
+            and trade_type == "import"
+            and as_of == self.supported_review_as_of
+        ):
+            # A covered query with an empty requirement set is different from
+            # an uncovered query.  LOCAL UAT uses this explicit positive
+            # control to exercise a genuinely clean business path without
+            # pretending that a synthetic issuer is production-trusted.
+            return RequirementLookup(True, ())
         if hsk10 != "0303540000" or trade_type != "import" or as_of != self.supported_review_as_of:
             return RequirementLookup(False, ())
         return RequirementLookup(
@@ -369,10 +386,23 @@ def _domain_sha256(label: bytes, payload: bytes) -> str:
 
 def derive_test_only_runtime_lease(
     provider_lock: VerifiedProviderRuntimeLock,
+    *,
+    diagnostic_profile: str = "wire-conformance",
 ) -> GenerationRequestLease:
     """Derive a stable, unmistakably non-release Evidence runtime identity."""
 
-    lock_bytes = canonical_json_bytes(provider_lock.as_dict())
+    if (
+        not diagnostic_profile
+        or len(diagnostic_profile) > 64
+        or any(
+            character not in "abcdefghijklmnopqrstuvwxyz0123456789-"
+            for character in diagnostic_profile
+        )
+    ):
+        raise TestOnlyConformanceConfigurationError("diagnostic profile identifier is invalid")
+    lock_bytes = (
+        canonical_json_bytes(provider_lock.as_dict()) + b"\0" + diagnostic_profile.encode("ascii")
+    )
     snapshot_suffix = _domain_sha256(b"snapshot", lock_bytes)[:24]
     payload: dict[str, Any] = {
         "contract": "evidence-runtime-release",

@@ -1,5 +1,9 @@
 # Customs Data Platform
 
+로컬 사용자 작업대에서 실제 HTTP 경계와 제한된 Data 동작을 확인하는 non-release
+프로필은 [`docs/LOCAL_USER_UAT.md`](docs/LOCAL_USER_UAT.md)에 정리한다. 이 프로필은
+Production V3 entrypoint, sealed generation, RAG 품질 Release를 대체하지 않는다.
+
 대한민국 관세 검토 서비스를 위한 Data/RAG/Knowledge DB 저장소입니다. 법령·HSK·세관장확인대상물품(CCCT)의 원장과 검색 인덱스를 관리하고, AI Agent에는 버전이 고정된 Evidence API만 제공합니다.
 
 ## 저장소 책임
