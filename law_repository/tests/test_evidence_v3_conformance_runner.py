@@ -132,6 +132,7 @@ def _no_requirement_body() -> dict[str, Any]:
     body["review_run_id"] = "run-local-uat-clean"
     body["items"][0]["description"] = "Stainless steel bolts"
     body["items"][0]["hs_code"] = "7318151000"
+    body["query_intent"] = "required_import_documents_and_law_support"
     return body
 
 
@@ -286,7 +287,13 @@ def test_local_user_uat_http_reports_diagnostic_mode_and_clean_covered_result(
     assert payload["status"] == "ok"
     assert payload["results"][0]["coverage"] == "complete"
     assert payload["results"][0]["requirements_found"] is False
-    assert payload["results"][0]["evidence"] == []
+    assert len(payload["results"][0]["evidence"]) == 1
+    evidence = payload["results"][0]["evidence"][0]
+    assert evidence["source_type"] == "law_article"
+    assert evidence["eligibility"] == "supporting"
+    assert evidence["matched_hs_code"] is None
+    assert evidence["retrieval_methods"] == ["bm25"]
+    assert "LOCAL UAT" in evidence["title"]
 
 
 def test_output_cannot_be_written_inside_context(
