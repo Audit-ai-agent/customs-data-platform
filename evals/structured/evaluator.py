@@ -210,9 +210,7 @@ def _case_report(
     # `requirements_found=false` with partial/unknown coverage does not prove
     # that requirements do not exist.  Only complete coverage is a legitimate
     # no-requirement (negative) case for the false-positive metric.
-    negative_case = (
-        not expected["requirements_found"] and expected.get("coverage") == "complete"
-    )
+    negative_case = not expected["requirements_found"] and expected.get("coverage") == "complete"
     negative_false_positive = bool(result and negative_case and result.get("requirements_found"))
     check_map = {check["name"]: check["passed"] for check in checks}
     return {
@@ -275,9 +273,7 @@ def _matching_evidence_indexes(
         if index not in used_indexes and _evidence_matches(evidence, without_agencies)
     ]
     actual_agencies = {
-        agency
-        for _, evidence in candidates
-        for agency in evidence.get("agencies", [])
+        agency for _, evidence in candidates for agency in evidence.get("agencies", [])
     }
     if not expected_agencies.issubset(actual_agencies):
         return set()

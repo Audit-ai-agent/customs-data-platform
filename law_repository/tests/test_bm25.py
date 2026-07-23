@@ -1,4 +1,5 @@
 """BM25 sparse 인코더 단위 테스트 (DB 불필요)."""
+
 from __future__ import annotations
 
 from src.embed import bm25

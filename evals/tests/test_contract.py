@@ -17,9 +17,7 @@ from evals.structured.evaluator import index_responses, load_records, validate_g
 
 def _fixtures():
     gold = load_records()
-    responses = index_responses(
-        load_records("evals/structured/fixtures/offline_responses.jsonl")
-    )
+    responses = index_responses(load_records("evals/structured/fixtures/offline_responses.jsonl"))
     return gold, responses
 
 

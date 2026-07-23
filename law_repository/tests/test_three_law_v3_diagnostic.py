@@ -449,7 +449,9 @@ def test_restricted_eval_projection_removes_only_v3_policy_overlay(tmp_path: Pat
 
     assert original.status == "partial"
     assert original.results[0].coverage == "partial"
-    assert any(error.code == "REQUIREMENT_POLICY_UNAVAILABLE" for error in original.results[0].errors)
+    assert any(
+        error.code == "REQUIREMENT_POLICY_UNAVAILABLE" for error in original.results[0].errors
+    )
     assert projected["schema_version"] == "1.0"
     assert projected["status"] == "ok"
     assert projected["results"][0]["coverage"] == "complete"
@@ -458,9 +460,9 @@ def test_restricted_eval_projection_removes_only_v3_policy_overlay(tmp_path: Pat
         "requirement_verification" not in evidence
         for evidence in projected["results"][0]["evidence"]
     )
-    assert [
-        evidence["evidence_id"] for evidence in projected["results"][0]["evidence"]
-    ] == [evidence.evidence_id for evidence in original.results[0].evidence]
+    assert [evidence["evidence_id"] for evidence in projected["results"][0]["evidence"]] == [
+        evidence.evidence_id for evidence in original.results[0].evidence
+    ]
 
 
 def test_restricted_structured_check_requires_real_exact_and_human_only(
@@ -514,9 +516,7 @@ def test_restricted_eval_refuses_non_literal_loopback() -> None:
 
 
 def test_restricted_hybrid_gold_scope_does_not_claim_all_three_laws() -> None:
-    metadata = restricted_eval._gold_scope_metadata(
-        restricted_eval.load_hybrid_gold()
-    )
+    metadata = restricted_eval._gold_scope_metadata(restricted_eval.load_hybrid_gold())
     assert metadata == {
         "loaded_law_ids": ["001556", "002421", "006392"],
         "hybrid_gold_relevant_law_ids": ["001556", "002421"],

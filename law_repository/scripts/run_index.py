@@ -3,6 +3,7 @@
 실행: law_repository/ 에서  python scripts/run_index.py
 완료 시 INDEX_DONE 출력 (감시 스크립트가 이 마커로 종료 판정).
 """
+
 import sys
 from pathlib import Path
 

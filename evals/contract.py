@@ -19,9 +19,7 @@ from urllib.parse import urlparse
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SCHEMA_PATH = (
-    ROOT / "contracts" / "evidence" / "v1" / "rag_retrieval_v1.schema.json"
-)
+DEFAULT_SCHEMA_PATH = ROOT / "contracts" / "evidence" / "v1" / "rag_retrieval_v1.schema.json"
 
 
 class ContractViolation(ValueError):
@@ -314,4 +312,6 @@ def _validate_response_invariants(payload: dict[str, Any], errors: list[str]) ->
         if result["requirements_found"] and finding_requirements == 0:
             errors.append(f"{path}: requirements_found requires finding-eligible customs evidence")
         if not result["requirements_found"] and finding_requirements:
-            errors.append(f"{path}: requirements_found=false conflicts with finding customs evidence")
+            errors.append(
+                f"{path}: requirements_found=false conflicts with finding customs evidence"
+            )

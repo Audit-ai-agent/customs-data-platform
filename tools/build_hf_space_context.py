@@ -89,7 +89,9 @@ def build_context(repo: Path, output: Path) -> dict[str, object]:
         raise ContextBuildError("output must be outside the Data repository")
     status = _git(repo, "status", "--porcelain")
     if status.strip():
-        raise ContextBuildError("Data repository must be clean; context is built from committed HEAD")
+        raise ContextBuildError(
+            "Data repository must be clean; context is built from committed HEAD"
+        )
     if output.exists() and any(output.iterdir()):
         raise ContextBuildError("output directory must not exist or must be empty")
 
@@ -125,9 +127,9 @@ def build_context(repo: Path, output: Path) -> dict[str, object]:
     (output / "source-manifest.json").write_bytes(manifest_bytes)
     provider_build = create_provider_build_document(
         provider_revision=source_commit,
-        retrieval_schema=(output / FIXED_FILES[
-            "contracts/evidence/v1/rag_retrieval_v1.schema.json"
-        ]).read_bytes(),
+        retrieval_schema=(
+            output / FIXED_FILES["contracts/evidence/v1/rag_retrieval_v1.schema.json"]
+        ).read_bytes(),
         source_manifest=manifest_bytes,
     )
     (output / "provider-build.json").write_bytes(serialized_document(provider_build))

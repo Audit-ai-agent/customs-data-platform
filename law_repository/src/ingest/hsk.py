@@ -19,6 +19,7 @@ diff(신설/삭제/명칭변경)를 적재 전에 산출해 보고한다.
 
 실행: law_repository/ 에서  python -m src.ingest.hsk
 """
+
 from __future__ import annotations
 
 import sys
@@ -38,6 +39,7 @@ BATCH_SIZE = 1000
 
 
 # ---------------------------------------------------------------- 파일 로딩
+
 
 def load_level_names(path: Path = LEVEL_NAMES_XLSX) -> pd.DataFrame:
     """5개 시트 → [code, level, name_ko, name_en]. 코드는 문자열(앞자리 0 보존)."""
@@ -123,6 +125,7 @@ def build_nodes(levels: pd.DataFrame, leaf_attrs: pd.DataFrame) -> list[dict]:
 
 # ---------------------------------------------------------------- diff 골격
 
+
 @dataclass
 class HskDiff:
     """전년 대비 변경 감지 골격 — 연 1회 재적재 시 신설/삭제/명칭변경 보고."""
@@ -133,10 +136,7 @@ class HskDiff:
     is_initial_load: bool = False  # 적재 전 DB 가 비어 있었는가
 
     def summary(self) -> str:
-        return (
-            f"신설 {len(self.added)} · 삭제 {len(self.removed)} · "
-            f"명칭변경 {len(self.renamed)}"
-        )
+        return f"신설 {len(self.added)} · 삭제 {len(self.removed)} · 명칭변경 {len(self.renamed)}"
 
 
 def diff_with_db(drv: Driver, nodes: list[dict]) -> HskDiff:
@@ -151,9 +151,7 @@ def diff_with_db(drv: Driver, nodes: list[dict]) -> HskDiff:
     diff.added = sorted(set(new) - set(existing))
     diff.removed = sorted(set(existing) - set(new))
     diff.renamed = [
-        (c, existing[c], new[c])
-        for c in sorted(set(new) & set(existing))
-        if existing[c] != new[c]
+        (c, existing[c], new[c]) for c in sorted(set(new) & set(existing)) if existing[c] != new[c]
     ]
     # TODO(Phase 3 연계): removed 는 삭제 대신 tombstone(valid_to 마감) 처리 검토.
     return diff
@@ -161,10 +159,7 @@ def diff_with_db(drv: Driver, nodes: list[dict]) -> HskDiff:
 
 # ---------------------------------------------------------------- 적재
 
-_CONSTRAINT = (
-    "CREATE CONSTRAINT hsnode_code IF NOT EXISTS "
-    "FOR (n:HSNode) REQUIRE n.code IS UNIQUE"
-)
+_CONSTRAINT = "CREATE CONSTRAINT hsnode_code IF NOT EXISTS FOR (n:HSNode) REQUIRE n.code IS UNIQUE"
 
 # 재적재 시 속성 잔존을 막기 위해 SET n = row 로 전체 치환(코드 키는 MERGE 가 보존).
 # leaf 의 :HSK 라벨(요건 그래프 §4.3 조회용)은 apoc 없이 별도 쿼리로 부여.
@@ -192,15 +187,13 @@ def verify(drv: Driver) -> None:
     """적재 후 검증 리포트 — 레벨별 행수·leaf 라벨·샘플 traverse."""
     with drv.session() as s:
         print("\n[레벨별 노드 수]")
-        for r in s.run(
-            "MATCH (n:HSNode) RETURN n.level AS level, count(*) AS cnt ORDER BY level"
-        ):
+        for r in s.run("MATCH (n:HSNode) RETURN n.level AS level, count(*) AS cnt ORDER BY level"):
             print(f"  level {r['level']:>2}: {r['cnt']:>6}")
         hsk = s.run("MATCH (n:HSK) RETURN count(*) AS c").single()["c"]
-        leaf10 = s.run(
-            "MATCH (n:HSNode {level: 10}) RETURN count(*) AS c"
-        ).single()["c"]
-        print(f"[불변식] :HSK 라벨 = {hsk} / level 10 = {leaf10} → {'OK' if hsk == leaf10 else 'FAIL'}")
+        leaf10 = s.run("MATCH (n:HSNode {level: 10}) RETURN count(*) AS c").single()["c"]
+        print(
+            f"[불변식] :HSK 라벨 = {hsk} / level 10 = {leaf10} → {'OK' if hsk == leaf10 else 'FAIL'}"
+        )
         sample = s.run(
             """
             MATCH (n:HSK) WHERE n.quantity_unit IS NOT NULL

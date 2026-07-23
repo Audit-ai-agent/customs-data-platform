@@ -320,9 +320,7 @@ def create_three_law_v3_diagnostic_application(
             expected_loaded_law_count=expected_loaded_law_count,
         )
         policy_fixture = build_test_only_policy_fixture(
-            knowledge_source_manifest_sha256=(
-                base_lease.identity.knowledge_source_manifest_sha256
-            ),
+            knowledge_source_manifest_sha256=(base_lease.identity.knowledge_source_manifest_sha256),
             knowledge_snapshot_id=base_lease.identity.knowledge_snapshot_id,
             required_document_code=_RESERVED_POLICY_DOCUMENT_CODE,
         )
@@ -412,9 +410,7 @@ def create_three_law_v3_diagnostic_application(
         if created_neo4j_executor and shared_neo4j_executor is not None:
             close_neo4j = getattr(shared_neo4j_executor, "close", None)
             if not callable(close_neo4j):
-                raise ThreeLawV3DiagnosticError(
-                    "owned Neo4j executor has no close operation"
-                )
+                raise ThreeLawV3DiagnosticError("owned Neo4j executor has no close operation")
             close_neo4j()
         if created_model_supervisor and shared_model_supervisor is not None:
             shared_model_supervisor.close()
@@ -448,9 +444,7 @@ def create_three_law_v3_diagnostic_application(
             "rag_quality_evaluated": False,
             "domain_reviewed": False,
             "automatic_completion_eligible": False,
-            "evidence_runtime_release": readiness.evidence_runtime_release.model_dump(
-                mode="json"
-            ),
+            "evidence_runtime_release": readiness.evidence_runtime_release.model_dump(mode="json"),
         }
 
     return application

@@ -12,6 +12,7 @@
   :limit <N>               arm 당 결과 수 (기본 5)
   :q                       종료
 """
+
 from __future__ import annotations
 
 import sys
@@ -22,9 +23,12 @@ from src.db.qdrant import BM25_VECTOR, DENSE_VECTOR
 
 # 법령 별칭 → 법령ID (src.lawgo 관세 3법)
 LAW_ALIAS = {
-    "법": "001556", "관세법": "001556",
-    "영": "002421", "시행령": "002421",
-    "규칙": "006392", "시행규칙": "006392",
+    "법": "001556",
+    "관세법": "001556",
+    "영": "002421",
+    "시행령": "002421",
+    "규칙": "006392",
+    "시행규칙": "006392",
 }
 LAW_NAME = {"001556": "관세법", "002421": "시행령", "006392": "시행규칙"}
 
@@ -87,7 +91,11 @@ def do_expand(pk: int) -> None:
     for e in edges:
         law = LAW_NAME.get(e["law_id"], e["law_id"])
         art = e["article_no"]
-        label = f"{law} 제{art // 100}조" + (f"의{art % 100}" if art % 100 else "") if art else e["title"]
+        label = (
+            f"{law} 제{art // 100}조" + (f"의{art % 100}" if art % 100 else "")
+            if art
+            else e["title"]
+        )
         print(f"  -{e['rel']}→ pk={e['article_pk']} {label} ({e['title'] or ''})")
 
 
@@ -105,8 +113,10 @@ def do_art(args: list[str], st: State) -> None:
     if row is None:
         print("  해당 시점에 그 조문 없음")
         return
-    print(f"\npk={row['article_pk']}  {LAW_NAME[law_id]} ({row['title']})  "
-          f"[{row['valid_from']} ~ {row['valid_to'] or '현행'}]")
+    print(
+        f"\npk={row['article_pk']}  {LAW_NAME[law_id]} ({row['title']})  "
+        f"[{row['valid_from']} ~ {row['valid_to'] or '현행'}]"
+    )
     body = row["content"]
     print("  " + "\n  ".join(body.splitlines()[:12]))
     if body.count("\n") > 12:

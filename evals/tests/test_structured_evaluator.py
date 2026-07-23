@@ -7,9 +7,7 @@ from evals.structured.evaluator import evaluate_case, index_responses, load_reco
 
 def _gold_and_responses():
     gold = load_records()
-    responses = index_responses(
-        load_records("evals/structured/fixtures/offline_responses.jsonl")
-    )
+    responses = index_responses(load_records("evals/structured/fixtures/offline_responses.jsonl"))
     return gold, responses
 
 
@@ -46,29 +44,20 @@ def test_two_chemical_law_document_rows_are_independently_required():
 
 def test_multi_agency_gold_rejects_single_agency_collapse():
     gold, responses = _gold_and_responses()
-    case = next(
-        item for item in gold if item["case_id"] == "gold_0101299000_multi_agency"
-    )
+    case = next(item for item in gold if item["case_id"] == "gold_0101299000_multi_agency")
     response = deepcopy(responses[case["case_id"]])
-    cites = next(
-        row
-        for row in response["results"][0]["evidence"]
-        if row["law_id"] == "71"
-    )
+    cites = next(row for row in response["results"][0]["evidence"] if row["law_id"] == "71")
     cites["agencies"] = ["유역(지방)환경청"]
     report = evaluate_case(case, response)
     assert report["passed"] is False
     assert any(
-        check["name"] == "evidence_row_2" and not check["passed"]
-        for check in report["checks"]
+        check["name"] == "evidence_row_2" and not check["passed"] for check in report["checks"]
     )
 
 
 def test_no_requirement_false_positive_metric_is_explicit():
     gold, responses = _gold_and_responses()
-    case = next(
-        item for item in gold if item["case_id"] == "gold_7318151000_no_requirements"
-    )
+    case = next(item for item in gold if item["case_id"] == "gold_7318151000_no_requirements")
     response = deepcopy(responses["gold_frozen_mackerel_exact"])
     response["request_id"] = case["request"]["request_id"]
     result = response["results"][0]

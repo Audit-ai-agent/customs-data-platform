@@ -273,11 +273,7 @@ def _structured_request(review_as_of: date) -> dict[str, Any]:
 def _gold_scope_metadata(gold: list[dict[str, Any]]) -> dict[str, object]:
     loaded_law_ids = sorted(v2.DIAGNOSTIC_LAW_IDS)
     relevant_law_ids = sorted(
-        {
-            str(relevant["law_id"])
-            for case in gold
-            for relevant in case["relevant"]
-        }
+        {str(relevant["law_id"]) for case in gold for relevant in case["relevant"]}
     )
     covered = sorted(set(loaded_law_ids) & set(relevant_law_ids))
     all_loaded_covered = set(loaded_law_ids).issubset(relevant_law_ids)
@@ -497,12 +493,9 @@ def run_restricted_evaluation(
             or diagnostic_payload.get("observed_law_count") != EXPECTED_DIAGNOSTIC_LAW_COUNT
             or diagnostic_payload.get("expected_production_law_count")
             != EXPECTED_PRODUCTION_LAW_COUNT
-            or diagnostic_payload.get("observed_article_count")
-            != EXPECTED_DIAGNOSTIC_ARTICLE_COUNT
-            or diagnostic_payload.get("qdrant_point_count")
-            != EXPECTED_DIAGNOSTIC_ARTICLE_COUNT
-            or diagnostic_payload.get("neo4j_article_count")
-            != EXPECTED_DIAGNOSTIC_ARTICLE_COUNT
+            or diagnostic_payload.get("observed_article_count") != EXPECTED_DIAGNOSTIC_ARTICLE_COUNT
+            or diagnostic_payload.get("qdrant_point_count") != EXPECTED_DIAGNOSTIC_ARTICLE_COUNT
+            or diagnostic_payload.get("neo4j_article_count") != EXPECTED_DIAGNOSTIC_ARTICLE_COUNT
             or diagnostic_payload.get("release_ready") is not False
             or diagnostic_payload.get("rag_quality_evaluated") is not False
             or diagnostic_payload.get("automatic_completion_eligible") is not False
@@ -536,8 +529,7 @@ def run_restricted_evaluation(
                 timeout_seconds=retrieval_timeout_seconds,
             )
             if v3_result.status == "partial" and all(
-                not result.errors
-                or all(error.code == _POLICY_ERROR for error in result.errors)
+                not result.errors or all(error.code == _POLICY_ERROR for error in result.errors)
                 for result in v3_result.results
             ):
                 v3_policy_partial_cases += 1
@@ -556,9 +548,7 @@ def run_restricted_evaluation(
             report = evaluate_hybrid_case(case, projected)
             report["latency_ms"] = round(latency_ms, 3)
             report["law_retrieval_method_counts"] = dict(sorted(case_method_counts.items()))
-            report["law_score_component_counts"] = dict(
-                sorted(case_score_component_counts.items())
-            )
+            report["law_score_component_counts"] = dict(sorted(case_score_component_counts.items()))
             hybrid_reports.append(report)
             selected_progress.completed_hybrid_cases = case_index
         hybrid_summary = summarize_hybrid(hybrid_reports)
