@@ -88,6 +88,7 @@ EXPECTED_PRODUCTION_LAW_COUNT = len(TARGET_LAWS)
 EXPECTED_DIAGNOSTIC_LAW_COUNT = 3
 DIAGNOSTIC_LAW_IDS = ("001556", "002421", "006392")
 DIAGNOSTIC_SCOPE = "DIAGNOSTIC_ONLY_3_OF_58"
+DIAGNOSTIC_SERVICE_REQUEST_DEADLINE_SECONDS = 180.0
 _REVISION_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _DOMAIN = b"customs-data-platform:three-law-evidence-diagnostic:v1\0"
@@ -1522,7 +1523,7 @@ def create_three_law_diagnostic_application(
             bind_host=host,
             port=port,
             max_concurrency=1,
-            request_deadline_seconds=75,
+            request_deadline_seconds=DIAGNOSTIC_SERVICE_REQUEST_DEADLINE_SECONDS,
             store_operation_timeout_seconds=20,
             store_termination_timeout_seconds=0.5,
             model_inference_timeout_seconds=20,

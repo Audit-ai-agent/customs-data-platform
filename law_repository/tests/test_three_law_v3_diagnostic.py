@@ -264,6 +264,11 @@ def test_v3_identity_manifest_and_diagnostic_readiness_are_bound(
         tmp_path,
         observation_loader=lambda _deadline=None: observation,
     )
+    assert (
+        application.state.production_service.settings.request_deadline_seconds
+        == v2.DIAGNOSTIC_SERVICE_REQUEST_DEADLINE_SECONDS
+        == 180.0
+    )
     lease = application.state.runtime_v3_release_loader.acquire()
     identity = lease.identity
     outputs = tmp_path / "outputs"
@@ -518,3 +523,171 @@ def test_restricted_hybrid_gold_scope_does_not_claim_all_three_laws() -> None:
         "hybrid_gold_law_coverage": "2/3",
         "all_three_laws_hybrid_gold_covered": False,
     }
+
+
+def _restricted_eval_arguments(tmp_path: Path) -> list[str]:
+    return [
+        "--diagnostic-only-three-law",
+        "--evidence-base-url",
+        "http://127.0.0.1:18013",
+        "--service-token-file",
+        str(tmp_path / "service-token"),
+        "--identity-file",
+        str(tmp_path / "identity.json"),
+        "--review-as-of",
+        _AS_OF.isoformat(),
+        "--output",
+        str((tmp_path / "restricted-eval.json").resolve()),
+    ]
+
+
+def test_restricted_eval_parser_separates_bounded_readiness_and_retrieval_timeouts(
+    tmp_path: Path,
+) -> None:
+    parser = restricted_eval.build_parser()
+    defaults = parser.parse_args(_restricted_eval_arguments(tmp_path))
+    assert defaults.readiness_timeout_seconds == 195.0
+    assert defaults.retrieval_timeout_seconds == 195.0
+
+    configured = parser.parse_args(
+        [
+            *_restricted_eval_arguments(tmp_path),
+            "--readiness-timeout-seconds",
+            "210",
+            "--retrieval-timeout-seconds",
+            "275",
+        ]
+    )
+    assert configured.readiness_timeout_seconds == 210.0
+    assert configured.retrieval_timeout_seconds == 275.0
+
+    for option, invalid in (
+        ("--readiness-timeout-seconds", "0"),
+        ("--readiness-timeout-seconds", "301"),
+        ("--retrieval-timeout-seconds", "0"),
+        ("--retrieval-timeout-seconds", "301"),
+    ):
+        with pytest.raises(SystemExit):
+            parser.parse_args([*_restricted_eval_arguments(tmp_path), option, invalid])
+
+
+class _ReadinessResponse:
+    status_code = 200
+    content = b"{}"
+
+    def __init__(self, payload: dict[str, object]) -> None:
+        self._payload = payload
+
+    def json(self) -> dict[str, object]:
+        return self._payload
+
+
+class _ReadinessSession:
+    def __init__(self, responses: list[_ReadinessResponse]) -> None:
+        self._responses = iter(responses)
+        self.timeouts: list[float] = []
+
+    def get(self, _url: str, **kwargs):
+        self.timeouts.append(float(kwargs["timeout"]))
+        return next(self._responses)
+
+
+def test_restricted_eval_uses_separate_timeouts_and_tracks_failed_hybrid_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = _application(
+        tmp_path,
+        observation_loader=lambda _deadline=None: _observation(),
+    )
+    identity = application.state.runtime_v3_release_loader.acquire().identity
+    expected_identity = identity.model_dump(mode="json")
+    diagnostic_payload: dict[str, object] = {
+        "evidence_runtime_release": expected_identity,
+        "diagnostic_profile": runner.DIAGNOSTIC_PROFILE,
+        "scope": runner.DIAGNOSTIC_SCOPE,
+        "observed_law_count": runner.EXPECTED_DIAGNOSTIC_LAW_COUNT,
+        "expected_production_law_count": runner.EXPECTED_PRODUCTION_LAW_COUNT,
+        "observed_article_count": runner.EXPECTED_DIAGNOSTIC_ARTICLE_COUNT,
+        "qdrant_point_count": runner.EXPECTED_DIAGNOSTIC_ARTICLE_COUNT,
+        "neo4j_article_count": runner.EXPECTED_DIAGNOSTIC_ARTICLE_COUNT,
+        "release_ready": False,
+        "rag_quality_evaluated": False,
+        "automatic_completion_eligible": False,
+    }
+    session = _ReadinessSession(
+        [
+            _ReadinessResponse({"evidence_runtime_release": expected_identity}),
+            _ReadinessResponse(diagnostic_payload),
+        ]
+    )
+    retrieval_timeouts: list[float] = []
+
+    def fail_post(*_args, **kwargs):
+        retrieval_timeouts.append(float(kwargs["timeout_seconds"]))
+        raise restricted_eval.RestrictedEvaluationError(
+            "bounded test retrieval failed",
+            code="retrieval_http_status",
+        )
+
+    monkeypatch.setattr(restricted_eval, "_post", fail_post)
+    progress = restricted_eval.EvaluationProgress.start()
+    with pytest.raises(
+        restricted_eval.RestrictedEvaluationError,
+        match="bounded test retrieval failed",
+    ):
+        restricted_eval.run_restricted_evaluation(
+            evidence_base_url="http://127.0.0.1:18013",
+            service_token_file=tmp_path / "evidence-token",
+            identity_file=tmp_path / "outputs" / "identity.json",
+            review_as_of=_AS_OF,
+            readiness_timeout_seconds=211,
+            retrieval_timeout_seconds=233,
+            session=session,
+            progress=progress,
+        )
+
+    assert session.timeouts == [211.0, 211.0]
+    assert retrieval_timeouts == [233.0]
+    assert progress.failure_stage == "hybrid_case_01"
+    assert progress.completed_hybrid_cases == 0
+    assert progress.completed_structured_checks == 0
+
+
+def test_restricted_eval_failure_artifact_is_stage_specific_and_redacted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secret = "should-never-enter-the-failure-artifact"
+
+    def fail_run(**kwargs):
+        progress = kwargs["progress"]
+        progress.enter("hybrid_case_03")
+        progress.completed_hybrid_cases = 2
+        raise restricted_eval.RestrictedEvaluationError(
+            secret,
+            code="retrieval_timeout",
+        )
+
+    monkeypatch.setattr(restricted_eval, "run_restricted_evaluation", fail_run)
+    output = (tmp_path / "restricted-eval.json").resolve()
+    exit_code = restricted_eval.main(
+        [
+            *_restricted_eval_arguments(tmp_path)[:-1],
+            str(output),
+        ]
+    )
+
+    assert exit_code == 70
+    failure_path = tmp_path / "restricted-eval.failure.json"
+    payload = json.loads(failure_path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "three-law-restricted-rag-diagnostic-failure/v1"
+    assert payload["failure_stage"] == "hybrid_case_03"
+    assert payload["failure_code"] == "retrieval_timeout"
+    assert payload["completed_hybrid_cases"] == 2
+    assert payload["completed_structured_checks"] == 0
+    assert payload["duration_seconds"] >= 0
+    assert payload["failed_stage_duration_seconds"] >= 0
+    assert secret not in failure_path.read_text(encoding="utf-8")
+    assert secret not in capsys.readouterr().err

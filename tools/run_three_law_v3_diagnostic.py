@@ -347,7 +347,7 @@ def create_three_law_v3_diagnostic_application(
             bind_host=host,
             port=port,
             max_concurrency=1,
-            request_deadline_seconds=75,
+            request_deadline_seconds=v2.DIAGNOSTIC_SERVICE_REQUEST_DEADLINE_SECONDS,
             store_operation_timeout_seconds=20,
             store_termination_timeout_seconds=0.5,
             model_inference_timeout_seconds=20,

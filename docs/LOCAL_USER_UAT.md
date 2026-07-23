@@ -104,6 +104,17 @@ uv run --locked python tools/run_three_law_v3_restricted_eval.py `
   --output <NEW_EXTERNAL_RESTRICTED_EVAL_JSON>
 ```
 
+The preserved diagnostic performs a complete read-only three-store attestation
+before and after each request. Its server-side request deadline is therefore
+180 seconds. The evaluator uses separate
+`--readiness-timeout-seconds` and `--retrieval-timeout-seconds` values, each
+defaulting to 195 seconds so the server can fail closed before the client
+disconnects. Both client timeout values are bounded to at most 300 seconds.
+If evaluation fails, the success output remains absent and a sibling
+`<OUTPUT_STEM>.failure.json` records only the failure stage/code, completed
+case counts, and monotonic durations. It never records the query, request body,
+service location, token, or raw response.
+
 The runner sends all requests over authenticated loopback HTTP with the exact
 17 binding headers and verifies both standard and diagnostic readiness
 identities. For Hybrid ranking only, it projects the V3 response back to the

@@ -443,6 +443,11 @@ def test_same_request_deadline_reaches_attestor_observer_backend_and_postcheck(
         executing_repository_attestor=attest,
         install_readonly_boundary=False,
     )
+    assert (
+        app.state.production_service.settings.request_deadline_seconds
+        == runner.DIAGNOSTIC_SERVICE_REQUEST_DEADLINE_SECONDS
+        == 180.0
+    )
     request_deadline = RequestDeadline.start(
         started_at=0,
         request_timeout_seconds=30,

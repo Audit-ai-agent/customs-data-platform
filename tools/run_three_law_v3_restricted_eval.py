@@ -58,10 +58,53 @@ _RUNTIME_RETRIEVAL_PATH = "/internal/rag/v3/retrieve"
 _POLICY_ERROR = "REQUIREMENT_POLICY_UNAVAILABLE"
 _MAX_IDENTITY_BYTES = 64 * 1024
 _MAX_HTTP_RESPONSE_BYTES = 8 * 1024 * 1024
+DEFAULT_READINESS_TIMEOUT_SECONDS = 195.0
+DEFAULT_RETRIEVAL_TIMEOUT_SECONDS = 195.0
+MAX_READINESS_TIMEOUT_SECONDS = 300.0
+MAX_RETRIEVAL_TIMEOUT_SECONDS = 300.0
 
 
 class RestrictedEvaluationError(RuntimeError):
     """The bounded diagnostic evaluation cannot be trusted."""
+
+    def __init__(self, message: str, *, code: str = "restricted_evaluation_rejected") -> None:
+        super().__init__(message)
+        self.code = code
+
+
+@dataclass(slots=True)
+class EvaluationProgress:
+    """Non-sensitive progress retained when a restricted run fails."""
+
+    started_at: float
+    stage_started_at: float
+    failure_stage: str = "setup"
+    completed_hybrid_cases: int = 0
+    completed_structured_checks: int = 0
+
+    @classmethod
+    def start(cls) -> EvaluationProgress:
+        now = time.monotonic()
+        return cls(started_at=now, stage_started_at=now)
+
+    def enter(self, stage: str) -> None:
+        self.failure_stage = stage
+        self.stage_started_at = time.monotonic()
+
+    def failure_payload(self, failure_code: str) -> dict[str, object]:
+        now = time.monotonic()
+        return {
+            "schema_version": "three-law-restricted-rag-diagnostic-failure/v1",
+            "failure_stage": self.failure_stage,
+            "failure_code": failure_code,
+            "completed_hybrid_cases": self.completed_hybrid_cases,
+            "completed_structured_checks": self.completed_structured_checks,
+            "duration_seconds": round(max(0.0, now - self.started_at), 3),
+            "failed_stage_duration_seconds": round(
+                max(0.0, now - self.stage_started_at),
+                3,
+            ),
+        }
 
 
 def _literal_loopback_origin(value: str) -> str:
@@ -69,7 +112,10 @@ def _literal_loopback_origin(value: str) -> str:
         parsed = urlsplit(value)
         port = parsed.port
     except ValueError:
-        raise RestrictedEvaluationError("Evidence base URL is invalid") from None
+        raise RestrictedEvaluationError(
+            "Evidence base URL is invalid",
+            code="base_url_invalid",
+        ) from None
     if (
         value != value.strip()
         or parsed.scheme != "http"
@@ -81,7 +127,10 @@ def _literal_loopback_origin(value: str) -> str:
         or parsed.query
         or parsed.fragment
     ):
-        raise RestrictedEvaluationError("Evidence base URL must be a literal loopback origin")
+        raise RestrictedEvaluationError(
+            "Evidence base URL must be a literal loopback origin",
+            code="base_url_not_loopback",
+        )
     return value.rstrip("/")
 
 
@@ -89,25 +138,43 @@ def load_identity(path: Path) -> EvidenceRuntimeReleaseIdentityV3:
     try:
         raw = path.read_bytes()
     except OSError:
-        raise RestrictedEvaluationError("Evidence V3 identity file is unavailable") from None
+        raise RestrictedEvaluationError(
+            "Evidence V3 identity file is unavailable",
+            code="identity_file_unavailable",
+        ) from None
     if not raw or len(raw) > _MAX_IDENTITY_BYTES:
-        raise RestrictedEvaluationError("Evidence V3 identity file size is invalid")
+        raise RestrictedEvaluationError(
+            "Evidence V3 identity file size is invalid",
+            code="identity_file_size_invalid",
+        )
     try:
         payload = json.loads(raw.decode("utf-8"))
         return EvidenceRuntimeReleaseIdentityV3.model_validate(payload)
     except (UnicodeError, ValueError, TypeError):
-        raise RestrictedEvaluationError("Evidence V3 identity file is invalid") from None
+        raise RestrictedEvaluationError(
+            "Evidence V3 identity file is invalid",
+            code="identity_file_invalid",
+        ) from None
 
 
 def _response_json(response: requests.Response) -> dict[str, Any]:
     if len(response.content) > _MAX_HTTP_RESPONSE_BYTES:
-        raise RestrictedEvaluationError("Evidence response exceeds the diagnostic byte limit")
+        raise RestrictedEvaluationError(
+            "Evidence response exceeds the diagnostic byte limit",
+            code="response_size_invalid",
+        )
     try:
         payload = response.json()
     except requests.JSONDecodeError:
-        raise RestrictedEvaluationError("Evidence response is not valid JSON") from None
+        raise RestrictedEvaluationError(
+            "Evidence response is not valid JSON",
+            code="response_json_invalid",
+        ) from None
     if not isinstance(payload, dict):
-        raise RestrictedEvaluationError("Evidence response JSON is not an object")
+        raise RestrictedEvaluationError(
+            "Evidence response JSON is not an object",
+            code="response_shape_invalid",
+        )
     return payload
 
 
@@ -119,11 +186,20 @@ def _assert_response_identity(
 ) -> None:
     for name, expected in identity.binding_headers().items():
         if response.headers.get(name) != expected:
-            raise RestrictedEvaluationError("Evidence response identity header mismatch")
+            raise RestrictedEvaluationError(
+                "Evidence response identity header mismatch",
+                code="response_identity_mismatch",
+            )
     if request_id is not None and response.headers.get("X-Request-ID") != request_id:
-        raise RestrictedEvaluationError("Evidence response request identity mismatch")
+        raise RestrictedEvaluationError(
+            "Evidence response request identity mismatch",
+            code="response_request_identity_mismatch",
+        )
     if not response.headers.get("X-Service-Request-ID"):
-        raise RestrictedEvaluationError("Evidence service request identity is missing")
+        raise RestrictedEvaluationError(
+            "Evidence service request identity is missing",
+            code="service_request_identity_missing",
+        )
 
 
 def project_v3_to_hybrid_v1(response: RetrieveResponseV3) -> dict[str, Any]:
@@ -238,18 +314,35 @@ def _post(
             timeout=timeout_seconds,
             allow_redirects=False,
         )
+    except requests.Timeout:
+        raise RestrictedEvaluationError(
+            "Evidence retrieval request timed out",
+            code="retrieval_timeout",
+        ) from None
     except requests.RequestException:
-        raise RestrictedEvaluationError("Evidence retrieval request failed") from None
+        raise RestrictedEvaluationError(
+            "Evidence retrieval request failed",
+            code="retrieval_transport_error",
+        ) from None
     latency_ms = (time.monotonic() - started) * 1_000
     if response.status_code != 200:
-        raise RestrictedEvaluationError("Evidence retrieval did not return HTTP 200")
+        raise RestrictedEvaluationError(
+            "Evidence retrieval did not return HTTP 200",
+            code="retrieval_http_status",
+        )
     _assert_response_identity(response, identity, request_id=request_id)
     try:
         result = RetrieveResponseV3.model_validate(_response_json(response))
     except ValueError:
-        raise RestrictedEvaluationError("Evidence retrieval response violates V3") from None
+        raise RestrictedEvaluationError(
+            "Evidence retrieval response violates V3",
+            code="retrieval_response_invalid",
+        ) from None
     if result.request_id != request_id:
-        raise RestrictedEvaluationError("Evidence response body request identity mismatch")
+        raise RestrictedEvaluationError(
+            "Evidence response body request identity mismatch",
+            code="response_body_identity_mismatch",
+        )
     return result, response, latency_ms
 
 
@@ -314,9 +407,23 @@ def run_restricted_evaluation(
     service_token_file: Path,
     identity_file: Path,
     review_as_of: date,
-    timeout_seconds: float,
+    readiness_timeout_seconds: float,
+    retrieval_timeout_seconds: float,
     session: requests.Session | None = None,
+    progress: EvaluationProgress | None = None,
 ) -> dict[str, object]:
+    selected_progress = progress or EvaluationProgress.start()
+    selected_progress.enter("setup")
+    if not 0 < readiness_timeout_seconds <= MAX_READINESS_TIMEOUT_SECONDS:
+        raise RestrictedEvaluationError(
+            "readiness timeout is outside the supported diagnostic range",
+            code="timeout_configuration_invalid",
+        )
+    if not 0 < retrieval_timeout_seconds <= MAX_RETRIEVAL_TIMEOUT_SECONDS:
+        raise RestrictedEvaluationError(
+            "retrieval timeout is outside the supported diagnostic range",
+            code="timeout_configuration_invalid",
+        )
     base_url = _literal_loopback_origin(evidence_base_url)
     token = load_bearer_token_file(service_token_file)
     identity = load_identity(identity_file)
@@ -324,30 +431,66 @@ def run_restricted_evaluation(
     owns_session = session is None
     try:
         auth = {"Authorization": f"Bearer {token}"}
+        expected_identity = identity.model_dump(mode="json")
+        selected_progress.enter("standard_readiness")
         try:
             standard_ready = client.get(
                 f"{base_url}{_RUNTIME_READINESS_PATH}",
                 headers=auth,
-                timeout=timeout_seconds,
+                timeout=readiness_timeout_seconds,
                 allow_redirects=False,
             )
+        except requests.Timeout:
+            raise RestrictedEvaluationError(
+                "Evidence standard readiness request timed out",
+                code="readiness_timeout",
+            ) from None
+        except requests.RequestException:
+            raise RestrictedEvaluationError(
+                "Evidence standard readiness request failed",
+                code="readiness_transport_error",
+            ) from None
+        if standard_ready.status_code != 200:
+            raise RestrictedEvaluationError(
+                "Evidence standard readiness did not return HTTP 200",
+                code="readiness_http_status",
+            )
+        standard_payload = _response_json(standard_ready)
+        if standard_payload.get("evidence_runtime_release") != expected_identity:
+            raise RestrictedEvaluationError(
+                "standard readiness identity mismatch",
+                code="readiness_identity_mismatch",
+            )
+
+        selected_progress.enter("diagnostic_readiness")
+        try:
             diagnostic_ready = client.get(
                 f"{base_url}{DIAGNOSTIC_READINESS_PATH}",
                 headers=auth,
-                timeout=timeout_seconds,
+                timeout=readiness_timeout_seconds,
                 allow_redirects=False,
             )
+        except requests.Timeout:
+            raise RestrictedEvaluationError(
+                "Evidence diagnostic readiness request timed out",
+                code="readiness_timeout",
+            ) from None
         except requests.RequestException:
-            raise RestrictedEvaluationError("Evidence readiness request failed") from None
-        if standard_ready.status_code != 200 or diagnostic_ready.status_code != 200:
-            raise RestrictedEvaluationError("Evidence diagnostic is not ready")
-        standard_payload = _response_json(standard_ready)
+            raise RestrictedEvaluationError(
+                "Evidence diagnostic readiness request failed",
+                code="readiness_transport_error",
+            ) from None
+        if diagnostic_ready.status_code != 200:
+            raise RestrictedEvaluationError(
+                "Evidence diagnostic is not ready",
+                code="readiness_http_status",
+            )
         diagnostic_payload = _response_json(diagnostic_ready)
-        expected_identity = identity.model_dump(mode="json")
-        if standard_payload.get("evidence_runtime_release") != expected_identity:
-            raise RestrictedEvaluationError("standard readiness identity mismatch")
         if diagnostic_payload.get("evidence_runtime_release") != expected_identity:
-            raise RestrictedEvaluationError("diagnostic readiness identity mismatch")
+            raise RestrictedEvaluationError(
+                "diagnostic readiness identity mismatch",
+                code="readiness_identity_mismatch",
+            )
         if (
             diagnostic_payload.get("diagnostic_profile") != DIAGNOSTIC_PROFILE
             or diagnostic_payload.get("scope") != DIAGNOSTIC_SCOPE
@@ -364,11 +507,15 @@ def run_restricted_evaluation(
             or diagnostic_payload.get("rag_quality_evaluated") is not False
             or diagnostic_payload.get("automatic_completion_eligible") is not False
         ):
-            raise RestrictedEvaluationError("diagnostic readiness provenance mismatch")
+            raise RestrictedEvaluationError(
+                "diagnostic readiness provenance mismatch",
+                code="diagnostic_provenance_mismatch",
+            )
         supported_as_of = identity.base_runtime_release.supported_review_as_of
         if review_as_of != supported_as_of:
             raise RestrictedEvaluationError(
-                "review_as_of does not equal the runtime-supported date"
+                "review_as_of does not equal the runtime-supported date",
+                code="review_date_mismatch",
             )
 
         gold = load_hybrid_gold()
@@ -378,14 +525,15 @@ def run_restricted_evaluation(
         law_method_counts: Counter[str] = Counter()
         law_score_component_counts: Counter[str] = Counter()
         law_evidence_count = 0
-        for case in gold:
+        for case_index, case in enumerate(gold, start=1):
+            selected_progress.enter(f"hybrid_case_{case_index:02d}")
             v3_result, _response, latency_ms = _post(
                 client,
                 base_url=base_url,
                 token=token,
                 identity=identity,
                 body=_hybrid_request(case, review_as_of),
-                timeout_seconds=timeout_seconds,
+                timeout_seconds=retrieval_timeout_seconds,
             )
             if v3_result.status == "partial" and all(
                 not result.errors
@@ -412,6 +560,7 @@ def run_restricted_evaluation(
                 sorted(case_score_component_counts.items())
             )
             hybrid_reports.append(report)
+            selected_progress.completed_hybrid_cases = case_index
         hybrid_summary = summarize_hybrid(hybrid_reports)
         ranking_all_passed = bool(hybrid_summary["all_passed"])
         required_methods = {"dense", "bm25", "graph"}
@@ -436,16 +585,18 @@ def run_restricted_evaluation(
         hybrid_summary["retrieval_path_coverage_passed"] = retrieval_path_coverage_passed
         hybrid_summary["all_passed"] = ranking_all_passed and retrieval_path_coverage_passed
 
+        selected_progress.enter("structured_check")
         structured_result, _structured_response, structured_latency_ms = _post(
             client,
             base_url=base_url,
             token=token,
             identity=identity,
             body=_structured_request(review_as_of),
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=retrieval_timeout_seconds,
         )
         structured = _structured_report(structured_result)
         structured["latency_ms"] = round(structured_latency_ms, 3)
+        selected_progress.completed_structured_checks = 1
 
         all_passed = bool(hybrid_summary["all_passed"]) and bool(structured["passed"])
         return {
@@ -474,14 +625,52 @@ def run_restricted_evaluation(
             client.close()
 
 
-def _positive_timeout(value: str) -> float:
+def _bounded_timeout(value: str, *, label: str, maximum: float) -> float:
     try:
         parsed = float(value)
     except ValueError:
-        raise argparse.ArgumentTypeError("timeout must be a positive number") from None
-    if not 0 < parsed <= 120:
-        raise argparse.ArgumentTypeError("timeout must be greater than 0 and at most 120")
+        raise argparse.ArgumentTypeError(f"{label} timeout must be a positive number") from None
+    if not 0 < parsed <= maximum:
+        raise argparse.ArgumentTypeError(
+            f"{label} timeout must be greater than 0 and at most {maximum:g}"
+        )
     return parsed
+
+
+def _readiness_timeout(value: str) -> float:
+    return _bounded_timeout(
+        value,
+        label="readiness",
+        maximum=MAX_READINESS_TIMEOUT_SECONDS,
+    )
+
+
+def _retrieval_timeout(value: str) -> float:
+    return _bounded_timeout(
+        value,
+        label="retrieval",
+        maximum=MAX_RETRIEVAL_TIMEOUT_SECONDS,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class RestrictedEvaluationFailureReport:
+    payload: dict[str, object]
+
+    def to_wire(self) -> dict[str, object]:
+        return self.payload
+
+
+def _failure_output_path(output: Path) -> Path:
+    if output.suffix:
+        return output.with_name(f"{output.stem}.failure{output.suffix}")
+    return output.with_name(f"{output.name}.failure.json")
+
+
+def _failure_code(exc: Exception) -> str:
+    if isinstance(exc, RestrictedEvaluationError):
+        return exc.code
+    return "unexpected_error"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -492,33 +681,70 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--identity-file", type=Path, required=True)
     parser.add_argument("--review-as-of", type=date.fromisoformat, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--timeout-seconds", type=_positive_timeout, default=75.0)
+    parser.add_argument(
+        "--readiness-timeout-seconds",
+        type=_readiness_timeout,
+        default=DEFAULT_READINESS_TIMEOUT_SECONDS,
+        help=(
+            "per-readiness request timeout; default 195 seconds gives the "
+            "180-second diagnostic server deadline a 15-second response margin"
+        ),
+    )
+    parser.add_argument(
+        "--retrieval-timeout-seconds",
+        type=_retrieval_timeout,
+        default=DEFAULT_RETRIEVAL_TIMEOUT_SECONDS,
+        help=(
+            "per-retrieval request timeout; default 195 seconds gives the "
+            "180-second diagnostic server deadline a 15-second response margin"
+        ),
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    progress = EvaluationProgress.start()
     try:
         if not args.diagnostic_only_three_law:
-            raise RestrictedEvaluationError("explicit diagnostic acknowledgement is required")
+            raise RestrictedEvaluationError(
+                "explicit diagnostic acknowledgement is required",
+                code="diagnostic_acknowledgement_missing",
+            )
         report = run_restricted_evaluation(
             evidence_base_url=args.evidence_base_url,
             service_token_file=args.service_token_file,
             identity_file=args.identity_file,
             review_as_of=args.review_as_of,
-            timeout_seconds=args.timeout_seconds,
+            readiness_timeout_seconds=args.readiness_timeout_seconds,
+            retrieval_timeout_seconds=args.retrieval_timeout_seconds,
+            progress=progress,
         )
+        progress.enter("success_artifact")
         v2.write_diagnostic_manifest(
             RestrictedEvaluationReport(report),
             args.output,
             forbidden_roots=(ROOT,),
         )
     except Exception as exc:
+        failure_payload = progress.failure_payload(_failure_code(exc))
+        failure_artifact_written = False
+        try:
+            v2.write_diagnostic_manifest(
+                RestrictedEvaluationFailureReport(failure_payload),
+                _failure_output_path(args.output),
+                forbidden_roots=(ROOT,),
+            )
+            failure_artifact_written = True
+        except Exception:
+            pass
         print(
             json.dumps(
                 {
                     "event": "three_law_restricted_rag_evaluation_failed",
                     "exception_type": type(exc).__name__,
+                    **failure_payload,
+                    "failure_artifact_written": failure_artifact_written,
                 },
                 sort_keys=True,
             ),
