@@ -344,7 +344,84 @@ def test_qdrant_scroll_rejects_null_point_identity() -> None:
             return [SimpleNamespace(id=None, payload={}, vector={})], None
 
     with pytest.raises(runner.ThreeLawDiagnosticError, match="without an identity"):
-        runner._scroll_qdrant_state(_Qdrant(), 1)
+        runner._observe_qdrant_state(
+            _Qdrant(),
+            1,
+            collection_state={},
+            eligible_by_point={},
+        )
+
+
+def test_qdrant_observer_preserves_legacy_digest_with_bounded_pages() -> None:
+    expected_payloads = {
+        "point-1": {
+            "article_pk": 1,
+            "law_id": "001556",
+            "law_name": "관세법",
+            "hierarchy": "법률",
+            "article_no": 1,
+            "paragraph_no": None,
+            "item_no": None,
+            "enforcement_date": "2026-01-01",
+            "text": "first",
+        },
+        "point-2": {
+            "article_pk": 2,
+            "law_id": "002421",
+            "law_name": "관세법 시행령",
+            "hierarchy": "대통령령",
+            "article_no": 2,
+            "paragraph_no": None,
+            "item_no": None,
+            "enforcement_date": "2026-01-01",
+            "text": "second",
+        },
+    }
+    records = [
+        SimpleNamespace(
+            id=point_id,
+            payload=payload,
+            vector={"dense": [float(index), float(index + 1)]},
+        )
+        for index, (point_id, payload) in enumerate(reversed(expected_payloads.items()))
+    ]
+
+    class _Qdrant:
+        limits: list[int] = []
+
+        def scroll(self, **kwargs):
+            self.limits.append(kwargs["limit"])
+            return records, None
+
+    collection = {"status": "green", "vectors_count": 2}
+    qdrant = _Qdrant()
+    point_ids, observed_digest = runner._observe_qdrant_state(
+        qdrant,
+        2,
+        collection_state=collection,
+        eligible_by_point=expected_payloads,
+    )
+    legacy_points = tuple(
+        sorted(
+            (
+                {
+                    "id": str(record.id),
+                    "payload": runner._canonical_value(record.payload),
+                    "vector": runner._canonical_value(record.vector),
+                }
+                for record in records
+            ),
+            key=lambda item: str(item["id"]),
+        )
+    )
+
+    assert point_ids == ("point-1", "point-2")
+    assert observed_digest == runner._state_sha256(
+        b"qdrant-retrieval",
+        {"collection": collection, "points": legacy_points},
+    )
+    assert qdrant.limits == [runner._QDRANT_SCROLL_PAGE_SIZE]
+    assert runner._QDRANT_SCROLL_PAGE_SIZE <= 64
 
 
 def test_executing_repository_attestation_rejects_dirty_or_wrong_revision(

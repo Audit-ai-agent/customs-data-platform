@@ -95,6 +95,7 @@ _DOMAIN = b"customs-data-platform:three-law-evidence-diagnostic:v1\0"
 _MAX_MANIFEST_BYTES = 64 * 1024
 _MAX_QDRANT_POINTS = 1_000_000
 _MAX_STATE_MANIFEST_BYTES = 256 * 1024 * 1024
+_QDRANT_SCROLL_PAGE_SIZE = 64
 _ORIGINAL_POSTGRES_CONNECT = postgres.connect
 
 if not set(DIAGNOSTIC_LAW_IDS).issubset({str(item["law_id"]) for item in TARGET_LAWS}):
@@ -370,18 +371,40 @@ def _identifier_manifest_sha256(values: tuple[object, ...]) -> str:
     return hashlib.sha256(canonical_json_bytes(normalized)).hexdigest()
 
 
-def _scroll_qdrant_state(qdrant: Any, exact_count: int) -> tuple[dict[str, Any], ...]:
-    """Read every point including retrieval-affecting payload and vectors."""
+def _observe_qdrant_state(
+    qdrant: Any,
+    exact_count: int,
+    *,
+    collection_state: Any,
+    eligible_by_point: Mapping[str, Mapping[str, Any]],
+) -> tuple[tuple[str, ...], str]:
+    """Validate and hash every retrieval-affecting point with bounded memory.
+
+    Qdrant returns each dense vector as a Python list of 1,024 float objects.
+    Keeping all 1,007 point objects alive until ``json.dumps`` caused a large
+    transient allocation on constrained UAT hosts.  This observer retains the
+    exact legacy canonical JSON and digest, but it:
+
+    * requests only a small page at a time;
+    * validates each payload against PostgreSQL immediately;
+    * keeps only compact canonical bytes plus the point ID; and
+    * streams those sorted bytes into the framed state digest.
+
+    The compact bytes are necessary because Qdrant's native ID ordering is not
+    guaranteed to equal the legacy ``str(id)`` ordering.  They are bounded by
+    the same 256 MiB state-manifest limit and never leave process memory.
+    """
 
     if exact_count < 0 or exact_count > _MAX_QDRANT_POINTS:
         raise ThreeLawDiagnosticError("Qdrant point count is outside the diagnostic limit")
-    points: list[dict[str, Any]] = []
+    points: list[tuple[str, bytes]] = []
     offset: Any = None
     seen_offsets: set[str] = set()
+    serialized_points_size = 0
     for _ in range(exact_count + 1):
         records, next_offset = qdrant.scroll(
             collection_name=COLLECTION,
-            limit=256,
+            limit=_QDRANT_SCROLL_PAGE_SIZE,
             offset=offset,
             with_payload=True,
             with_vectors=True,
@@ -389,25 +412,80 @@ def _scroll_qdrant_state(qdrant: Any, exact_count: int) -> tuple[dict[str, Any],
         for record in records:
             if record.id is None:
                 raise ThreeLawDiagnosticError("Qdrant returned a point without an identity")
-            points.append(
-                {
-                    "id": str(record.id),
-                    "payload": _canonical_value(record.payload),
-                    "vector": _canonical_value(record.vector),
-                }
-            )
+            point_id = str(record.id)
+            point = {
+                "id": point_id,
+                "payload": _canonical_value(record.payload),
+                "vector": _canonical_value(record.vector),
+            }
+            expected = eligible_by_point.get(point_id)
+            payload = point["payload"]
+            if (
+                expected is None
+                or not isinstance(payload, dict)
+                or any(
+                    payload.get(field) != expected[field]
+                    for field in (
+                        "article_pk",
+                        "law_id",
+                        "law_name",
+                        "hierarchy",
+                        "article_no",
+                        "paragraph_no",
+                        "item_no",
+                        "enforcement_date",
+                        "text",
+                    )
+                )
+            ):
+                raise ThreeLawDiagnosticError("Qdrant retrieval payload differs from PostgreSQL")
+            point_bytes = canonical_json_bytes(point)
+            serialized_points_size += len(point_bytes)
+            if len(points) > 0:
+                serialized_points_size += 1
+            if serialized_points_size > _MAX_STATE_MANIFEST_BYTES:
+                raise ThreeLawDiagnosticError("store state manifest exceeds the diagnostic limit")
+            points.append((point_id, point_bytes))
         if len(points) > exact_count:
             raise ThreeLawDiagnosticError("Qdrant scroll exceeded its exact point count")
         if next_offset is None:
             if len(points) != exact_count:
                 raise ThreeLawDiagnosticError("Qdrant scroll did not return its exact point count")
-            return tuple(sorted(points, key=lambda item: str(item["id"])))
+            break
         marker = str(next_offset)
         if marker in seen_offsets:
             raise ThreeLawDiagnosticError("Qdrant pagination repeated an offset")
         seen_offsets.add(marker)
         offset = next_offset
-    raise ThreeLawDiagnosticError("Qdrant pagination exceeded its exact point count")
+    else:
+        raise ThreeLawDiagnosticError("Qdrant pagination exceeded its exact point count")
+
+    points.sort(key=lambda item: item[0])
+    point_ids = tuple(point_id for point_id, _point_bytes in points)
+    if len(set(point_ids)) != len(point_ids):
+        raise ThreeLawDiagnosticError("Qdrant returned duplicate point identities")
+
+    collection_bytes = canonical_json_bytes(_canonical_value(collection_state))
+    json_prefix = b'{"collection":' + collection_bytes + b',"points":['
+    json_suffix = b"]}"
+    serialized_length = len(json_prefix) + serialized_points_size + len(json_suffix)
+    if serialized_length > _MAX_STATE_MANIFEST_BYTES:
+        raise ThreeLawDiagnosticError("store state manifest exceeds the diagnostic limit")
+
+    digest = hashlib.sha256()
+    label = b"qdrant-retrieval"
+    digest.update(_DOMAIN)
+    digest.update(b"state\0")
+    digest.update(len(label).to_bytes(8, "big"))
+    digest.update(label)
+    digest.update(serialized_length.to_bytes(8, "big"))
+    digest.update(json_prefix)
+    for index, (_point_id, point_bytes) in enumerate(points):
+        if index:
+            digest.update(b",")
+        digest.update(point_bytes)
+    digest.update(json_suffix)
+    return point_ids, digest.hexdigest()
 
 
 def _eligible_law_leaf_projection(
@@ -652,34 +730,22 @@ def observe_three_law_data(
         ) as qdrant:
             qdrant_count = int(qdrant.count(COLLECTION, exact=True).count)
             qdrant_collection = _canonical_value(qdrant.get_collection(COLLECTION))
-            qdrant_state = _scroll_qdrant_state(qdrant, qdrant_count)
+            qdrant_ids, qdrant_retrieval_state_sha256 = _observe_qdrant_state(
+                qdrant,
+                qdrant_count,
+                collection_state=qdrant_collection,
+                eligible_by_point=eligible_by_point,
+            )
+            if int(qdrant.count(COLLECTION, exact=True).count) != qdrant_count:
+                raise ThreeLawDiagnosticError("Qdrant point count changed during observation")
     except Exception as exc:
         raise ThreeLawDiagnosticError("read-only Qdrant observation failed") from exc
-    qdrant_ids = tuple(str(point["id"]) for point in qdrant_state)
     if (
         len(set(qdrant_ids)) != len(qdrant_ids)
         or set(qdrant_ids) != set(postgres_qdrant_ids)
         or qdrant_count != len(eligible_rows)
     ):
         raise ThreeLawDiagnosticError("Qdrant projection does not match every eligible law leaf")
-    for point in qdrant_state:
-        expected = eligible_by_point[str(point["id"])]
-        payload = point["payload"]
-        if not isinstance(payload, dict) or any(
-            payload.get(field) != expected[field]
-            for field in (
-                "article_pk",
-                "law_id",
-                "law_name",
-                "hierarchy",
-                "article_no",
-                "paragraph_no",
-                "item_no",
-                "enforcement_date",
-                "text",
-            )
-        ):
-            raise ThreeLawDiagnosticError("Qdrant retrieval payload differs from PostgreSQL")
 
     created_executor = neo4j_query_executor is None
     executor = neo4j_query_executor or _new_neo4j_executor()
@@ -792,13 +858,7 @@ def observe_three_law_data(
         postgres_graph_ids_sha256=_identifier_manifest_sha256(postgres_graph_ids),
         neo4j_article_ids_sha256=_identifier_manifest_sha256(tuple(neo4j_ids)),
         postgres_retrieval_state_sha256=_state_sha256(b"postgres-retrieval", postgres_state),
-        qdrant_retrieval_state_sha256=_state_sha256(
-            b"qdrant-retrieval",
-            {
-                "collection": qdrant_collection,
-                "points": qdrant_state,
-            },
-        ),
+        qdrant_retrieval_state_sha256=qdrant_retrieval_state_sha256,
         neo4j_retrieval_state_sha256=_state_sha256(
             b"neo4j-retrieval",
             {
