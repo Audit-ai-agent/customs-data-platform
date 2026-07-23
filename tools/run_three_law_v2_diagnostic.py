@@ -96,7 +96,7 @@ _DOMAIN = b"customs-data-platform:three-law-evidence-diagnostic:v1\0"
 _MAX_MANIFEST_BYTES = 64 * 1024
 _MAX_QDRANT_POINTS = 1_000_000
 _MAX_STATE_MANIFEST_BYTES = 256 * 1024 * 1024
-_QDRANT_SCROLL_PAGE_SIZE = 64
+_QDRANT_SCROLL_PAGE_SIZE = 256
 _ORIGINAL_POSTGRES_CONNECT = postgres.connect
 
 if not set(DIAGNOSTIC_LAW_IDS).issubset({str(item["law_id"]) for item in TARGET_LAWS}):
@@ -394,7 +394,7 @@ def _observe_qdrant_state(
     transient allocation on constrained UAT hosts.  This observer retains the
     exact legacy canonical JSON and digest, but it:
 
-    * requests only a small page at a time;
+    * requests one bounded 256-point page at a time;
     * validates each payload against PostgreSQL immediately;
     * keeps only compact canonical bytes plus the point ID; and
     * streams those sorted bytes into the framed state digest.

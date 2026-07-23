@@ -419,7 +419,7 @@ def test_qdrant_observer_preserves_legacy_digest_with_bounded_pages() -> None:
         {"collection": collection, "points": legacy_points},
     )
     assert limits == [runner._QDRANT_SCROLL_PAGE_SIZE]
-    assert runner._QDRANT_SCROLL_PAGE_SIZE <= 64
+    assert runner._QDRANT_SCROLL_PAGE_SIZE <= 256
 
 
 def test_each_qdrant_http_operation_owns_a_fresh_bounded_client() -> None:
