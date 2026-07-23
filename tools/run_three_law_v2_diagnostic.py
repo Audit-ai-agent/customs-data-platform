@@ -88,6 +88,7 @@ EXPECTED_PRODUCTION_LAW_COUNT = len(TARGET_LAWS)
 EXPECTED_DIAGNOSTIC_LAW_COUNT = 3
 DIAGNOSTIC_LAW_IDS = ("001556", "002421", "006392")
 DIAGNOSTIC_SCOPE = "DIAGNOSTIC_ONLY_3_OF_58"
+DIAGNOSTIC_STARTUP_OBSERVATION_DEADLINE_SECONDS = 180.0
 DIAGNOSTIC_SERVICE_REQUEST_DEADLINE_SECONDS = 180.0
 _REVISION_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -202,9 +203,17 @@ class _ReadOnlyPostgresBoundary:
 
 
 def _deadline() -> RequestDeadline:
+    """Create the bounded budget for startup/offline full-store attestation.
+
+    Runtime HTTP requests receive their own deadline from the production
+    boundary.  Startup has to read every vector and graph row before binding a
+    diagnostic identity, so it uses the same 180-second outer bound without
+    weakening the 20-second cap on any individual store operation.
+    """
+
     return RequestDeadline.start(
         started_at=time.monotonic(),
-        request_timeout_seconds=75,
+        request_timeout_seconds=DIAGNOSTIC_STARTUP_OBSERVATION_DEADLINE_SECONDS,
         store_timeout_seconds=20,
         model_timeout_seconds=20,
         completion_reserve_seconds=2,

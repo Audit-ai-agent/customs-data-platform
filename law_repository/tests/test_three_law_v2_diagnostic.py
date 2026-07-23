@@ -424,6 +424,23 @@ def test_qdrant_observer_preserves_legacy_digest_with_bounded_pages() -> None:
     assert runner._QDRANT_SCROLL_PAGE_SIZE <= 64
 
 
+def test_startup_observation_budget_preserves_per_operation_caps() -> None:
+    started = runner.time.monotonic()
+    deadline = runner._deadline()
+
+    assert deadline.expires_at - started == pytest.approx(
+        runner.DIAGNOSTIC_STARTUP_OBSERVATION_DEADLINE_SECONDS,
+        abs=0.1,
+    )
+    assert deadline.store_timeout_seconds == 20
+    assert deadline.model_timeout_seconds == 20
+    assert deadline.completion_reserve_seconds == 2
+    assert (
+        runner.DIAGNOSTIC_STARTUP_OBSERVATION_DEADLINE_SECONDS
+        == runner.DIAGNOSTIC_SERVICE_REQUEST_DEADLINE_SECONDS
+    )
+
+
 def test_executing_repository_attestation_rejects_dirty_or_wrong_revision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
