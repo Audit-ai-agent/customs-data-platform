@@ -82,6 +82,9 @@ Copy-Item law_repository/.env.example law_repository/.env
 실제 API key와 DB 비밀번호는 `.env` 또는 secret manager에만 입력합니다. example 파일에는 비밀값을 넣지 않습니다.
 로컬 PostgreSQL host port 기본값은 다른 개발 stack과 충돌하지 않도록 `55432`이며,
 컨테이너 내부 포트는 계속 `5432`입니다. `.env`의 `POSTGRES_PORT`로 변경할 수 있습니다.
+로컬 Compose의 PostgreSQL·Qdrant·Neo4j published port는 모두
+`127.0.0.1`에 고정됩니다. 기본 비밀번호 또는 인증 없는 개발 store를 LAN/WAN에
+노출하기 위해 host IP를 완화해서는 안 됩니다.
 
 ## 검증
 
@@ -133,6 +136,12 @@ uv run --locked python tools/run_preserved_data_v2_diagnostic.py `
 
 이 진단의 성공 기준은 readiness `503`, retrieval POST `0`, audit의
 `release_ready=false`입니다. 이는 실제 RAG 성공이나 세 store 정합성 PASS가 아닙니다.
+
+보존된 실제 3법령·1,007조문을 현재 Agent V3와 연결하는 로컬 진단은
+[`preserved-3law-v3-diagnostic`](docs/LOCAL_USER_UAT.md#preserved-3law-v3-diagnostic-actual-store-v3)
+프로필만 사용합니다. 이 경로는 실제 PostgreSQL/Qdrant/Neo4j를 read-only로
+조회하고 V3의 17개 identity header에 결박하지만, 3/58 범위·미평가 RAG
+품질·미승인 요건서류 정책을 그대로 표시하며 자동완료를 허용하지 않습니다.
 
 3-store 통합 검증은 Docker 서비스를 기동하고 migration·ingestion을 완료한 별도 환경에서 실행합니다. 연결 실패나 미적재 상태의 skip은 Live Gate 통과가 아닙니다.
 

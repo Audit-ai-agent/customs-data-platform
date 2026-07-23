@@ -60,7 +60,7 @@ def _is_within(path: Path, parent: Path) -> bool:
         return False
 
 
-def _write_identity_json(
+def write_test_only_v3_identity_json(
     identity: EvidenceRuntimeReleaseIdentityV3,
     *,
     output: Path,
@@ -153,7 +153,7 @@ def create_test_only_v3_conformance_application(
         raise TestOnlyConformanceConfigurationError(
             "test-only V3 identity does not expose the expected 17 bindings"
         )
-    _write_identity_json(
+    write_test_only_v3_identity_json(
         runtime_lease.identity,
         output=identity_output,
         production_context=context,

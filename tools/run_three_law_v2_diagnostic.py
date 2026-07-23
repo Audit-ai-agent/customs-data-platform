@@ -1311,6 +1311,12 @@ class ThreeLawDiagnosticManifest:
         }
 
 
+class DiagnosticManifest(Protocol):
+    """Location-free diagnostic documents accepted by the shared safe writer."""
+
+    def to_wire(self) -> dict[str, object]: ...
+
+
 def _is_within(path: Path, parent: Path) -> bool:
     try:
         path.resolve().relative_to(parent.resolve())
@@ -1329,7 +1335,7 @@ def _has_symlink_component(path: Path) -> bool:
 
 
 def write_diagnostic_manifest(
-    manifest: ThreeLawDiagnosticManifest,
+    manifest: DiagnosticManifest,
     output: Path,
     *,
     forbidden_roots: tuple[Path, ...],

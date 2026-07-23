@@ -1550,12 +1550,14 @@ def create_test_runtime_v3_application(
     runtime_release_loader: RuntimeV3LeaseLoaderProtocol,
     backend_factory: RuntimeBackendFactory,
     runtime_closeables: tuple[Any, ...] = (),
+    model_supervisor: DenseModelSupervisor | None = None,
 ) -> FastAPI:
     return _create_runtime_v3_application(
         service_settings=service_settings,
         runtime_release_loader=runtime_release_loader,
         backend_factory=backend_factory,
         test_only=True,
+        model_supervisor=model_supervisor,
         runtime_closeables=runtime_closeables,
     )
 
