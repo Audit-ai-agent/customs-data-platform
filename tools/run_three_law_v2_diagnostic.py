@@ -381,11 +381,11 @@ def _identifier_manifest_sha256(values: tuple[object, ...]) -> str:
 
 
 def _observe_qdrant_state(
-    qdrant: Any,
     exact_count: int,
     *,
     collection_state: Any,
     eligible_by_point: Mapping[str, Mapping[str, Any]],
+    scroll_page: Callable[[Any, int], tuple[list[Any], Any]],
 ) -> tuple[tuple[str, ...], str]:
     """Validate and hash every retrieval-affecting point with bounded memory.
 
@@ -411,13 +411,7 @@ def _observe_qdrant_state(
     seen_offsets: set[str] = set()
     serialized_points_size = 0
     for _ in range(exact_count + 1):
-        records, next_offset = qdrant.scroll(
-            collection_name=COLLECTION,
-            limit=_QDRANT_SCROLL_PAGE_SIZE,
-            offset=offset,
-            with_payload=True,
-            with_vectors=True,
-        )
+        records, next_offset = scroll_page(offset, _QDRANT_SCROLL_PAGE_SIZE)
         for record in records:
             if record.id is None:
                 raise ThreeLawDiagnosticError("Qdrant returned a point without an identity")
@@ -495,6 +489,20 @@ def _observe_qdrant_state(
         digest.update(point_bytes)
     digest.update(json_suffix)
     return point_ids, digest.hexdigest()
+
+
+def _bounded_qdrant_call(
+    deadline: RequestDeadline,
+    client_factory: Callable[..., Any],
+    operation: Callable[[Any], Any],
+) -> Any:
+    """Execute exactly one Qdrant HTTP operation in one watchdog context."""
+
+    with bounded_qdrant_client(
+        deadline,
+        client_factory=client_factory,
+    ) as qdrant:
+        return operation(qdrant)
 
 
 def _eligible_law_leaf_projection(
@@ -733,20 +741,49 @@ def observe_three_law_data(
     postgres_qdrant_ids, eligible_by_point = _eligible_law_leaf_projection(eligible_rows)
 
     try:
-        with bounded_qdrant_client(
-            request_deadline,
-            client_factory=qdrant_factory,
-        ) as qdrant:
-            qdrant_count = int(qdrant.count(COLLECTION, exact=True).count)
-            qdrant_collection = _canonical_value(qdrant.get_collection(COLLECTION))
-            qdrant_ids, qdrant_retrieval_state_sha256 = _observe_qdrant_state(
-                qdrant,
-                qdrant_count,
-                collection_state=qdrant_collection,
-                eligible_by_point=eligible_by_point,
+        qdrant_count = int(
+            _bounded_qdrant_call(
+                request_deadline,
+                qdrant_factory,
+                lambda qdrant: qdrant.count(COLLECTION, exact=True),
+            ).count
+        )
+        qdrant_collection = _canonical_value(
+            _bounded_qdrant_call(
+                request_deadline,
+                qdrant_factory,
+                lambda qdrant: qdrant.get_collection(COLLECTION),
             )
-            if int(qdrant.count(COLLECTION, exact=True).count) != qdrant_count:
-                raise ThreeLawDiagnosticError("Qdrant point count changed during observation")
+        )
+
+        def scroll_page(offset: Any, limit: int) -> tuple[list[Any], Any]:
+            return _bounded_qdrant_call(
+                request_deadline,
+                qdrant_factory,
+                lambda qdrant: qdrant.scroll(
+                    collection_name=COLLECTION,
+                    limit=limit,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=True,
+                ),
+            )
+
+        qdrant_ids, qdrant_retrieval_state_sha256 = _observe_qdrant_state(
+            qdrant_count,
+            collection_state=qdrant_collection,
+            eligible_by_point=eligible_by_point,
+            scroll_page=scroll_page,
+        )
+        final_qdrant_count = int(
+            _bounded_qdrant_call(
+                request_deadline,
+                qdrant_factory,
+                lambda qdrant: qdrant.count(COLLECTION, exact=True),
+            ).count
+        )
+        if final_qdrant_count != qdrant_count:
+            raise ThreeLawDiagnosticError("Qdrant point count changed during observation")
     except Exception as exc:
         raise ThreeLawDiagnosticError("read-only Qdrant observation failed") from exc
     if (
@@ -1131,7 +1168,6 @@ class ThreeLawDiagnosticDatabaseBackend(DatabaseEvidenceBackend):
 
     def _arm_hits(
         self,
-        qdrant: Any,
         query: str,
         arm: str,
         recall: int,
@@ -1141,29 +1177,29 @@ class ThreeLawDiagnosticDatabaseBackend(DatabaseEvidenceBackend):
             vectors = self._dense_encoder([query], self._require_deadline())
             if len(vectors) != 1:
                 raise ThreeLawDiagnosticError("dense model returned an invalid vector batch")
-            points = qdrant.query_points(
-                COLLECTION,
-                query=list(vectors[0]),
-                using=DENSE_VECTOR,
-                limit=recall,
-                timeout=self._require_deadline().store_operation_whole_seconds(),
-            ).points
+            query_value: Any = list(vectors[0])
         elif arm == BM25_VECTOR:
             from qdrant_client import models
 
             sparse_indices, sparse_values = repository_module.bm25.encode_query(query)
-            points = qdrant.query_points(
-                COLLECTION,
-                query=models.SparseVector(
-                    indices=sparse_indices,
-                    values=sparse_values,
-                ),
-                using=BM25_VECTOR,
-                limit=recall,
-                timeout=self._require_deadline().store_operation_whole_seconds(),
-            ).points
+            query_value = models.SparseVector(
+                indices=sparse_indices,
+                values=sparse_values,
+            )
         else:
             raise ThreeLawDiagnosticError("unsupported diagnostic retrieval arm")
+        query_deadline = self._require_deadline()
+        with bounded_qdrant_client(
+            query_deadline,
+            client_factory=self._qdrant_factory,
+        ) as qdrant:
+            points = qdrant.query_points(
+                COLLECTION,
+                query=query_value,
+                using=arm,
+                limit=recall,
+                timeout=query_deadline.store_operation_whole_seconds(),
+            ).points
 
         hits: list[Any] = []
         for point in points:
@@ -1205,12 +1241,8 @@ class ThreeLawDiagnosticDatabaseBackend(DatabaseEvidenceBackend):
     ) -> tuple[LawArticleMatch, ...]:
         self._require_deadline()
         recall = min(max(top_k * 2, 8), 40)
-        with bounded_qdrant_client(
-            self._require_deadline(),
-            client_factory=self._qdrant_factory,
-        ) as qdrant:
-            dense_hits = self._arm_hits(qdrant, query, DENSE_VECTOR, recall, as_of)
-            bm25_hits = self._arm_hits(qdrant, query, BM25_VECTOR, recall, as_of)
+        dense_hits = self._arm_hits(query, DENSE_VECTOR, recall, as_of)
+        bm25_hits = self._arm_hits(query, BM25_VECTOR, recall, as_of)
 
         rrf_k = 60
         candidates: dict[int, dict[str, Any]] = {}

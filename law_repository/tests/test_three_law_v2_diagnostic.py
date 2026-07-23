@@ -345,10 +345,10 @@ def test_qdrant_scroll_rejects_null_point_identity() -> None:
 
     with pytest.raises(runner.ThreeLawDiagnosticError, match="without an identity"):
         runner._observe_qdrant_state(
-            _Qdrant(),
             1,
             collection_state={},
             eligible_by_point={},
+            scroll_page=lambda _offset, _limit: _Qdrant().scroll(),
         )
 
 
@@ -386,20 +386,18 @@ def test_qdrant_observer_preserves_legacy_digest_with_bounded_pages() -> None:
         for index, (point_id, payload) in enumerate(reversed(expected_payloads.items()))
     ]
 
-    class _Qdrant:
-        limits: list[int] = []
-
-        def scroll(self, **kwargs):
-            self.limits.append(kwargs["limit"])
-            return records, None
-
     collection = {"status": "green", "vectors_count": 2}
-    qdrant = _Qdrant()
+    limits: list[int] = []
+
+    def scroll_page(_offset, limit):
+        limits.append(limit)
+        return records, None
+
     point_ids, observed_digest = runner._observe_qdrant_state(
-        qdrant,
         2,
         collection_state=collection,
         eligible_by_point=expected_payloads,
+        scroll_page=scroll_page,
     )
     legacy_points = tuple(
         sorted(
@@ -420,8 +418,38 @@ def test_qdrant_observer_preserves_legacy_digest_with_bounded_pages() -> None:
         b"qdrant-retrieval",
         {"collection": collection, "points": legacy_points},
     )
-    assert qdrant.limits == [runner._QDRANT_SCROLL_PAGE_SIZE]
+    assert limits == [runner._QDRANT_SCROLL_PAGE_SIZE]
     assert runner._QDRANT_SCROLL_PAGE_SIZE <= 64
+
+
+def test_each_qdrant_http_operation_owns_a_fresh_bounded_client() -> None:
+    clients = []
+
+    class _Client:
+        def __init__(self) -> None:
+            self.closed = False
+            clients.append(self)
+
+        def value(self, number: int) -> int:
+            assert self.closed is False
+            return number
+
+        def close(self) -> None:
+            self.closed = True
+
+    deadline = RequestDeadline.start(
+        started_at=runner.time.monotonic(),
+        request_timeout_seconds=5,
+        store_timeout_seconds=2,
+        model_timeout_seconds=2,
+        completion_reserve_seconds=0.5,
+    )
+    factory = lambda **_kwargs: _Client()
+
+    assert runner._bounded_qdrant_call(deadline, factory, lambda client: client.value(1)) == 1
+    assert runner._bounded_qdrant_call(deadline, factory, lambda client: client.value(2)) == 2
+    assert len(clients) == 2
+    assert all(client.closed for client in clients)
 
 
 def test_startup_observation_budget_preserves_per_operation_caps() -> None:
