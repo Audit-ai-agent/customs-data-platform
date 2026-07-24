@@ -187,6 +187,8 @@ jobs:
             tools/run_evidence_v3_conformance_server.py \
             tools/test_only_v3_policy.py \
             tools/run_preserved_data_v2_diagnostic.py \
+            tools/run_three_law_v3_scenario_eval.py \
+            tools/scenario_eval_v3_policy.py \
             tools/build_production_context.py \
             tools/verify_evidence_v3_release.py \
             law_repository/tests/test_evidence_v3.py \
@@ -222,6 +224,8 @@ jobs:
             tools/run_evidence_v3_conformance_server.py \
             tools/test_only_v3_policy.py \
             tools/run_preserved_data_v2_diagnostic.py \
+            tools/run_three_law_v3_scenario_eval.py \
+            tools/scenario_eval_v3_policy.py \
             tools/verify_evidence_v3_release.py
           uv run --isolated --no-project --with "bandit==1.8.6" \
             bandit --quiet --recursive \
@@ -231,6 +235,8 @@ jobs:
               tools/run_evidence_v3_conformance_server.py \
               tools/test_only_v3_policy.py \
               tools/run_preserved_data_v2_diagnostic.py \
+              tools/run_three_law_v3_scenario_eval.py \
+              tools/scenario_eval_v3_policy.py \
               tools/verify_evidence_v3_release.py
 
       - name: Check provider contract drift

@@ -143,6 +143,15 @@ uv run --locked python tools/run_preserved_data_v2_diagnostic.py `
 조회하고 V3의 17개 identity header에 결박하지만, 3/58 범위·미평가 RAG
 품질·미승인 요건서류 정책을 그대로 표시하며 자동완료를 허용하지 않습니다.
 
+9개 로컬 사용자 시나리오를 같은 실제 Store에서 평가할 때는 별도
+[`preserved-3law-v3-scenario-eval`](docs/LOCAL_USER_UAT.md#preserved-3law-v3-scenario-eval-actual-store-uat)
+프로필을 사용합니다. 이 프로필은 HSK `0303540000`의 실제 Structured 결과에
+`CCCT_DOC_46E819BB87B27371`가 존재해야만 시작하며, 그 코드 하나에만 서명된
+test-only `approved=true`, `human_only` 정책을 결박합니다. 정책 모드는
+`SEALED_TEST_ONLY_ACTUAL_CCCT_HUMAN_ONLY`이고 법적 승인·Production readiness·
+자동완료 효력은 항상 없습니다. 요청별 Structured/Dense/BM25/Graph 관측치는
+원문·query·credential 없이 외부 JSONL Artifact에만 기록됩니다.
+
 3-store 통합 검증은 Docker 서비스를 기동하고 migration·ingestion을 완료한 별도 환경에서 실행합니다. 연결 실패나 미적재 상태의 skip은 Live Gate 통과가 아닙니다.
 
 ```powershell

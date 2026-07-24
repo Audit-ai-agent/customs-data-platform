@@ -76,7 +76,9 @@ files = [
   "tools/generate_evidence_v3_contracts.py",
   "tools/run_preserved_data_v2_diagnostic.py",
   "tools/run_three_law_v3_diagnostic.py",
+  "tools/run_three_law_v3_scenario_eval.py",
   "tools/run_three_law_v3_restricted_eval.py",
+  "tools/scenario_eval_v3_policy.py",
   "tools/verify_evidence_v3_release.py",
 ]
 ignore_missing_imports = true
