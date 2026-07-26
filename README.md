@@ -1,5 +1,9 @@
 # Customs Data Platform
 
+로컬 사용자 작업대에서 실제 HTTP 경계와 제한된 Data 동작을 확인하는 non-release
+프로필은 [`docs/LOCAL_USER_UAT.md`](docs/LOCAL_USER_UAT.md)에 정리한다. 이 프로필은
+Production V3 entrypoint, sealed generation, RAG 품질 Release를 대체하지 않는다.
+
 대한민국 관세 검토 서비스를 위한 Data/RAG/Knowledge DB 저장소입니다. 법령·HSK·세관장확인대상물품(CCCT)의 원장과 검색 인덱스를 관리하고, AI Agent에는 버전이 고정된 Evidence API만 제공합니다.
 
 ## 저장소 책임
@@ -47,6 +51,25 @@ readiness 503이 정상입니다. 빈 법령을 추가하거나 expected count�
 test-only conformance identity는 HTTP 상호운용만 증명하며 제품 runtime lock이나 RAG release로
 승격할 수 없습니다.
 
+## Production-candidate runtime v3
+
+`/internal/rag/v3/*`는 v2의 sealed knowledge generation을 그대로 결박하면서,
+요건서류 코드의 **존재**와 실제 서류의 **검증 완료**를 분리합니다. v3 응답은
+각 요건서류에 `presence_only`, `content_match_required`,
+`external_verification_required`, `human_only` 중 하나의 승인된 정책과 원본 hash를
+제공합니다. 매핑이 없거나 승인되지 않은 코드는 항상 `human_only`입니다.
+
+저장소의 `contracts/evidence/v3/requirement-policy.lock.json`은 의도적으로
+`unreleased`이며 승인 자료가 아닙니다. 운영 v3는 두 독립 도메인 검수자의
+Ed25519 서명, adjudication, coverage matrix, 유효기간이 결박된 정책 JSON과 별도
+reviewer trust store를 read-only로 마운트해야 합니다. reviewer store의 SHA-256은
+provider image 안의 immutable lock에 미리 고정되므로 두 mount를 함께 임의 교체해도
+readiness가 열리지 않습니다. 현재 검수자가 없고 trust lock도 `unreleased`이므로
+구현 상태는 `Production candidate`이고 자동완료
+근거로 사용할 수 없습니다. 자세한 계약은
+[Evidence v3](contracts/evidence/v3/README.md), 결정 근거는
+[ADR-0001](docs/ADR-0001-EVIDENCE-V3-REQUIREMENT-POLICY.md)을 따릅니다.
+
 ## 로컬 준비
 
 Python 3.11과 [uv](https://docs.astral.sh/uv/)를 사용합니다.
@@ -59,6 +82,9 @@ Copy-Item law_repository/.env.example law_repository/.env
 실제 API key와 DB 비밀번호는 `.env` 또는 secret manager에만 입력합니다. example 파일에는 비밀값을 넣지 않습니다.
 로컬 PostgreSQL host port 기본값은 다른 개발 stack과 충돌하지 않도록 `55432`이며,
 컨테이너 내부 포트는 계속 `5432`입니다. `.env`의 `POSTGRES_PORT`로 변경할 수 있습니다.
+로컬 Compose의 PostgreSQL·Qdrant·Neo4j published port는 모두
+`127.0.0.1`에 고정됩니다. 기본 비밀번호 또는 인증 없는 개발 store를 LAN/WAN에
+노출하기 위해 host IP를 완화해서는 안 됩니다.
 
 ## 검증
 
@@ -110,6 +136,21 @@ uv run --locked python tools/run_preserved_data_v2_diagnostic.py `
 
 이 진단의 성공 기준은 readiness `503`, retrieval POST `0`, audit의
 `release_ready=false`입니다. 이는 실제 RAG 성공이나 세 store 정합성 PASS가 아닙니다.
+
+보존된 실제 3법령·1,007조문을 현재 Agent V3와 연결하는 로컬 진단은
+[`preserved-3law-v3-diagnostic`](docs/LOCAL_USER_UAT.md#preserved-3law-v3-diagnostic-actual-store-v3)
+프로필만 사용합니다. 이 경로는 실제 PostgreSQL/Qdrant/Neo4j를 read-only로
+조회하고 V3의 17개 identity header에 결박하지만, 3/58 범위·미평가 RAG
+품질·미승인 요건서류 정책을 그대로 표시하며 자동완료를 허용하지 않습니다.
+
+9개 로컬 사용자 시나리오를 같은 실제 Store에서 평가할 때는 별도
+[`preserved-3law-v3-scenario-eval`](docs/LOCAL_USER_UAT.md#preserved-3law-v3-scenario-eval-actual-store-uat)
+프로필을 사용합니다. 이 프로필은 HSK `0303540000`의 실제 Structured 결과에
+`CCCT_DOC_46E819BB87B27371`가 존재해야만 시작하며, 그 코드 하나에만 서명된
+test-only `approved=true`, `human_only` 정책을 결박합니다. 정책 모드는
+`SEALED_TEST_ONLY_ACTUAL_CCCT_HUMAN_ONLY`이고 법적 승인·Production readiness·
+자동완료 효력은 항상 없습니다. 요청별 Structured/Dense/BM25/Graph 관측치는
+원문·query·credential 없이 외부 JSONL Artifact에만 기록됩니다.
 
 3-store 통합 검증은 Docker 서비스를 기동하고 migration·ingestion을 완료한 별도 환경에서 실행합니다. 연결 실패나 미적재 상태의 skip은 Live Gate 통과가 아닙니다.
 

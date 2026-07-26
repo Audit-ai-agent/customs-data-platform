@@ -9,6 +9,9 @@
 | Qdrant (`:6333`) | 현행 조문 검색 인덱스 — 의미검색(bge-m3 dense) + 키워드(BM25) |
 | Neo4j (`:7474`/`:7687`) | 그래프 — 조문 위임/인용, HSK→Requirement→법령/서류/기관 |
 
+위 host port는 로컬 Compose에서 모두 `127.0.0.1`에만 publish된다.
+개발 기본 credential과 인증 없는 Qdrant를 외부 interface에 노출하지 않는다.
+
 배경·설계 근거는 `docs/` (로컬 문서) 및 팀 공유 보고서 참고.
 
 ---

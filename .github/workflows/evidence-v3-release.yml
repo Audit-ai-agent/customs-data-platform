@@ -1,0 +1,246 @@
+name: Evidence v3 release provenance (read-only, fail-closed)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing annotated Evidence v3 tag to verify
+        required: true
+        type: string
+      evidence_run_id:
+        description: Successful protected producer run containing the evidence bundle
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: evidence-v3-release
+  cancel-in-progress: false
+
+jobs:
+  verify-release:
+    name: Verify complete V3 release evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: evidence-v3-production-release
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      EVIDENCE_RUN_ID: ${{ inputs.evidence_run_id }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERIFIER_REF: ${{ github.ref }}
+      VERIFIER_SHA: ${{ github.sha }}
+      VERIFIER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+      VERIFIER_WORKFLOW_REF: ${{ github.workflow_ref }}
+      PRODUCER_WORKFLOW_PATH: .github/workflows/evidence-v3-release-bundle.yml
+    steps:
+      - name: Validate dispatch and verifier identity before checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^evidence-api-v3\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]] || {
+            echo "invalid release_tag" >&2
+            exit 1
+          }
+          [[ "$EVIDENCE_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]] || {
+            echo "invalid evidence_run_id" >&2
+            exit 1
+          }
+          expected_ref="refs/tags/$RELEASE_TAG"
+          expected_workflow_ref="$GH_REPO/.github/workflows/evidence-v3-release.yml@$expected_ref"
+          [[ "$VERIFIER_REF" == "$expected_ref" ]]
+          [[ "$VERIFIER_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$VERIFIER_WORKFLOW_SHA" == "$VERIFIER_SHA" ]]
+          [[ "$VERIFIER_WORKFLOW_REF" == "$expected_workflow_ref" ]]
+
+      - name: Checkout exact verifier tag target
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Verify exact existing annotated tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$VERIFIER_SHA" ]]
+          [[ "$(git cat-file -t "refs/tags/$RELEASE_TAG")" == "tag" ]]
+          [[ "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" == "$VERIFIER_SHA" ]]
+          [[ -z "$(git status --porcelain)" ]]
+
+      - name: Verify protected producer run and artifact identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_root="$RUNNER_TEMP/evidence-v3-release"
+          mkdir -p "$evidence_root"
+          gh api "repos/$GH_REPO/actions/runs/$EVIDENCE_RUN_ID" > "$evidence_root/run.json"
+          gh api "repos/$GH_REPO/actions/runs/$EVIDENCE_RUN_ID/artifacts?per_page=100" \
+            > "$evidence_root/artifacts.json"
+          python3 - "$evidence_root/run.json" "$evidence_root/artifacts.json" \
+            "$GITHUB_ENV" "$EVIDENCE_RUN_ID" "$GH_REPO" "$RELEASE_TAG" \
+            "$VERIFIER_SHA" "$PRODUCER_WORKFLOW_PATH" <<'PY'
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          run = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          artifacts = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+          run_id = int(sys.argv[4])
+          repository = sys.argv[5]
+          release_tag = sys.argv[6]
+          source_commit = sys.argv[7]
+          producer_path = sys.argv[8]
+          required = {
+              "id", "run_attempt", "event", "status", "conclusion", "head_sha",
+              "head_branch", "path", "head_repository", "repository",
+          }
+          expected_head_ref = f"refs/tags/{release_tag}"
+          expected_workflow_ref = f"{repository}/{producer_path}@{expected_head_ref}"
+          if not required <= run.keys():
+              raise SystemExit("producer run metadata is incomplete")
+          if (
+              run["id"] != run_id
+              or run["event"] != "workflow_dispatch"
+              or run["status"] != "completed"
+              or run["conclusion"] != "success"
+              or run["path"] != producer_path
+              or run["head_sha"] != source_commit
+              or run["head_branch"] != release_tag
+              or run["head_repository"].get("full_name") != repository
+              or run["repository"].get("full_name") != repository
+              or not isinstance(run["run_attempt"], int)
+              or run["run_attempt"] < 1
+          ):
+              raise SystemExit("workflow run is not exact protected producer evidence")
+          candidates = [
+              item
+              for item in artifacts.get("artifacts", [])
+              if item.get("name") == "evidence-v3-release-bundle"
+              and item.get("workflow_run", {}).get("id") == run_id
+          ]
+          if len(candidates) != 1:
+              raise SystemExit("exactly one Evidence release bundle artifact is required")
+          artifact = candidates[0]
+          digest = artifact.get("digest")
+          if (
+              artifact.get("expired") is not False
+              or not isinstance(artifact.get("id"), int)
+              or artifact["id"] < 1
+              or not isinstance(artifact.get("size_in_bytes"), int)
+              or artifact["size_in_bytes"] < 1
+              or not isinstance(digest, str)
+              or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
+          ):
+              raise SystemExit("Evidence release artifact metadata is invalid")
+          values = {
+              "EVIDENCE_WORKFLOW_PATH": producer_path,
+              "EVIDENCE_WORKFLOW_SHA": run["head_sha"],
+              "EVIDENCE_WORKFLOW_REF": expected_workflow_ref,
+              "EVIDENCE_HEAD_REF": expected_head_ref,
+              "EVIDENCE_RUN_ATTEMPT": str(run["run_attempt"]),
+              "EVIDENCE_RUN_EVENT": run["event"],
+              "EVIDENCE_RUN_CONCLUSION": run["conclusion"],
+              "EVIDENCE_ARTIFACT_ID": str(artifact["id"]),
+              "EVIDENCE_ARTIFACT_DIGEST": digest,
+          }
+          with Path(sys.argv[3]).open("a", encoding="utf-8") as handle:
+              for key, value in values.items():
+                  if "\n" in value or "\r" in value:
+                      raise SystemExit("producer metadata contains a line break")
+                  handle.write(f"{key}={value}\n")
+          PY
+
+      - name: Download, digest-check, and safely extract immutable bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_root="$RUNNER_TEMP/evidence-v3-release"
+          archive="$evidence_root/bundle.zip"
+          bundle="$evidence_root/bundle"
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            "repos/$GH_REPO/actions/artifacts/$EVIDENCE_ARTIFACT_ID/zip" > "$archive"
+          observed="sha256:$(sha256sum "$archive" | awk '{print $1}')"
+          [[ "$observed" == "$EVIDENCE_ARTIFACT_DIGEST" ]]
+          python3 - "$archive" "$bundle" <<'PY'
+          import stat
+          import sys
+          import zipfile
+          from pathlib import Path, PurePosixPath
+
+          archive = Path(sys.argv[1])
+          target = Path(sys.argv[2])
+          target.mkdir(parents=True, exist_ok=False)
+          total = 0
+          names = set()
+          with zipfile.ZipFile(archive) as bundle:
+              for info in bundle.infolist():
+                  name = PurePosixPath(info.filename)
+                  if (
+                      name.is_absolute()
+                      or not name.parts
+                      or any(part in {"", ".", ".."} for part in name.parts)
+                      or "\\" in info.filename
+                      or info.filename in names
+                      or info.flag_bits & 0x1
+                      or stat.S_ISLNK(info.external_attr >> 16)
+                  ):
+                      raise SystemExit("release artifact archive contains an unsafe entry")
+                  names.add(info.filename)
+                  total += info.file_size
+                  if total > 1024 * 1024 * 1024:
+                      raise SystemExit("release artifact archive is too large")
+              bundle.extractall(target)
+          manifest = target / "release-provenance.json"
+          if manifest.is_symlink() or not manifest.is_file() or manifest.stat().st_size < 1:
+              raise SystemExit("release provenance manifest is absent")
+          PY
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v7
+        with:
+          version: "0.11.28"
+          enable-cache: false
+
+      - name: Verify lock and install
+        shell: bash
+        run: uv sync --locked --group dev
+
+      - name: Enforce fail-closed Production admission
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/evidence-v3-release/receipt"
+          uv run --locked python tools/verify_evidence_v3_release.py \
+            --bundle-root "$RUNNER_TEMP/evidence-v3-release/bundle" \
+            --repository-root "$GITHUB_WORKSPACE" \
+            --repository "$GH_REPO" \
+            --release-tag "$RELEASE_TAG" \
+            --workflow-path "$EVIDENCE_WORKFLOW_PATH" \
+            --workflow-sha "$EVIDENCE_WORKFLOW_SHA" \
+            --workflow-ref "$EVIDENCE_WORKFLOW_REF" \
+            --head-ref "$EVIDENCE_HEAD_REF" \
+            --workflow-run-id "$EVIDENCE_RUN_ID" \
+            --workflow-run-attempt "$EVIDENCE_RUN_ATTEMPT" \
+            --artifact-id "$EVIDENCE_ARTIFACT_ID" \
+            --artifact-digest "$EVIDENCE_ARTIFACT_DIGEST" \
+            --workflow-event "$EVIDENCE_RUN_EVENT" \
+            --workflow-conclusion "$EVIDENCE_RUN_CONCLUSION" \
+            | tee "$RUNNER_TEMP/evidence-v3-release/receipt/verification.json"
+
+      - name: Upload fail-closed verification receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: evidence-v3-release-verification-${{ github.run_id }}
+          path: ${{ runner.temp }}/evidence-v3-release/receipt/verification.json
+          if-no-files-found: warn
+          overwrite: false
+          retention-days: 90

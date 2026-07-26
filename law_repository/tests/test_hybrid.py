@@ -3,6 +3,7 @@
 rerank 모델(2.3GB)은 테스트에서 강제 다운로드하지 않는다 — 응답 규격 테스트는
 scores 를 monkeypatch 하고, 실데이터 스모크는 use_rerank=False 로 RRF 경로만 검증.
 """
+
 from datetime import date
 
 import pytest
@@ -12,6 +13,7 @@ from src.repository import Hit
 
 
 # ------------------------------------------------------------------ 순수 로직
+
 
 def test_rrf_two_arm_agreement_beats_single_arm_top():
     # pk2 는 양 arm 에서 상위 → 단일 arm 1위(pk1)보다 앞서야 한다
@@ -40,20 +42,28 @@ def test_rewrite_noop_when_no_gap_or_already_legal():
 
 # ------------------------------------------------- 응답 규격 (스토어/모델 mock)
 
+
 def _fake_hits(arm_map):
     def fake_search(query, arm="dense", limit=10, as_of=None):
         return arm_map.get(arm, [])
+
     return fake_search
 
 
 def _fake_meta(pks):
     return {
         pk: {
-            "article_pk": pk, "law_id": "001556", "law_name": "관세법",
-            "hierarchy": "법", "article_no": 22600, "paragraph_no": None,
+            "article_pk": pk,
+            "law_id": "001556",
+            "law_name": "관세법",
+            "hierarchy": "법",
+            "article_no": 22600,
+            "paragraph_no": None,
             "title": "허가ㆍ승인 등의 증명 및 확인",
-            "valid_from": date(2025, 1, 1), "valid_to": None,
-            "is_current": True, "version_mst": 999999,
+            "valid_from": date(2025, 1, 1),
+            "valid_to": None,
+            "is_current": True,
+            "version_mst": 999999,
         }
         for pk in pks
     }
@@ -65,7 +75,9 @@ def test_retrieve_shape_rerank_order_and_gap_filter(monkeypatch):
     monkeypatch.setattr(hy.repo, "search", _fake_hits({"dense": dense, "bm25": bm25}))
     monkeypatch.setattr(hy, "_article_meta", lambda pks: _fake_meta([p for p in pks if p != 3]))
     # reranker 가 RRF 순서를 뒤집도록: 뒤로 갈수록 높은 점수
-    monkeypatch.setattr(hy.rerank, "scores", lambda q, ps, **kw: [0.1 * (i + 1) for i in range(len(ps))])
+    monkeypatch.setattr(
+        hy.rerank, "scores", lambda q, ps, **kw: [0.1 * (i + 1) for i in range(len(ps))]
+    )
 
     r = hy.retrieve("세관장확인", limit=3)
     assert r["reranked"] and not r["rewritten"] and not r["low_confidence"]
@@ -74,8 +86,17 @@ def test_retrieve_shape_rerank_order_and_gap_filter(monkeypatch):
     # pk=3 은 메타 없음(스토어 불일치) → 근거에서 제외
     assert all(e["article_pk"] != 3 for e in r["evidence"])
     e0 = r["evidence"][0]
-    for field in ("evidence_id", "law_name", "article_label", "score", "rrf_score",
-                  "valid_from", "version_mst", "source_uri", "text"):
+    for field in (
+        "evidence_id",
+        "law_name",
+        "article_label",
+        "score",
+        "rrf_score",
+        "valid_from",
+        "version_mst",
+        "source_uri",
+        "text",
+    ):
         assert field in e0
     assert e0["evidence_id"].startswith("law-")
     assert e0["article_label"] == "제226조"
@@ -113,6 +134,7 @@ def test_retrieve_degrades_to_rrf_when_reranker_unavailable(monkeypatch):
 
 
 # ------------------------------------------------------------ 실데이터 스모크
+
 
 @pytest.mark.live
 def test_live_retrieve_anchor_hits_enforcement_decree_233():

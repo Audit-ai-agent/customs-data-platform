@@ -16,6 +16,7 @@ build/
 coverage.xml
 htmlcov/
 *.junit.xml
+.task*-test-evidence/
 
 # Secrets. Example templates are intentionally tracked.
 .env

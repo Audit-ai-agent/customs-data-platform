@@ -1,4 +1,5 @@
 """CCCT P0: raw row 무손실성·canonical ID·스냅샷 안정성."""
+
 from __future__ import annotations
 
 from src.ingest.ccct import build_dataset, canonical_requirement_id
@@ -50,28 +51,30 @@ def test_requirement_id_distinguishes_agency_document_and_validity():
 
 
 def test_multiple_agencies_are_not_overwritten():
-    records = [{
-        "hs": "3808929000",
-        "tpcd": "2",
-        "items": [
-            _item(
-                hsSgn="3808929000",
-                dcerCfrmLworCd="01",
-                dcerCfrmLworNm="약사법",
-                reqApreIttCd="243",
-                reqApreIttNm="한국의약품수출입협회",
-                reqCfrmIstmNm="표준통관예정보고서(의약품등)",
-            ),
-            _item(
-                hsSgn="3808929000",
-                dcerCfrmLworCd="01",
-                dcerCfrmLworNm="약사법",
-                reqApreIttCd="261",
-                reqApreIttNm="한국동물약품협회",
-                reqCfrmIstmNm="표준통관예정보고서(의약품등)",
-            ),
-        ],
-    }]
+    records = [
+        {
+            "hs": "3808929000",
+            "tpcd": "2",
+            "items": [
+                _item(
+                    hsSgn="3808929000",
+                    dcerCfrmLworCd="01",
+                    dcerCfrmLworNm="약사법",
+                    reqApreIttCd="243",
+                    reqApreIttNm="한국의약품수출입협회",
+                    reqCfrmIstmNm="표준통관예정보고서(의약품등)",
+                ),
+                _item(
+                    hsSgn="3808929000",
+                    dcerCfrmLworCd="01",
+                    dcerCfrmLworNm="약사법",
+                    reqApreIttCd="261",
+                    reqApreIttNm="한국동물약품협회",
+                    reqCfrmIstmNm="표준통관예정보고서(의약품등)",
+                ),
+            ],
+        }
+    ]
     dataset = build_dataset(records)
     assert len(dataset.source_records) == 2
     assert len(dataset.requirements) == 2
@@ -84,7 +87,9 @@ def test_snapshot_and_source_ids_are_deterministic():
     second = build_dataset(records)
     assert first.snapshot_id == second.snapshot_id
     assert first.content_hash == second.content_hash
-    assert first.source_records[0]["source_record_id"] == second.source_records[0]["source_record_id"]
+    assert (
+        first.source_records[0]["source_record_id"] == second.source_records[0]["source_record_id"]
+    )
 
 
 def test_repository_progress_file_preserves_all_14726_raw_rows():

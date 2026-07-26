@@ -1,0 +1,229 @@
+{
+  "$defs": {
+    "EvidenceRuntimeReleaseIdentity": {
+      "additionalProperties": false,
+      "description": "Exact identity returned by readiness and bound to every retrieval.",
+      "properties": {
+        "contract": {
+          "const": "evidence-runtime-release",
+          "title": "Contract",
+          "type": "string"
+        },
+        "evaluation_report_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Evaluation Report Sha256",
+          "type": "string"
+        },
+        "index_config_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Index Config Sha256",
+          "type": "string"
+        },
+        "knowledge_generation_attestation_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Knowledge Generation Attestation Sha256",
+          "type": "string"
+        },
+        "knowledge_generation_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Knowledge Generation Id",
+          "type": "string"
+        },
+        "knowledge_snapshot_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Knowledge Snapshot Id",
+          "type": "string"
+        },
+        "knowledge_source_manifest_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Knowledge Source Manifest Sha256",
+          "type": "string"
+        },
+        "model_manifest_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Model Manifest Sha256",
+          "type": "string"
+        },
+        "provider_build_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Provider Build Sha256",
+          "type": "string"
+        },
+        "provider_release": {
+          "const": "evidence-api-v1.2.0",
+          "title": "Provider Release",
+          "type": "string"
+        },
+        "provider_revision": {
+          "pattern": "^[0-9a-f]{40}$",
+          "title": "Provider Revision",
+          "type": "string"
+        },
+        "provider_source_manifest_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Provider Source Manifest Sha256",
+          "type": "string"
+        },
+        "retrieval_schema_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Retrieval Schema Sha256",
+          "type": "string"
+        },
+        "retrieval_schema_version": {
+          "const": "1.0",
+          "title": "Retrieval Schema Version",
+          "type": "string"
+        },
+        "runtime_release_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Runtime Release Sha256",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "2.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "seal_attestation_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Seal Attestation Sha256",
+          "type": "string"
+        },
+        "supported_review_as_of": {
+          "format": "date",
+          "title": "Supported Review As Of",
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract",
+        "schema_version",
+        "retrieval_schema_version",
+        "provider_release",
+        "provider_revision",
+        "provider_build_sha256",
+        "retrieval_schema_sha256",
+        "provider_source_manifest_sha256",
+        "knowledge_generation_id",
+        "knowledge_generation_attestation_sha256",
+        "knowledge_source_manifest_sha256",
+        "model_manifest_sha256",
+        "index_config_sha256",
+        "evaluation_report_sha256",
+        "seal_attestation_sha256",
+        "knowledge_snapshot_id",
+        "supported_review_as_of",
+        "runtime_release_sha256"
+      ],
+      "title": "EvidenceRuntimeReleaseIdentity",
+      "type": "object"
+    },
+    "EvidenceRuntimeReleaseIdentityV3": {
+      "additionalProperties": false,
+      "properties": {
+        "base_runtime_release": {
+          "$ref": "#/$defs/EvidenceRuntimeReleaseIdentity"
+        },
+        "contract": {
+          "const": "evidence-runtime-release",
+          "title": "Contract",
+          "type": "string"
+        },
+        "coverage_matrix_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Coverage Matrix Sha256",
+          "type": "string"
+        },
+        "readiness_schema_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Readiness Schema Sha256",
+          "type": "string"
+        },
+        "requirement_policy_approval_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Requirement Policy Approval Sha256",
+          "type": "string"
+        },
+        "requirement_policy_manifest_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Requirement Policy Manifest Sha256",
+          "type": "string"
+        },
+        "requirement_policy_release": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Requirement Policy Release",
+          "type": "string"
+        },
+        "requirement_policy_schema_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Requirement Policy Schema Sha256",
+          "type": "string"
+        },
+        "retrieval_schema_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Retrieval Schema Sha256",
+          "type": "string"
+        },
+        "retrieval_schema_version": {
+          "const": "3.0",
+          "title": "Retrieval Schema Version",
+          "type": "string"
+        },
+        "reviewer_trust_store_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Reviewer Trust Store Sha256",
+          "type": "string"
+        },
+        "runtime_release_v3_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Runtime Release V3 Sha256",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "3.0",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract",
+        "schema_version",
+        "retrieval_schema_version",
+        "base_runtime_release",
+        "retrieval_schema_sha256",
+        "readiness_schema_sha256",
+        "requirement_policy_schema_sha256",
+        "requirement_policy_release",
+        "requirement_policy_manifest_sha256",
+        "coverage_matrix_sha256",
+        "requirement_policy_approval_sha256",
+        "reviewer_trust_store_sha256",
+        "runtime_release_v3_sha256"
+      ],
+      "title": "EvidenceRuntimeReleaseIdentityV3",
+      "type": "object"
+    }
+  },
+  "$id": "https://customs-data-platform.invalid/contracts/evidence/v3/readiness_v3.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "evidence_runtime_release": {
+      "$ref": "#/$defs/EvidenceRuntimeReleaseIdentityV3"
+    },
+    "status": {
+      "const": "ready",
+      "title": "Status",
+      "type": "string"
+    }
+  },
+  "required": [
+    "status",
+    "evidence_runtime_release"
+  ],
+  "title": "EvidenceRuntimeReadinessV3",
+  "type": "object"
+}

@@ -19,6 +19,7 @@ _neo4j_hook() no-op 스텁만 둔다.
 실행: law_repository/ 에서  python -m src.sync.delta  [--since YYYYMMDD] [--dry-run]
 스케줄: 매일 1회 (pm2/작업스케줄러). 같은 날 재실행 안전(멱등).
 """
+
 from __future__ import annotations
 
 import sys
@@ -34,6 +35,7 @@ _TARGET_IDS = {t["law_id"]: t["name"] for t in TARGET_LAWS}
 
 # ---------------------------------------------------------------- 변경감지
 
+
 def fetch_changes(known: set[tuple[str, str]], since: date, until: date) -> list[dict]:
     """[since, until] 일자별 lsHstInf → 대상 법령의 '신규 MST' 목록 (시행일 오름차순)."""
     seen: dict[tuple[str, str], dict] = {}
@@ -42,8 +44,11 @@ def fetch_changes(known: set[tuple[str, str]], since: date, until: date) -> list
         page = 1
         while True:
             data = lawgo.get(
-                "lawSearch.do", target="lsHstInf",
-                regDt=day.strftime("%Y%m%d"), display=100, page=page,
+                "lawSearch.do",
+                target="lsHstInf",
+                regDt=day.strftime("%Y%m%d"),
+                display=100,
+                page=page,
             )
             ls = data.get("LawSearch", {})
             items = lawgo.as_list(ls.get("law"))
@@ -69,6 +74,7 @@ def fetch_changes(known: set[tuple[str, str]], since: date, until: date) -> list
 
 # ---------------------------------------------------------------- 버전 반영
 
+
 def _open_row(cur, law_id: str, article_no: int, paragraph_no: int | None):
     cur.execute(
         """
@@ -93,15 +99,24 @@ def _insert_row(cur, law_id: str, mst: str, row: dict, parent_pk: int | None = N
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL, false, %s)
         RETURNING id
         """,
-        (law_id, row["article_no"], row["paragraph_no"], row["title"], row["content"],
-         hashlib.sha256(row["content"].encode("utf-8")).hexdigest(),
-         mst, row["valid_from"], parent_pk),
+        (
+            law_id,
+            row["article_no"],
+            row["paragraph_no"],
+            row["title"],
+            row["content"],
+            hashlib.sha256(row["content"].encode("utf-8")).hexdigest(),
+            mst,
+            row["valid_from"],
+            parent_pk,
+        ),
     )
     return cur.fetchone()[0]
 
 
-def _reconcile_article(cur, law_id: str, mst: str, row: dict,
-                       parent_pk: int | None = None) -> tuple[int | None, str]:
+def _reconcile_article(
+    cur, law_id: str, mst: str, row: dict, parent_pk: int | None = None
+) -> tuple[int | None, str]:
     """새 버전의 조문 1건을 열린 행과 대조. 반환 (새 행 pk 또는 None, 상태)."""
     import hashlib
 
@@ -145,8 +160,13 @@ def apply_version(cur, change: dict) -> dict:
             INSERT INTO law_versions (law_id, mst, promulgation_date, enforcement_date, revision_type)
             VALUES (%s,%s,%s,%s,%s) ON CONFLICT (law_id, mst) DO NOTHING
             """,
-            (law_id, mst, datetime.strptime(change["promulgation_date"], "%Y%m%d").date(),
-             eff, "폐지"),
+            (
+                law_id,
+                mst,
+                datetime.strptime(change["promulgation_date"], "%Y%m%d").date(),
+                eff,
+                "폐지",
+            ),
         )
         _neo4j_hook(law_id, "폐지")
         return {"repealed": cur.rowcount}
@@ -194,6 +214,7 @@ def _neo4j_hook(law_id: str, revision_type: str) -> None:
 
 # ---------------------------------------------------------------- 승격
 
+
 def promote(cur, qc=None, as_of: date | None = None) -> dict:
     """유효구간 기준으로 is_current 를 as_of 시점에 맞춘다. 재실행 멱등.
 
@@ -234,6 +255,7 @@ def promote(cur, qc=None, as_of: date | None = None) -> dict:
 
 # ---------------------------------------------------------------- watermark & 실행
 
+
 def read_watermark(cur) -> date | None:
     cur.execute("SELECT last_synced_at FROM sync_state WHERE id=1")
     row = cur.fetchone()
@@ -256,8 +278,14 @@ def run(argv: list[str]) -> int:
             stream.reconfigure(errors="replace")
 
     dry = "--dry-run" in argv
-    since_arg = next((a.split("=", 1)[1] if "=" in a else argv[argv.index(a) + 1]
-                      for a in argv if a.startswith("--since")), None)
+    since_arg = next(
+        (
+            a.split("=", 1)[1] if "=" in a else argv[argv.index(a) + 1]
+            for a in argv
+            if a.startswith("--since")
+        ),
+        None,
+    )
     today = date.today()
 
     with connect() as conn, conn.cursor() as cur:
@@ -273,9 +301,15 @@ def run(argv: list[str]) -> int:
 
     print(f"[delta] 변경 폴링: {since} → {today} (대상 {len(_TARGET_IDS)}개 법령)")
     changes = fetch_changes(known, since, today)
-    print(f"[delta] 신규 버전 {len(changes)}건: "
-          + ", ".join(f"{_TARGET_IDS[c['law_id']]}@{c['mst']}(시행 {c['enforcement_date']}, {c['revision_type']})"
-                      for c in changes) if changes else "[delta] 신규 버전 없음")
+    print(
+        f"[delta] 신규 버전 {len(changes)}건: "
+        + ", ".join(
+            f"{_TARGET_IDS[c['law_id']]}@{c['mst']}(시행 {c['enforcement_date']}, {c['revision_type']})"
+            for c in changes
+        )
+        if changes
+        else "[delta] 신규 버전 없음"
+    )
     if dry:
         return 0
 

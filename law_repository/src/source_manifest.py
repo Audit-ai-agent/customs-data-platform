@@ -242,9 +242,7 @@ def load_verified_source_manifest(
                 effective_meta["enforcement_date"],
                 "%Y%m%d",
             ).date()
-            observed_article_count = sum(
-                1 + len(row.get("children", [])) for row in effective_rows
-            )
+            observed_article_count = sum(1 + len(row.get("children", [])) for row in effective_rows)
         except (KeyError, TypeError, ValueError):
             raise SourceManifestError("SOURCE_ASSET_SEMANTIC_MISMATCH") from None
 
@@ -255,8 +253,7 @@ def load_verified_source_manifest(
             or effective_meta["law_name"] != asset.law_name
             or observed_effective_date > expected_effective_date
             or observed_article_count != asset.article_count
-            or article_content_set_sha256(effective_rows)
-            != asset.article_content_set_sha256
+            or article_content_set_sha256(effective_rows) != asset.article_content_set_sha256
         ):
             raise SourceManifestError("SOURCE_ASSET_SEMANTIC_MISMATCH")
 

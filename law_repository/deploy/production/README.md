@@ -11,6 +11,26 @@ Those remain demo and contract-test boundaries. The supported entrypoint is:
 python -m src.production
 ```
 
+Runtime v2 remains the stable rollback entrypoint. The text-first Agent
+workbench uses the additive v3 production candidate only with the override:
+
+```bash
+docker compose \
+  -f compose.example.yml \
+  -f compose.v3.override.example.yml \
+  config
+```
+
+`EVIDENCE_REQUIREMENT_POLICY_RELEASE_FILE` must be an absolute path to a
+reviewed policy release mounted read-only at
+`/run/evidence-release/requirement-policy.json`.
+`EVIDENCE_TRUSTED_REVIEWERS_FILE` is a separate read-only public-key store at
+`/run/evidence-release/trusted-reviewers.json`; its canonical hash must already
+match the immutable `trusted-reviewers.lock.json` in the image. The two
+unreleased sentinels are not deployable approval and contain no production
+keys. Missing, expired, self-asserted, unknown-key, revoked-key,
+invalid-signature, or single-reviewer data keeps readiness at `503`.
+
 ## Release build
 
 Build from one reviewed, clean commit. The context builder copies a committed
@@ -43,6 +63,22 @@ Before publication, CI must:
 5. sign the image digest and attach build provenance;
 6. verify the image as UID 65532 with read-only rootfs and no Linux capabilities.
 
+The final read-only gate is `.github/workflows/evidence-v3-release.yml`. It can
+only run from an existing annotated `evidence-api-v3.*` tag and only accepts a
+bundle from `.github/workflows/evidence-v3-release-bundle.yml` at that same tag
+and source commit. It verifies the exact run attempt, artifact ID, API-reported
+SHA-256, safe archive inventory, and tagged provider bytes before invoking
+`tools/verify_evidence_v3_release.py`.
+
+Production admission is intentionally **not implemented**: the producer exits
+with `NOT_IMPLEMENTED_EXTERNAL_ATTESTATION` and emits no bundle, while the
+Production verifier always fails with the same blocker. Candidate structural
+validation has an explicit non-release status and non-zero exit. This remains
+in force until signed raw evidence, a protected producer provenance statement,
+an independently pinned release-attestor trust root, and two independent
+Ed25519 release signatures are implemented. No tag creation, push, image
+publication, deployment, generation promotion, rollback, or DB write occurs.
+
 The release manifest records the Data commit, image digest, provider build SHA,
 retrieval schema SHA, model revisions, SBOM digests, scanner results, and
 rollback image digest. A tag by itself is not a release identity.
@@ -73,7 +109,8 @@ The service rejects an untrusted proxy, duplicate forwarded protocol, or
 non-HTTPS assertion. Do not use `0.0.0.0/0`, `::/0`, a query token, the demo
 token, or provider build hashes as authentication.
 
-Every `/internal/rag/*` endpoint except `/internal/rag/v2/health/live` requires
+Every `/internal/rag/*` endpoint except the selected runtime's liveness path
+(`/internal/rag/v2/health/live` or `/internal/rag/v3/health/live`) requires
 exactly one constant-time compared `Authorization: Bearer <service-token>`.
 The token must contain 32-512 bearer-safe ASCII characters and should be a
 short-lived, randomly generated service credential delivered as a mounted
@@ -89,6 +126,12 @@ curl --fail --cacert /approved/ca.pem \
   -H "Authorization: Bearer $EVIDENCE_SERVICE_TOKEN" \
   https://evidence.example/internal/rag/v2/health/ready
 ```
+
+For v3, substitute `/internal/rag/v3` and verify the nested v2 generation
+identity plus every v3 Schema, policy, reviewer trust-store, coverage,
+verified approval, and runtime digest.
+All response binding headers must exactly equal the readiness identity before
+the Agent uses the body.
 
 Also verify the negative cases for HTTP, an invalid CA or host, and a direct
 container connection. A missing, duplicate, or wrong bearer; a query token;

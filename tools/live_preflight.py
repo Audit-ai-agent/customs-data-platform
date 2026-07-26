@@ -60,9 +60,7 @@ def _runtime_config() -> dict[str, Any]:
         },
         "credentials": {
             "law_api_oc_present": _credential_present(settings.law_api_oc),
-            "data_go_kr_service_key_present": _credential_present(
-                settings.data_go_kr_service_key
-            ),
+            "data_go_kr_service_key_present": _credential_present(settings.data_go_kr_service_key),
         },
     }
 
@@ -130,13 +128,9 @@ def build_report(
                 "port": int(port),
                 "reachable": connector(str(host), int(port), timeout_seconds),
             }
-    services_ok = not services_required or all(
-        row["reachable"] for row in service_rows.values()
-    )
+    services_ok = not services_required or all(row["reachable"] for row in service_rows.values())
 
-    credential_presence = {
-        key: bool(value) for key, value in runtime["credentials"].items()
-    }
+    credential_presence = {key: bool(value) for key, value in runtime["credentials"].items()}
     credentials_required = phase == "release"
     credentials_ok = not credentials_required or all(credential_presence.values())
 

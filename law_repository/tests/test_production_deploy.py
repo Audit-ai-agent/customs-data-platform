@@ -43,6 +43,14 @@ def _fixture_repo(tmp_path: Path) -> Path:
         "contracts/evidence/v1/rag_retrieval_v1.schema.json": "{}\n",
         "contracts/evidence/v1/readiness_v1.schema.json": "{}\n",
         "contracts/evidence/v2/readiness_v2.schema.json": "{}\n",
+        "contracts/evidence/v3/rag_retrieval_v3.schema.json": "{}\n",
+        "contracts/evidence/v3/readiness_v3.schema.json": "{}\n",
+        "contracts/evidence/v3/requirement_policy_v1.schema.json": "{}\n",
+        "contracts/evidence/v3/requirement-policy.lock.json": "{}\n",
+        "contracts/evidence/v3/trusted_reviewer_store_v1.schema.json": "{}\n",
+        "contracts/evidence/v3/trusted_reviewer_lock_v1.schema.json": "{}\n",
+        "contracts/evidence/v3/trusted-reviewers.lock.json": "{}\n",
+        "contracts/evidence/v3/release_provenance_v1.schema.json": "{}\n",
         "law_repository/src/production.py": "print('production')\n",
         "law_repository/src/provider_identity.py": "PROVIDER = 'identity'\n",
         "law_repository/tests/not-runtime.txt": "excluded\n",
@@ -77,6 +85,14 @@ def test_production_context_exports_only_committed_runtime_allowlist(
         "contracts/evidence/v1/rag_retrieval_v1.schema.json",
         "contracts/evidence/v1/readiness_v1.schema.json",
         "contracts/evidence/v2/readiness_v2.schema.json",
+        "contracts/evidence/v3/rag_retrieval_v3.schema.json",
+        "contracts/evidence/v3/readiness_v3.schema.json",
+        "contracts/evidence/v3/requirement_policy_v1.schema.json",
+        "contracts/evidence/v3/requirement-policy.lock.json",
+        "contracts/evidence/v3/trusted_reviewer_store_v1.schema.json",
+        "contracts/evidence/v3/trusted_reviewer_lock_v1.schema.json",
+        "contracts/evidence/v3/trusted-reviewers.lock.json",
+        "contracts/evidence/v3/release_provenance_v1.schema.json",
         "law_repository/src/production.py",
         "law_repository/src/provider_identity.py",
         "provider-build.json",
@@ -154,6 +170,10 @@ def test_production_dockerfile_requires_immutable_inputs_and_non_root() -> None:
     )
     lowered = dockerfile.lower()
 
+    assert dockerfile.splitlines()[0] == (
+        "# syntax=docker/dockerfile:1.7@sha256:"
+        "a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e"
+    )
     assert "arg uv_image\n" in lowered
     assert "arg python_image\n" in lowered
     assert "from ${uv_image}" in lowered
@@ -188,3 +208,24 @@ def test_production_compose_does_not_publish_ports_or_create_team_stores() -> No
     assert "neo4j:" not in lowered
     assert "change_me" not in lowered
     assert "?token=" not in lowered
+
+
+def test_v3_compose_override_requires_external_read_only_policy_release() -> None:
+    override = (
+        ROOT / "law_repository" / "deploy" / "production" / "compose.v3.override.example.yml"
+    ).read_text(encoding="utf-8")
+    lowered = override.lower()
+
+    assert 'command: ["python", "-m", "src.production_v3"]' in lowered
+    assert "evidence_requirement_policy_release_file:?" in lowered
+    assert "target: /run/evidence-release/requirement-policy.json" in lowered
+    assert "evidence_trusted_reviewers_file:?" in lowered
+    assert "target: /run/evidence-release/trusted-reviewers.json" in lowered
+    assert "read_only: true" in lowered
+    assert "release_state: approved" not in lowered
+
+
+def test_v3_entrypoint_reuses_hardened_server_runner() -> None:
+    entrypoint = (ROOT / "law_repository/src/production_v3.py").read_text(encoding="utf-8")
+    assert "run_production_server(settings, app)" in entrypoint
+    assert "uvicorn.run" not in entrypoint

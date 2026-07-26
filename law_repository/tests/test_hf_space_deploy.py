@@ -31,11 +31,19 @@ def test_hf_space_dockerfile_has_no_remote_clone_or_token_argument() -> None:
     dockerfile = (ROOT / "law_repository" / "deploy" / "hf_space" / "Dockerfile").read_text(
         encoding="utf-8"
     )
-    deploy_readme = (
-        ROOT / "law_repository" / "deploy" / "hf_space" / "README.md"
-    ).read_text(encoding="utf-8")
+    deploy_readme = (ROOT / "law_repository" / "deploy" / "hf_space" / "README.md").read_text(
+        encoding="utf-8"
+    )
     combined = f"{dockerfile}\n{deploy_readme}".lower()
 
+    assert dockerfile.splitlines()[0] == (
+        "# syntax=docker/dockerfile:1.7@sha256:"
+        "a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e"
+    )
+    assert (
+        "FROM python:3.11-slim@sha256:"
+        "db3ff2e1800a8581e2c48a27c3995339d47bdf046da21c7627accd3d51053a93" in dockerfile
+    )
     assert "vector2967" not in combined
     assert "git clone" not in combined
     assert "github_token" not in combined
@@ -80,9 +88,7 @@ def test_context_builder_exports_committed_allowlist_with_checksums(tmp_path: Pa
 
     manifest = context_builder.build_context(repo, output)
 
-    exported = {
-        path.relative_to(output).as_posix() for path in output.rglob("*") if path.is_file()
-    }
+    exported = {path.relative_to(output).as_posix() for path in output.rglob("*") if path.is_file()}
     assert exported == {
         ".dockerignore",
         "Dockerfile",
@@ -105,6 +111,7 @@ def test_context_builder_exports_committed_allowlist_with_checksums(tmp_path: Pa
     provider_build = json.loads((output / "provider-build.json").read_text(encoding="utf-8"))
     assert provider_build["provider_revision"] == _git(repo, "rev-parse", "HEAD")
     assert provider_build["provider_release"] == "evidence-api-v1.1.0"
-    assert provider_build["source_manifest_sha256"] == hashlib.sha256(
-        (output / "source-manifest.json").read_bytes()
-    ).hexdigest()
+    assert (
+        provider_build["source_manifest_sha256"]
+        == hashlib.sha256((output / "source-manifest.json").read_bytes()).hexdigest()
+    )

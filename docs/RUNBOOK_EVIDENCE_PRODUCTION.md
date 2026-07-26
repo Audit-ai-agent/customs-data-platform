@@ -2,8 +2,9 @@
 
 ## 목적과 경계
 
-이 Runbook은 `python -m src.production`으로 실행되는 Agent-to-Data Evidence
-서비스 셸만 다룬다. 법령 수집, migration, knowledge generation 승격, DB
+이 Runbook은 v2 `python -m src.production`과 승인된 요건서류 정책을 추가한 v3
+`python -m src.production_v3` Agent-to-Data Evidence 서비스 셸을 다룬다. 법령
+수집, migration, knowledge generation 승격, DB
 backup/restore는 별도 승인 작업이다. 서비스 장애를 해결하기 위해 빈 법령을
 넣거나 target 수를 낮추거나 conformance backend를 운영에서 켜지 않는다.
 
@@ -20,10 +21,36 @@ backup/restore는 별도 승인 작업이다. 서비스 장애를 해결하기 �
 - Neo4j `neo4j+s|bolt+s` endpoint와 read-only role
 - ingress certificate chain, hostname, expiry, exact proxy CIDR
 - current published knowledge generation과 세 store 일치 상태
+- v3이면 두 독립 검수자의 Ed25519 attestation, image-pinned reviewer
+  trust-store hash, adjudication, coverage matrix, 정책 manifest, 유효기간 및
+  canonical Schema hash
 
 검토되지 않은 working tree에서 image context를 만들지 않는다. context builder와
 image scanner, SBOM, signature, provenance Gate 중 하나라도 실패하면 배포하지
 않는다.
+
+### 독립 검수자 onboarding과 key custody
+
+서로 다른 `reviewer_id`와 Ed25519 공개키는 암호학적으로 서로 다른 서명자를
+표현하지만, 그것만으로 실제 서로 다른 두 사람을 증명하지는 않는다. 조직의 승인
+담당자는 trust store를 활성화하기 전에 다음 절차를 별도의 접근 통제된 기록에서
+수행한다.
+
+1. 두 검수자의 실명, 소속, 통관 도메인 역할과 해당 Release에서의 이해관계 충돌
+   여부를 각각 확인한다.
+2. 각 검수자가 자신의 개인 키를 독립적으로 생성·보관하며 다른 검수자나 운영자가
+   개인 키를 공유·복제하지 않았음을 확인한다.
+3. 공개키 fingerprint, reviewer ID, 역할 확인 증거, key-custody 확인 증거를 하나의
+   onboarding artifact로 만들고 원문 대신 그 SHA-256을 검수 기록에 남긴다.
+4. 두 onboarding artifact SHA-256과 실제 두 review artifact SHA-256을
+   adjudication artifact가 참조하게 하고, 해당 adjudication SHA-256을 정책 승인
+   subject에 결박한다.
+5. 검수자 교체, 역할 상실, key 유출·공유 의심 시 해당 키를 폐기하고 새 trust-store
+   lock과 새 2인 승인을 발행한다. 기존 ID나 key material을 별칭으로 재사용하지 않는다.
+
+이 identity-proof와 key-custody 증거가 없으면 서로 다른 공개키 두 개가 있어도 실제
+Production 승격은 `NO-GO`다. 민감한 실명·소속 원문은 저장소나 실행 artifact에 넣지
+않고 접근 통제된 원본 시스템에 보존한다.
 
 ## 정상 확인 순서
 
@@ -31,6 +58,7 @@ image scanner, SBOM, signature, provenance Gate 중 하나라도 실패하면 �
 2. TLS ingress를 통해 unauthenticated liveness가 200인지 확인한다.
 3. service credential을 사용한 readiness가 200인지 확인한다.
 4. readiness의 provider identity와 published generation을 release manifest와 비교한다.
+   v3에서는 requirement policy와 v3 Schema identity도 모두 비교한다.
 5. pinned Agent의 실제 retrieval 한 건으로 request/response build header, request ID,
    snapshot, citation metadata를 확인한다.
 6. logs/metrics에 token, header, case/item/document text가 없는지 canary 검사한다.
@@ -53,6 +81,10 @@ image scanner, SBOM, signature, provenance Gate 중 하나라도 실패하면 �
 
 401을 우회하려고 query token을 켜거나, 412를 우회하려고 build header 검증을
 제거하거나, 503을 성공으로 바꾸려고 fixture/빈 row를 넣지 않는다.
+v3의 `unreleased` 정책/신뢰 lock, 만료된 승인, 한 명의 검수자, 누락된
+adjudication, unknown/revoked key, 잘못된 서명도 같은 원칙으로 readiness 503이다.
+외부 trust-store의 canonical hash는 image source manifest에 포함된 lock과 정확히
+같아야 하며 운영자가 임의 hash나 public key를 작성해 우회할 수 없다.
 
 ## 과부하와 장애
 

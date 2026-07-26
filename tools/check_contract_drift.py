@@ -1,4 +1,4 @@
-"""Fail when Evidence v1 bodies or runtime v2 readiness drift from schemas.
+"""Fail when any Evidence runtime body/OpenAPI component drifts from schemas.
 
 The JSON Schema is the provider-owned source of truth.  This check resolves
 local references and compares every wire-relevant JSON Schema keyword while
@@ -13,16 +13,39 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from pydantic import TypeAdapter
+
 
 ROOT = Path(__file__).resolve().parents[1]
 LAW_REPOSITORY = ROOT / "law_repository"
 SCHEMA_PATH = ROOT / "contracts" / "evidence" / "v1" / "rag_retrieval_v1.schema.json"
 READINESS_SCHEMA_PATH = ROOT / "contracts" / "evidence" / "v1" / "readiness_v1.schema.json"
 RUNTIME_READINESS_SCHEMA_PATH = ROOT / "contracts" / "evidence" / "v2" / "readiness_v2.schema.json"
+V3_SCHEMA_PATH = ROOT / "contracts" / "evidence" / "v3" / "rag_retrieval_v3.schema.json"
+POLICY_SCHEMA_PATH = ROOT / "contracts" / "evidence" / "v3" / "requirement_policy_v1.schema.json"
+V3_READINESS_SCHEMA_PATH = ROOT / "contracts" / "evidence" / "v3" / "readiness_v3.schema.json"
+TRUST_STORE_SCHEMA_PATH = (
+    ROOT / "contracts" / "evidence" / "v3" / "trusted_reviewer_store_v1.schema.json"
+)
+TRUST_LOCK_SCHEMA_PATH = (
+    ROOT / "contracts" / "evidence" / "v3" / "trusted_reviewer_lock_v1.schema.json"
+)
+RELEASE_PROVENANCE_SCHEMA_PATH = (
+    ROOT / "contracts" / "evidence" / "v3" / "release_provenance_v1.schema.json"
+)
 sys.path.insert(0, str(LAW_REPOSITORY))
 
 from fastapi import FastAPI  # noqa: E402
 from src.runtime_api import configure_runtime_v2_application  # noqa: E402
+from src.runtime_api_v3 import configure_runtime_v3_application  # noqa: E402
+from src.evidence_v3 import RetrieveRequestV3, RetrieveResponseV3  # noqa: E402
+from src.requirement_policy_release import (  # noqa: E402
+    RequirementPolicyRelease,
+    TrustedReviewerStore,
+    TrustedReviewerStoreLock,
+)
+from src.runtime_release_v3 import EvidenceRuntimeReadinessV3  # noqa: E402
+from src.release_provenance_v3 import EvidenceV3ReleaseProvenance  # noqa: E402
 from src.webapp import app  # noqa: E402
 
 
@@ -44,6 +67,19 @@ RUNTIME_READINESS_COMPONENTS = {
     "EvidenceRuntimeReleaseIdentity": "EvidenceRuntimeReleaseIdentity",
     "EvidenceRuntimeReadiness": "EvidenceRuntimeReadiness",
 }
+V3_COMPONENTS = {
+    "RetrieveItem": "RetrieveItem",
+    "EvidenceError": "EvidenceError",
+    "RequirementPolicyBinding": "RequirementPolicyBinding",
+    "EvidenceV3": "EvidenceV3",
+    "ItemEvidenceResultV3": "ItemEvidenceResultV3",
+    "RetrieveRequestV3": "RetrieveRequestV3",
+    "RetrieveResponseV3": "RetrieveResponseV3",
+}
+V3_READINESS_COMPONENTS = {
+    "EvidenceRuntimeReleaseIdentity": "EvidenceRuntimeReleaseIdentity",
+    "EvidenceRuntimeReleaseIdentityV3": "EvidenceRuntimeReleaseIdentityV3",
+}
 
 
 class _SchemaOnlyRuntimeLoader:
@@ -58,6 +94,12 @@ runtime_app = configure_runtime_v2_application(
     FastAPI(title="Evidence runtime v2 schema check"),
     runtime_release_loader=_SchemaOnlyRuntimeLoader(),  # type: ignore[arg-type]
     backend_factory=lambda _lease: None,  # type: ignore[arg-type,return-value]
+    test_only_conformance=True,
+)
+runtime_v3_app = configure_runtime_v3_application(
+    FastAPI(title="Evidence runtime v3 schema check"),
+    runtime_release_loader=_SchemaOnlyRuntimeLoader(),  # type: ignore[arg-type]
+    backend_factory=lambda _lease, _deadline: None,  # type: ignore[return-value]
     test_only_conformance=True,
 )
 
@@ -157,6 +199,7 @@ def _compare_components(
 def check_contract_drift() -> list[str]:
     openapi = app.openapi()
     runtime_openapi = runtime_app.openapi()
+    runtime_v3_openapi = runtime_v3_app.openapi()
     checks = (
         (SCHEMA_PATH, COMPONENTS, openapi),
         (READINESS_SCHEMA_PATH, READINESS_COMPONENTS, openapi),
@@ -166,6 +209,8 @@ def check_contract_drift() -> list[str]:
             RUNTIME_READINESS_COMPONENTS,
             runtime_openapi,
         ),
+        (V3_SCHEMA_PATH, V3_COMPONENTS, runtime_v3_openapi),
+        (V3_READINESS_SCHEMA_PATH, V3_READINESS_COMPONENTS, runtime_v3_openapi),
     )
     errors: list[str] = []
     for path, mapping, selected_openapi in checks:
@@ -178,6 +223,33 @@ def check_contract_drift() -> list[str]:
                 component_mapping=mapping,
             )
         )
+    generated_contracts = (
+        (V3_SCHEMA_PATH, TypeAdapter(RetrieveRequestV3 | RetrieveResponseV3).json_schema()),
+        (POLICY_SCHEMA_PATH, RequirementPolicyRelease.model_json_schema()),
+        (V3_READINESS_SCHEMA_PATH, EvidenceRuntimeReadinessV3.model_json_schema()),
+        (TRUST_STORE_SCHEMA_PATH, TrustedReviewerStore.model_json_schema()),
+        (TRUST_LOCK_SCHEMA_PATH, TrustedReviewerStoreLock.model_json_schema()),
+        (RELEASE_PROVENANCE_SCHEMA_PATH, EvidenceV3ReleaseProvenance.model_json_schema()),
+    )
+    for path, generated in generated_contracts:
+        canonical = json.loads(path.read_text(encoding="utf-8"))
+        for metadata_key in ("$schema", "$id", "title"):
+            canonical.pop(metadata_key, None)
+            generated.pop(metadata_key, None)
+        if canonical != generated:
+            expected_text = json.dumps(canonical, ensure_ascii=False, indent=2, sort_keys=True)
+            actual_text = json.dumps(generated, ensure_ascii=False, indent=2, sort_keys=True)
+            errors.append(
+                "\n".join(
+                    difflib.unified_diff(
+                        expected_text.splitlines(),
+                        actual_text.splitlines(),
+                        fromfile=f"canonical:{path.name}",
+                        tofile="runtime-model",
+                        lineterm="",
+                    )
+                )
+            )
     return errors
 
 
@@ -189,7 +261,12 @@ def main() -> int:
     print(
         "Evidence contracts match OpenAPI: "
         f"{SCHEMA_PATH.relative_to(ROOT)}, {READINESS_SCHEMA_PATH.relative_to(ROOT)}, "
-        f"{RUNTIME_READINESS_SCHEMA_PATH.relative_to(ROOT)}"
+        f"{RUNTIME_READINESS_SCHEMA_PATH.relative_to(ROOT)}, "
+        f"{V3_SCHEMA_PATH.relative_to(ROOT)}, {POLICY_SCHEMA_PATH.relative_to(ROOT)}, "
+        f"{V3_READINESS_SCHEMA_PATH.relative_to(ROOT)}, "
+        f"{TRUST_STORE_SCHEMA_PATH.relative_to(ROOT)}, "
+        f"{TRUST_LOCK_SCHEMA_PATH.relative_to(ROOT)}"
+        f", {RELEASE_PROVENANCE_SCHEMA_PATH.relative_to(ROOT)}"
     )
     return 0
 

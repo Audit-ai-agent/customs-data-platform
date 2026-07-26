@@ -1,0 +1,112 @@
+{
+  "$defs": {
+    "TrustedReviewerKey": {
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {
+          "const": "ed25519",
+          "title": "Algorithm",
+          "type": "string"
+        },
+        "key_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Key Id",
+          "type": "string"
+        },
+        "public_key_hex": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Public Key Hex",
+          "type": "string"
+        },
+        "reviewer_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Reviewer Id",
+          "type": "string"
+        },
+        "revoked": {
+          "default": false,
+          "title": "Revoked",
+          "type": "boolean"
+        },
+        "role": {
+          "const": "customs_domain_reviewer",
+          "title": "Role",
+          "type": "string"
+        },
+        "valid_from": {
+          "format": "date",
+          "title": "Valid From",
+          "type": "string"
+        },
+        "valid_until": {
+          "format": "date",
+          "title": "Valid Until",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reviewer_id",
+        "key_id",
+        "role",
+        "algorithm",
+        "public_key_hex",
+        "valid_from",
+        "valid_until"
+      ],
+      "title": "TrustedReviewerKey",
+      "type": "object"
+    }
+  },
+  "$id": "https://customs-data-platform.invalid/contracts/evidence/v3/trusted_reviewer_store_v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "contract": {
+      "const": "evidence-domain-reviewer-trust-store",
+      "title": "Contract",
+      "type": "string"
+    },
+    "keys": {
+      "items": {
+        "$ref": "#/$defs/TrustedReviewerKey"
+      },
+      "maxItems": 100,
+      "minItems": 2,
+      "title": "Keys",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "trust_store_release": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Trust Store Release",
+      "type": "string"
+    },
+    "valid_from": {
+      "format": "date",
+      "title": "Valid From",
+      "type": "string"
+    },
+    "valid_until": {
+      "format": "date",
+      "title": "Valid Until",
+      "type": "string"
+    }
+  },
+  "required": [
+    "contract",
+    "schema_version",
+    "trust_store_release",
+    "valid_from",
+    "valid_until",
+    "keys"
+  ],
+  "title": "TrustedReviewerStore",
+  "type": "object"
+}

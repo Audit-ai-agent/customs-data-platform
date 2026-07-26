@@ -38,22 +38,22 @@ def build_request(case: dict[str, Any], review_as_of: str) -> dict[str, Any]:
         "jurisdiction": "KR",
         "trade_type": "import",
         "top_k": 10,
-        "items": [{
-            "item_id": "law_query_item",
-            "description": case["query"],
-            "hs_code": "7318151000",
-            "origin_country": "CN",
-            "destination_country": "KR",
-        }],
+        "items": [
+            {
+                "item_id": "law_query_item",
+                "description": case["query"],
+                "hs_code": "7318151000",
+                "origin_country": "CN",
+                "destination_country": "KR",
+            }
+        ],
         "uploaded_requirement_document_codes": [],
         "validation_issue_codes": [],
         "query_intent": "law_support",
     }
 
 
-def evaluate_hybrid_case(
-    case: dict[str, Any], response: dict[str, Any]
-) -> dict[str, Any]:
+def evaluate_hybrid_case(case: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
     contract_errors: list[str] = []
     try:
         validate_response(response)
@@ -71,8 +71,7 @@ def evaluate_hybrid_case(
         if item.get("source_type") == "law_article"
     ]
     relevant = {
-        (item["law_id"], item["article_no"]): int(item.get("gain", 1))
-        for item in case["relevant"]
+        (item["law_id"], item["article_no"]): int(item.get("gain", 1)) for item in case["relevant"]
     }
     top5 = set(ranking[:5])
     top10 = set(ranking[:10])
@@ -81,17 +80,20 @@ def evaluate_hybrid_case(
     dcg = _dcg([relevant.get(key, 0) for key in ranking[:10]])
     ideal = _dcg(sorted(relevant.values(), reverse=True)[:10])
     ndcg_at_10 = dcg / ideal if ideal else 0.0
-    citation_complete = int(bool(ranking) and all(
-        item.get("evidence_id")
-        and item.get("source_record_id")
-        and item.get("source_uri")
-        and item.get("version_hash")
-        and item.get("law_id")
-        and item.get("article_no")
-        and item.get("retrieval_methods")
-        for item in evidence
-        if item.get("source_type") == "law_article"
-    ))
+    citation_complete = int(
+        bool(ranking)
+        and all(
+            item.get("evidence_id")
+            and item.get("source_record_id")
+            and item.get("source_uri")
+            and item.get("version_hash")
+            and item.get("law_id")
+            and item.get("article_no")
+            and item.get("retrieval_methods")
+            for item in evidence
+            if item.get("source_type") == "law_article"
+        )
+    )
     passed = (
         not contract_errors
         and response.get("status") == "ok"
@@ -151,9 +153,7 @@ def summarize_hybrid(reports: Iterable[dict[str, Any]]) -> dict[str, Any]:
         "all_passed": all(item["passed"] for item in reports) and threshold_passed,
         "cases": reports,
     }
-    latencies = sorted(
-        float(item["latency_ms"]) for item in reports if "latency_ms" in item
-    )
+    latencies = sorted(float(item["latency_ms"]) for item in reports if "latency_ms" in item)
     if latencies:
         summary["latency_ms"] = {
             "min": round(latencies[0], 3),

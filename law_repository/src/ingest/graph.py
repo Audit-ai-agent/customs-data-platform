@@ -29,6 +29,7 @@ DETAILED_IN(확인법령↔조문)은 확인법령 조문 매핑 근거가 아�
 
 실행: law_repository/ 에서  python -m src.ingest.graph  [--nodes-only|--edges-only|--keep]
 """
+
 from __future__ import annotations
 
 import re
@@ -65,9 +66,7 @@ class LawRegistry:
             variants[n] = lid
             variants[re.sub(r"\s+", "", n)] = lid
         alts = sorted(variants, key=len, reverse=True)
-        self._token_pat = re.compile(
-            "(?<![가-힣])(" + "|".join(re.escape(a) for a in alts) + ")"
-        )
+        self._token_pat = re.compile("(?<![가-힣])(" + "|".join(re.escape(a) for a in alts) + ")")
         self._variants = variants
 
     def tokenize(self, body: str) -> str:
@@ -88,9 +87,7 @@ _Q = (
     r"이\s?법|같은\s?법|이\s?영|같은\s?영|이\s?규칙|같은\s?규칙|"
     r"시행규칙|시행령|[가-힣]{2,12}법|법|영|규칙"
 )
-_REF = re.compile(
-    rf"(?:§(?P<lid>\d{{6}})§\s*|(?P<q>{_Q})\s*)?제(?P<no>\d+)조(?:의(?P<b>\d+))?"
-)
+_REF = re.compile(rf"(?:§(?P<lid>\d{{6}})§\s*|(?P<q>{_Q})\s*)?제(?P<no>\d+)조(?:의(?P<b>\d+))?")
 
 
 def _resolve_qualifier(q: str | None, source_law_id: str, reg: LawRegistry) -> str | None:
@@ -170,8 +167,14 @@ def build(keep: bool = False, nodes: bool = True, edges: bool = True) -> None:
     reg = _fetch_registry()
     rows = _fetch_current_articles()
     node_rows = [
-        {"article_pk": r[0], "law_id": r[1], "law_name": r[2], "hierarchy": r[3],
-         "article_no": r[4], "title": r[5]}
+        {
+            "article_pk": r[0],
+            "law_id": r[1],
+            "law_name": r[2],
+            "hierarchy": r[3],
+            "article_no": r[4],
+            "title": r[5],
+        }
         for r in rows
     ]
     pk_by_key = {(r[1], r[4]): r[0] for r in rows}
@@ -181,8 +184,10 @@ def build(keep: bool = False, nodes: bool = True, edges: bool = True) -> None:
         with drv.session() as s:
             if not keep and nodes:
                 s.run("MATCH (a:Article) DETACH DELETE a")  # 결정적 재구축
-            s.run("CREATE CONSTRAINT article_pk IF NOT EXISTS "
-                  "FOR (a:Article) REQUIRE a.article_pk IS UNIQUE")
+            s.run(
+                "CREATE CONSTRAINT article_pk IF NOT EXISTS "
+                "FOR (a:Article) REQUIRE a.article_pk IS UNIQUE"
+            )
             if nodes:
                 for i in range(0, len(node_rows), 500):
                     s.run(_NODE_CYPHER, rows=node_rows[i : i + 500])
@@ -211,8 +216,10 @@ def build(keep: bool = False, nodes: bool = True, edges: bool = True) -> None:
                 _write_edges(s, "CITES", _dedupe(cites))
                 _write_edges(s, "DELEGATES", _dedupe(delegates))
                 _write_edges(s, "REFERS_TO", _dedupe(refers))
-                print(f"[graph] CITES {len(_dedupe(cites))} · DELEGATES {len(_dedupe(delegates))}"
-                      f" · REFERS_TO {len(_dedupe(refers))}")
+                print(
+                    f"[graph] CITES {len(_dedupe(cites))} · DELEGATES {len(_dedupe(delegates))}"
+                    f" · REFERS_TO {len(_dedupe(refers))}"
+                )
     finally:
         drv.close()
 
@@ -235,6 +242,7 @@ def _write_edges(s, rel: str, rows: list[dict]) -> None:
 
 
 # ------------------------------------------------------------ 검증
+
 
 def verify() -> None:
     drv = make_driver()
@@ -264,7 +272,7 @@ def verify() -> None:
                        t.law_name AS tl, t.article_no AS ta LIMIT 5
                 """
             ):
-                print(f"  {r['sl']} 제{r['sa']//100}조 → {r['tl']} 제{r['ta']//100}조")
+                print(f"  {r['sl']} 제{r['sa'] // 100}조 → {r['tl']} 제{r['ta'] // 100}조")
             print("\n[sample] 관세법 제226조가 위임한 하위 조문:")
             for r in s.run(
                 """
@@ -272,7 +280,7 @@ def verify() -> None:
                 RETURN t.law_name AS ln, t.article_no AS ano, t.title AS ti LIMIT 5
                 """
             ):
-                print(f"  → {r['ln']} 제{r['ano']//100}조({r['ti']})")
+                print(f"  → {r['ln']} 제{r['ano'] // 100}조({r['ti']})")
             print("[sample] 관세법 제226조가 인용한 동일법령 조문:")
             for r in s.run(
                 """
@@ -280,7 +288,7 @@ def verify() -> None:
                 RETURN t.article_no AS ano, t.title AS ti LIMIT 5
                 """
             ):
-                print(f"  → 제{r['ano']//100}조({r['ti']})")
+                print(f"  → 제{r['ano'] // 100}조({r['ti']})")
     finally:
         drv.close()
 

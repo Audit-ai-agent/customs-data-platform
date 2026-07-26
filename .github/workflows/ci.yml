@@ -169,6 +169,13 @@ jobs:
             law_repository/src/production_settings.py \
             law_repository/src/runtime_api.py \
             law_repository/src/runtime_release.py \
+            law_repository/src/evidence_v3.py \
+            law_repository/src/production_v3.py \
+            law_repository/src/requirement_policy_release.py \
+            law_repository/src/runtime_api_v3.py \
+            law_repository/src/runtime_release_v3.py \
+            law_repository/src/release_provenance_v3.py \
+            law_repository/src/production_context_inventory.py \
             law_repository/src/generation_evidence.py \
             law_repository/src/generation_runtime.py \
             law_repository/src/generation_stores.py \
@@ -176,10 +183,24 @@ jobs:
             law_repository/src/db/qdrant.py \
             law_repository/src/db/neo4j.py \
             tools/run_evidence_v2_conformance_server.py \
+            tools/generate_evidence_v3_contracts.py \
+            tools/run_evidence_v3_conformance_server.py \
+            tools/test_only_v3_policy.py \
             tools/run_preserved_data_v2_diagnostic.py \
+            tools/run_three_law_v3_scenario_eval.py \
+            tools/scenario_eval_v3_policy.py \
+            tools/build_production_context.py \
+            tools/verify_evidence_v3_release.py \
+            law_repository/tests/test_evidence_v3.py \
+            law_repository/tests/test_evidence_v3_conformance_runner.py \
+            law_repository/tests/test_requirement_policy_release.py \
+            law_repository/tests/test_runtime_v3_service.py \
+            law_repository/tests/test_production_deploy.py \
             law_repository/tests/test_runtime_deadlines.py \
             law_repository/tests/test_evidence_v2_conformance_runner.py \
-            law_repository/tests/test_preserved_data_v2_diagnostic.py
+            law_repository/tests/test_preserved_data_v2_diagnostic.py \
+            law_repository/tests/test_release_provenance_v3.py \
+            law_repository/tests/test_github_workflow_security.py
           uv run --locked mypy
 
       - name: Production service SAST
@@ -190,14 +211,33 @@ jobs:
           uv run --locked ruff check --select S,B,E,F,I,UP \
             law_repository/src/production.py \
             law_repository/src/production_settings.py \
+            law_repository/src/evidence_v3.py \
+            law_repository/src/production_v3.py \
+            law_repository/src/requirement_policy_release.py \
+            law_repository/src/runtime_api_v3.py \
+            law_repository/src/runtime_release_v3.py \
+            law_repository/src/release_provenance_v3.py \
+            law_repository/src/production_context_inventory.py \
             tools/build_production_context.py \
+            tools/generate_evidence_v3_contracts.py \
             tools/run_evidence_v2_conformance_server.py \
-            tools/run_preserved_data_v2_diagnostic.py
+            tools/run_evidence_v3_conformance_server.py \
+            tools/test_only_v3_policy.py \
+            tools/run_preserved_data_v2_diagnostic.py \
+            tools/run_three_law_v3_scenario_eval.py \
+            tools/scenario_eval_v3_policy.py \
+            tools/verify_evidence_v3_release.py
           uv run --isolated --no-project --with "bandit==1.8.6" \
             bandit --quiet --recursive \
               law_repository/src \
+              tools/generate_evidence_v3_contracts.py \
               tools/run_evidence_v2_conformance_server.py \
-              tools/run_preserved_data_v2_diagnostic.py
+              tools/run_evidence_v3_conformance_server.py \
+              tools/test_only_v3_policy.py \
+              tools/run_preserved_data_v2_diagnostic.py \
+              tools/run_three_law_v3_scenario_eval.py \
+              tools/scenario_eval_v3_policy.py \
+              tools/verify_evidence_v3_release.py
 
       - name: Check provider contract drift
         id: contract_drift

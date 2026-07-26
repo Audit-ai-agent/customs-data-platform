@@ -131,9 +131,15 @@ class ReadyTestOnlyV2ConformanceBackend:
         *,
         snapshot_id: str,
         supported_review_as_of: date,
+        no_requirement_hsk10: str | None = None,
     ) -> None:
+        if no_requirement_hsk10 is not None and (
+            len(no_requirement_hsk10) != 10 or not no_requirement_hsk10.isdigit()
+        ):
+            raise ValueError("no-requirement HSK must be exactly ten digits")
         self.snapshot_id = snapshot_id
         self.supported_review_as_of = supported_review_as_of
+        self.no_requirement_hsk10 = no_requirement_hsk10
 
     def validate_ready(self) -> None:
         if not self.snapshot_id.startswith("test-only-conformance.no-rag-quality."):
@@ -166,6 +172,17 @@ class ReadyTestOnlyV2ConformanceBackend:
     ) -> RequirementLookup:
         if snapshot_id != self.snapshot_id:
             raise ValueError("test-only conformance snapshot mismatch")
+        if (
+            self.no_requirement_hsk10 is not None
+            and hsk10 == self.no_requirement_hsk10
+            and trade_type == "import"
+            and as_of == self.supported_review_as_of
+        ):
+            # A covered query with an empty requirement set is different from
+            # an uncovered query.  LOCAL UAT uses this explicit positive
+            # control to exercise a genuinely clean business path without
+            # pretending that a synthetic issuer is production-trusted.
+            return RequirementLookup(True, ())
         if hsk10 != "0303540000" or trade_type != "import" or as_of != self.supported_review_as_of:
             return RequirementLookup(False, ())
         return RequirementLookup(
@@ -202,7 +219,45 @@ class ReadyTestOnlyV2ConformanceBackend:
         top_k: int,
         as_of: date,
     ) -> tuple[LawArticleMatch, ...]:
-        del query, top_k, as_of
+        if (
+            self.no_requirement_hsk10 is not None
+            and f"HSK {self.no_requirement_hsk10}" in query
+            and top_k >= 1
+            and as_of == self.supported_review_as_of
+        ):
+            # LOCAL USER UAT must distinguish "covered and no requirement"
+            # from "no citable Evidence".  This immutable synthetic HSK
+            # support is deliberately non-finding and cannot prove legal or
+            # Production coverage; it only binds the positive-control result
+            # to one citable, source-versioned diagnostic record.
+            return (
+                LawArticleMatch(
+                    row={
+                        "article_pk": 7318151000,
+                        "law_id": "test-only-local-uat",
+                        "law_name": "LOCAL UAT 합성 HSK 근거",
+                        "hierarchy": "진단",
+                        "article_no": 100,
+                        "paragraph_no": None,
+                        "item_no": None,
+                        "title": "무요건 Positive Control",
+                        "content": (
+                            "이 합성 기록은 LOCAL USER UAT의 계약 경로만 검증하며 "
+                            "실제 법령 또는 무요건 법률 판단이 아니다."
+                        ),
+                        "content_hash": _domain_sha256(
+                            b"local-user-uat-law-support",
+                            self.snapshot_id.encode("ascii"),
+                        ),
+                        "version_mst": "local-user-uat-v1",
+                        "valid_from": self.supported_review_as_of,
+                        "valid_to": None,
+                    },
+                    retrieval_methods=("bm25",),
+                    score=1.0,
+                    raw_scores={"bm25": 1.0},
+                ),
+            )
         return ()
 
 
@@ -369,10 +424,23 @@ def _domain_sha256(label: bytes, payload: bytes) -> str:
 
 def derive_test_only_runtime_lease(
     provider_lock: VerifiedProviderRuntimeLock,
+    *,
+    diagnostic_profile: str = "wire-conformance",
 ) -> GenerationRequestLease:
     """Derive a stable, unmistakably non-release Evidence runtime identity."""
 
-    lock_bytes = canonical_json_bytes(provider_lock.as_dict())
+    if (
+        not diagnostic_profile
+        or len(diagnostic_profile) > 64
+        or any(
+            character not in "abcdefghijklmnopqrstuvwxyz0123456789-"
+            for character in diagnostic_profile
+        )
+    ):
+        raise TestOnlyConformanceConfigurationError("diagnostic profile identifier is invalid")
+    lock_bytes = (
+        canonical_json_bytes(provider_lock.as_dict()) + b"\0" + diagnostic_profile.encode("ascii")
+    )
     snapshot_suffix = _domain_sha256(b"snapshot", lock_bytes)[:24]
     payload: dict[str, Any] = {
         "contract": "evidence-runtime-release",

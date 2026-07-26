@@ -11,53 +11,131 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: data-platform-live-integration
+  cancel-in-progress: false
+
 jobs:
   live-three-store:
-    # 법제처 접근이 가능한 한국 IP의 격리된 self-hosted runner에서만 수동 실행한다.
-    runs-on: self-hosted
+    # Only a dedicated, ephemeral Korean-IP runner may be assigned this label.
+    runs-on: [self-hosted, customs-data-live-ephemeral]
     timeout-minutes: 90
+    environment: data-platform-live-integration
     env:
-      POSTGRES_HOST: localhost
-      POSTGRES_PORT: "5432"
-      POSTGRES_DB: trade_doc
-      POSTGRES_USER: trade
-      POSTGRES_PASSWORD: ${{ secrets.LIVE_POSTGRES_PASSWORD }}
-      QDRANT_URL: http://localhost:6333
-      QDRANT_API_KEY: ""
-      NEO4J_URI: bolt://localhost:7687
-      NEO4J_USER: neo4j
-      NEO4J_PASSWORD: ${{ secrets.LIVE_NEO4J_PASSWORD }}
-      LAW_API_OC: ${{ secrets.LAW_API_OC }}
-      DATA_GO_KR_SERVICE_KEY: ${{ secrets.DATA_GO_KR_SERVICE_KEY }}
+      DELTA_SINCE: ${{ inputs.delta_since }}
+      SOURCE_REF: ${{ github.ref }}
+      SOURCE_SHA: ${{ github.sha }}
+      SOURCE_WORKFLOW_SHA: ${{ github.workflow_sha }}
+      COMPOSE_PROJECT_NAME: tda-live-${{ github.run_id }}-${{ github.run_attempt }}
+      LIVE_COMPOSE_FILE: law_repository/docker-compose.live-ci.yml
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - name: Validate protected main and dispatch value before checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_OS" == "Linux" ]]
+          [[ "$RUNNER_ARCH" == "X64" ]]
+          [[ "$SOURCE_REF" == "refs/heads/main" ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SOURCE_WORKFLOW_SHA" == "$SOURCE_SHA" ]]
+          [[ "$DELTA_SINCE" =~ ^[0-9]{8}$ ]]
+          python3 - "$DELTA_SINCE" <<'PY'
+          from datetime import datetime
+          import sys
+
+          parsed = datetime.strptime(sys.argv[1], "%Y%m%d")
+          if parsed.strftime("%Y%m%d") != sys.argv[1]:
+              raise SystemExit("delta_since is not a canonical calendar date")
+          PY
+
+      - name: Checkout exact protected main commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify immutable source checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+          [[ -z "$(git status --porcelain)" ]]
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v7
         with:
           version: "0.11.28"
           enable-cache: true
+
       - name: Install locked environment
         run: uv sync --locked --group dev
-      - name: Start isolated knowledge stores
-        run: docker compose -f law_repository/docker-compose.yml up -d --wait
-      - name: Build the complete live knowledge snapshot
+
+      - name: Start run-scoped ephemeral knowledge stores
+        shell: bash
+        run: |
+          set -euo pipefail
+          postgres_password="$(openssl rand -hex 24)"
+          neo4j_password="$(openssl rand -hex 24)"
+          echo "::add-mask::$postgres_password"
+          echo "::add-mask::$neo4j_password"
+          {
+            echo "POSTGRES_PASSWORD=$postgres_password"
+            echo "NEO4J_PASSWORD=$neo4j_password"
+          } >> "$GITHUB_ENV"
+          export POSTGRES_PASSWORD="$postgres_password"
+          export NEO4J_PASSWORD="$neo4j_password"
+          docker compose --project-name "$COMPOSE_PROJECT_NAME" \
+            --file "$LIVE_COMPOSE_FILE" up --detach --wait
+          postgres_binding="$(docker compose --project-name "$COMPOSE_PROJECT_NAME" \
+            --file "$LIVE_COMPOSE_FILE" port postgres 5432)"
+          qdrant_binding="$(docker compose --project-name "$COMPOSE_PROJECT_NAME" \
+            --file "$LIVE_COMPOSE_FILE" port qdrant 6333)"
+          neo4j_binding="$(docker compose --project-name "$COMPOSE_PROJECT_NAME" \
+            --file "$LIVE_COMPOSE_FILE" port neo4j 7687)"
+          {
+            echo "POSTGRES_HOST=127.0.0.1"
+            echo "POSTGRES_PORT=${postgres_binding##*:}"
+            echo "POSTGRES_DB=trade_doc"
+            echo "POSTGRES_USER=trade"
+            echo "QDRANT_URL=http://127.0.0.1:${qdrant_binding##*:}"
+            echo "QDRANT_API_KEY="
+            echo "NEO4J_URI=bolt://127.0.0.1:${neo4j_binding##*:}"
+            echo "NEO4J_USER=neo4j"
+          } >> "$GITHUB_ENV"
+
+      - name: Build complete live knowledge snapshot
         working-directory: law_repository
+        env:
+          LAW_API_OC: ${{ secrets.LAW_API_OC }}
+          DATA_GO_KR_SERVICE_KEY: ${{ secrets.DATA_GO_KR_SERVICE_KEY }}
         run: |
           uv run --locked python scripts/migrate.py
           uv run --locked python -m src.ingest.hsk
           uv run --locked python -m src.ingest.laws
           uv run --locked python -m src.ingest.ccct --load-only
           uv run --locked python -m src.ingest.graph
-          uv run --locked python -m src.sync.delta --since "${{ inputs.delta_since }}"
+          uv run --locked python -m src.sync.delta --since "$DELTA_SINCE"
+
       - name: Run live suite and reject every skip
         working-directory: law_repository
         run: uv run --locked pytest -q --junitxml=../live.junit.xml tests
+
       - name: Enforce Live Gate semantics
         run: uv run --locked python tools/assert_no_skips.py live.junit.xml
-      - uses: actions/upload-artifact@v4
+
+      - name: Upload exact-run result
         if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: data-platform-live-junit
+          name: data-platform-live-junit-${{ github.run_id }}-${{ github.run_attempt }}
           path: live.junit.xml
-      - name: Remove isolated stores
+          if-no-files-found: warn
+          overwrite: false
+
+      - name: Remove only this run's ephemeral containers and network
         if: always()
-        run: docker compose -f law_repository/docker-compose.yml down -v
+        shell: bash
+        run: |
+          docker compose --project-name "$COMPOSE_PROJECT_NAME" \
+            --file "$LIVE_COMPOSE_FILE" down --remove-orphans --timeout 30
