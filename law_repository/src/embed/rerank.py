@@ -12,6 +12,8 @@ FlagEmbedding 의 FlagReranker 는 transformers 5.x 에서 깨진다
 
 from __future__ import annotations
 
+import math
+
 from src.embed.model_identity import RERANK_MODEL
 
 MODEL = RERANK_MODEL.model_id
@@ -21,6 +23,10 @@ _BATCH = 4  # CPU 메모리 상한 (568M 파라미터 × max_length 토큰)
 _tok = None
 _model = None
 _failed = False
+
+
+class RerankUnavailable(RuntimeError):
+    """The pinned reranker cannot produce a complete, bounded score batch."""
 
 
 def _get():
@@ -81,3 +87,34 @@ def scores(query: str, passages: list[str], max_length: int = 1024) -> list[floa
         print(f"[rerank] 추론 실패 — RRF 순위로 degrade: {e}")
         _failed = True
         return None
+
+
+def required_scores(query: str, passages: list[str], max_length: int = 1024) -> list[float]:
+    """Return validated scores or fail closed.
+
+    The general-purpose hybrid explorer may still use :func:`scores` and its
+    documented RRF fallback.  Runtime profiles that attest BGE reranking as a
+    required retrieval stage use this strict boundary instead, so a missing
+    model or malformed inference result cannot be presented as a successful
+    reranked search.
+    """
+
+    result = scores(query, passages, max_length=max_length)
+    if result is None:
+        raise RerankUnavailable("pinned reranker is unavailable")
+    if len(result) != len(passages):
+        raise RerankUnavailable("pinned reranker returned an incomplete score batch")
+    normalized = [float(value) for value in result]
+    if any(not math.isfinite(value) or not 0.0 <= value <= 1.0 for value in normalized):
+        raise RerankUnavailable("pinned reranker returned an invalid score")
+    return normalized
+
+
+__all__ = [
+    "MODEL",
+    "MODEL_REVISION",
+    "RerankUnavailable",
+    "available",
+    "required_scores",
+    "scores",
+]

@@ -158,6 +158,8 @@ passes and all of these additional facts are true:
   `CCCT_DOC_46E819BB87B27371`;
 - a second complete three-store observation after that lookup equals the
   first observation;
+- the pinned `BAAI/bge-reranker-v2-m3` revision is available from the local
+  cache and passes model readiness; no lexical-only fallback is accepted;
 - the signed UAT fixture contains exactly that one document-code policy;
 - that binding is `approved=true` and `verification_policy=human_only`;
 - all generated outputs are new files outside both the Data checkout and the
@@ -220,20 +222,22 @@ hashes. Missing or mismatched identity headers return `412`; timeout, policy
 drift, or Store drift fails closed and never selects a synthetic backend.
 
 The trace output is an append-only
-`three-law-evidence-v3-scenario-eval-trace/v1` JSONL stream. One row per V3
+`three-law-evidence-v3-scenario-eval-trace/v2` JSONL stream. One row per V3
 retrieval request contains only:
 
 - caller request ID and HTTP status;
 - fixed profile/scope/data-source/policy-mode values;
 - knowledge snapshot and safe provider/policy identity hashes;
-- Structured, Dense, BM25, and Graph attempted/succeeded flags, aggregate
+- Structured, Dense, BM25, BGE rerank, and Graph attempted/succeeded flags, aggregate
   result counts, Top-K inclusion counts, and elapsed milliseconds.
 
 It never stores a query, request/response body, document text, HSK input,
 source text, token, credential, service location, or raw provider response.
 `graph.succeeded=true` means the graph execution path completed;
 `graph.top_k_result_count>0` separately proves Graph Evidence survived into
-the returned Top-K.
+the returned Top-K. `rerank.succeeded=true` means the pinned BGE cross-encoder
+returned a complete valid score batch; every returned law article also carries
+that score under `raw_scores.reranker` without changing the Evidence V3 wire.
 
 Every readiness and retrieval performs a full state observation before use
 and another equality check before accepting the result. PostgreSQL

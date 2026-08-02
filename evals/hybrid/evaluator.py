@@ -12,6 +12,9 @@ from evals.contract import ContractViolation, validate_response
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_HYBRID_GOLD = ROOT / "evals" / "hybrid" / "fixtures" / "hybrid_law_gold.json"
+SCENARIO_EVAL_HYBRID_GOLD = (
+    ROOT / "evals" / "hybrid" / "fixtures" / "scenario_eval_law_gold.json"
+)
 
 
 def load_hybrid_gold(path: Path | str = DEFAULT_HYBRID_GOLD) -> list[dict[str, Any]]:
@@ -25,6 +28,12 @@ def load_hybrid_gold(path: Path | str = DEFAULT_HYBRID_GOLD) -> list[dict[str, A
         if not record["relevant"]:
             raise ValueError("every hybrid gold case needs at least one relevant article")
     return records
+
+
+def load_scenario_eval_hybrid_gold() -> list[dict[str, Any]]:
+    """Load additive, narrow UAT ranking controls without changing the original five."""
+
+    return load_hybrid_gold(SCENARIO_EVAL_HYBRID_GOLD)
 
 
 def build_request(case: dict[str, Any], review_as_of: str) -> dict[str, Any]:
@@ -75,6 +84,10 @@ def evaluate_hybrid_case(case: dict[str, Any], response: dict[str, Any]) -> dict
     }
     top5 = set(ranking[:5])
     top10 = set(ranking[:10])
+    forbidden_top3 = {
+        (item["law_id"], item["article_no"]) for item in case.get("forbidden_top3", [])
+    }
+    forbidden_top3_hits = set(ranking[:3]) & forbidden_top3
     hit_at_5 = int(bool(top5 & relevant.keys()))
     recall_at_10 = len(top10 & relevant.keys()) / len(relevant)
     dcg = _dcg([relevant.get(key, 0) for key in ranking[:10]])
@@ -102,6 +115,7 @@ def evaluate_hybrid_case(case: dict[str, Any], response: dict[str, Any]) -> dict
         and hit_at_5 == 1
         and recall_at_10 == 1.0
         and citation_complete == 1
+        and not forbidden_top3_hits
     )
     return {
         "case_id": case["case_id"],
@@ -110,6 +124,9 @@ def evaluate_hybrid_case(case: dict[str, Any], response: dict[str, Any]) -> dict
         "contract_errors": contract_errors,
         "ranking": [f"{law_id}:{article_no}" for law_id, article_no in ranking[:10]],
         "relevant": [f"{law_id}:{article_no}" for law_id, article_no in relevant],
+        "forbidden_top3_hits": [
+            f"{law_id}:{article_no}" for law_id, article_no in sorted(forbidden_top3_hits)
+        ],
         "metrics": {
             "contract_valid": int(not contract_errors),
             "hit_at_5": hit_at_5,
