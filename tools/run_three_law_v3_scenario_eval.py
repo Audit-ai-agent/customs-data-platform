@@ -90,7 +90,11 @@ SCENARIO_EVAL_TRADE_TYPE = "import"
 SCENARIO_EVAL_READINESS_PATH = "/internal/rag/v3/health/scenario-eval-ready"
 _MANIFEST_SCHEMA_VERSION = "three-law-evidence-v3-scenario-eval/v1"
 _TRACE_SCHEMA_VERSION = "three-law-evidence-v3-scenario-eval-trace/v2"
-_SCENARIO_EVAL_REQUEST_DEADLINE_SECONDS = 240.0
+# Local CPU inference needs enough room to finish the required BGE rerank and
+# the fail-closed store observation that binds the response.  This does not
+# change the candidate set or ranking policy; it only prevents a completed
+# retrieval from being discarded at the response boundary.
+_SCENARIO_EVAL_REQUEST_DEADLINE_SECONDS = 270.0
 _REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _TRACE_CONTEXT: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "three_law_scenario_eval_trace_context",
