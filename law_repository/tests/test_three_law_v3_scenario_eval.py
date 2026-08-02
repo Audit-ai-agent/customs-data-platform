@@ -533,6 +533,12 @@ def test_scenario_eval_reranker_failure_is_not_lexically_degraded() -> None:
     with pytest.raises(runner.ThreeLawV3ScenarioEvalError, match="reranker is unavailable"):
         runner._require_reranker_ready(lambda: False)
 
+    runner._warm_reranker(lambda _query, passages: [0.5 for _passage in passages])
+
+
+def test_scenario_eval_uses_a_reranker_aware_request_deadline() -> None:
+    assert runner._SCENARIO_EVAL_REQUEST_DEADLINE_SECONDS == 240.0
+
 
 def test_policy_is_exact_code_only_and_distinct_from_existing_diagnostic() -> None:
     scenario = build_scenario_eval_policy_fixture(

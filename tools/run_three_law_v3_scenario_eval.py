@@ -90,6 +90,7 @@ SCENARIO_EVAL_TRADE_TYPE = "import"
 SCENARIO_EVAL_READINESS_PATH = "/internal/rag/v3/health/scenario-eval-ready"
 _MANIFEST_SCHEMA_VERSION = "three-law-evidence-v3-scenario-eval/v1"
 _TRACE_SCHEMA_VERSION = "three-law-evidence-v3-scenario-eval-trace/v2"
+_SCENARIO_EVAL_REQUEST_DEADLINE_SECONDS = 240.0
 _REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _TRACE_CONTEXT: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "three_law_scenario_eval_trace_context",
@@ -112,6 +113,18 @@ def _require_reranker_ready(checker: Callable[[], bool]) -> None:
         raise ThreeLawV3ScenarioEvalError("scenario-eval reranker is unavailable") from exc
     if ready is not True:
         raise ThreeLawV3ScenarioEvalError("scenario-eval reranker is unavailable")
+
+
+def _warm_reranker(scorer: Callable[[str, list[str]], list[float]]) -> None:
+    """Prove one real inference before the request deadline starts."""
+
+    values = _validated_rerank_scores(
+        scorer,
+        "통관 요건",
+        ["통관 요건과 관련된 법령 근거"],
+    )
+    if len(values) != 1:
+        raise ThreeLawV3ScenarioEvalError("scenario-eval reranker warm-up is incomplete")
 
 
 def _validated_rerank_scores(
@@ -1083,6 +1096,7 @@ def create_three_law_v3_scenario_eval_application(
                 )
                 created_model_supervisor = True
             _require_reranker_ready(selected_reranker_readiness)
+            _warm_reranker(selected_rerank_scorer)
 
             def selected_database_backend_factory(
                 observation: v2.ThreeLawObservation,
@@ -1175,7 +1189,7 @@ def create_three_law_v3_scenario_eval_application(
             bind_host=host,
             port=port,
             max_concurrency=1,
-            request_deadline_seconds=v2.DIAGNOSTIC_SERVICE_REQUEST_DEADLINE_SECONDS,
+            request_deadline_seconds=_SCENARIO_EVAL_REQUEST_DEADLINE_SECONDS,
             store_operation_timeout_seconds=20,
             store_termination_timeout_seconds=0.5,
             model_inference_timeout_seconds=20,
