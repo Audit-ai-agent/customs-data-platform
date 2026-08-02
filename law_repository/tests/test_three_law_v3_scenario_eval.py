@@ -516,9 +516,10 @@ def test_required_reranker_reorders_rrf_candidates_and_scores_graph_results() ->
     matches = SearchBackend().search_law_articles("submission correction", 3, _AS_OF)
 
     assert [match.row["article_pk"] for match in matches] == [2, 3, 1]
-    assert matches[0].raw_scores["reranker"] == 0.95
+    assert matches[0].score == 0.95
     assert matches[1].retrieval_methods == ("graph",)
-    assert matches[1].raw_scores["reranker"] == 0.8
+    assert matches[1].score == 0.8
+    assert all("reranker" not in match.raw_scores for match in matches)
     assert all(0.0 <= match.score <= 1.0 for match in matches)
 
 

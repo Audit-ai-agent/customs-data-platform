@@ -587,18 +587,16 @@ class ScenarioEvalDatabaseBackend(v2.ThreeLawDiagnosticDatabaseBackend):
         )
         initial_pool = rrf_order[:pool_size]
         candidates = {article_pk: candidates[article_pk] for article_pk in initial_pool}
-        initial_scores = self._rerank(
+        reranker_scores = self._rerank(
             query,
             initial_pool,
             [texts[article_pk] for article_pk in initial_pool],
         )
-        for article_pk, score in initial_scores.items():
-            candidates[article_pk]["raw"]["reranker"] = score
 
         seeds = sorted(
             initial_pool,
             key=lambda article_pk: (
-                -initial_scores[article_pk],
+                -reranker_scores[article_pk],
                 -float(candidates[article_pk]["rrf"]),
                 article_pk,
             ),
@@ -632,15 +630,14 @@ class ScenarioEvalDatabaseBackend(v2.ThreeLawDiagnosticDatabaseBackend):
                 "retrieval candidate is absent from the attested PostgreSQL snapshot"
             )
 
-        graph_only = [article_pk for article_pk in candidates if article_pk not in initial_scores]
+        graph_only = [article_pk for article_pk in candidates if article_pk not in reranker_scores]
         if graph_only:
             graph_scores = self._rerank(
                 query,
                 graph_only,
                 [str(rows[article_pk]["content"]) for article_pk in graph_only],
             )
-            for article_pk, score in graph_scores.items():
-                candidates[article_pk]["raw"]["reranker"] = score
+            reranker_scores.update(graph_scores)
 
         query_tokens = set(re.findall(r"[0-9A-Za-z가-힣]{2,}", query.lower()))
         matches: list[LawArticleMatch] = []
@@ -650,7 +647,7 @@ class ScenarioEvalDatabaseBackend(v2.ThreeLawDiagnosticDatabaseBackend):
                 re.findall(r"[0-9A-Za-z가-힣]{2,}", str(row["content"]).lower())
             )
             lexical = len(query_tokens & text_tokens) / len(query_tokens) if query_tokens else 0.0
-            reranker_score = float(candidate["raw"]["reranker"])
+            reranker_score = float(reranker_scores[article_pk])
             methods = cast(
                 tuple[Literal["dense", "bm25", "graph"], ...],
                 tuple(
