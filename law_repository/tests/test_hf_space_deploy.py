@@ -5,6 +5,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 
@@ -15,6 +16,39 @@ assert SPEC and SPEC.loader
 context_builder = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = context_builder
 SPEC.loader.exec_module(context_builder)
+
+
+def test_root_dependency_profiles_are_single_source_and_cpu_bounded() -> None:
+    with (ROOT / "pyproject.toml").open("rb") as stream:
+        configuration = tomllib.load(stream)
+
+    assert configuration["project"]["dependencies"] == [
+        "cryptography>=48.0.1,<49",
+        "fastapi>=0.115",
+        "neo4j>=5.24",
+        "psycopg[binary]>=3.2",
+        "pydantic-settings>=2.5",
+        "qdrant-client>=1.15,<1.17",
+        "uvicorn>=0.30",
+    ]
+    assert configuration["project"]["optional-dependencies"] == {
+        "rag": ["FlagEmbedding>=1.3", "numpy>=1.26,<3", "torch>=2.0"],
+        "ingestion": [
+            "openpyxl>=3.1",
+            "pandas>=2.2",
+            "requests>=2.32",
+            "xmltodict>=0.13",
+        ],
+    }
+    assert configuration["dependency-groups"]["dev"] == [
+        "mypy==1.17.1",
+        "pytest>=8.3",
+        "ruff>=0.12",
+    ]
+    assert configuration["tool"]["uv"]["sources"]["torch"] == [
+        {"index": "pytorch-cpu", "marker": "sys_platform == 'linux'"}
+    ]
+    assert not (ROOT / "law_repository" / "requirements.txt").exists()
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -44,11 +78,18 @@ def test_hf_space_dockerfile_has_no_remote_clone_or_token_argument() -> None:
         "FROM python:3.11-slim@sha256:"
         "db3ff2e1800a8581e2c48a27c3995339d47bdf046da21c7627accd3d51053a93" in dockerfile
     )
+    assert (
+        "FROM ghcr.io/astral-sh/uv:0.11.28@sha256:"
+        "0f36cb9361a3346885ca3677e3767016687b5a170c1a6b88465ec14aefec90aa"
+        " AS uv_binary" in dockerfile
+    )
     assert "vector2967" not in combined
     assert "git clone" not in combined
     assert "github_token" not in combined
     assert "github_pat" not in combined
-    assert "copy law_repository/requirements.txt" in dockerfile.lower()
+    assert "copy pyproject.toml uv.lock" in dockerfile.lower()
+    assert "uv sync --locked --no-dev --extra rag --no-install-project" in dockerfile.lower()
+    assert "--extra ingestion" not in dockerfile.lower()
     assert "copy . /app" in dockerfile.lower()
     assert "workdir /app/law_repository" in dockerfile.lower()
 
@@ -68,7 +109,12 @@ def test_context_builder_exports_committed_allowlist_with_checksums(tmp_path: Pa
         ".dockerignore": "**/.env*\n",
         "law_repository/deploy/hf_space/Dockerfile": "COPY law_repository/src ./src\n",
         "law_repository/deploy/hf_space/README.md": "private space\n",
-        "law_repository/requirements.txt": "fastapi==1\n",
+        "pyproject.toml": (
+            "[project]\nname='fixture'\nversion='1.0.0'\n"
+            "requires-python='==3.11.*'\ndependencies=['fastapi==1','neo4j==1']\n"
+            "[project.optional-dependencies]\nrag=['numpy==1']\n"
+        ),
+        "uv.lock": "version = 1\nrevision = 3\nrequires-python = '==3.11.*'\n",
         "contracts/evidence/v1/rag_retrieval_v1.schema.json": "{}\n",
         "contracts/evidence/v1/readiness_v1.schema.json": "{}\n",
         "law_repository/src/webapp.py": "print('ready')\n",
@@ -97,9 +143,10 @@ def test_context_builder_exports_committed_allowlist_with_checksums(tmp_path: Pa
         "contracts/evidence/v1/readiness_v1.schema.json",
         "provider-build.json",
         "source-manifest.json",
-        "law_repository/requirements.txt",
         "law_repository/src/webapp.py",
         "law_repository/src/webui.html",
+        "pyproject.toml",
+        "uv.lock",
     }
     assert manifest["source_commit"] == _git(repo, "rev-parse", "HEAD")
     recorded = {item["path"]: item["sha256"] for item in manifest["files"]}

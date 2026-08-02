@@ -1,17 +1,26 @@
 # syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 # HF Spaces (Docker Space) 용 — 관세법령 저장소 웹 데모
 # Build context는 tools/build_hf_space_context.py가 committed source로 생성한 allowlist bundle이다.
-FROM python:3.11-slim@sha256:db3ff2e1800a8581e2c48a27c3995339d47bdf046da21c7627accd3d51053a93
+FROM ghcr.io/astral-sh/uv:0.11.28@sha256:0f36cb9361a3346885ca3677e3767016687b5a170c1a6b88465ec14aefec90aa AS uv_binary
+FROM python:3.11-slim@sha256:db3ff2e1800a8581e2c48a27c3995339d47bdf046da21c7627accd3d51053a93 AS builder
+
+COPY --from=uv_binary /uv /usr/local/bin/uv
+
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_NO_CACHE=1
+
+WORKDIR /app
+COPY pyproject.toml uv.lock ./
+RUN uv sync --locked --no-dev --extra rag --no-install-project
+
+FROM python:3.11-slim@sha256:db3ff2e1800a8581e2c48a27c3995339d47bdf046da21c7627accd3d51053a93 AS runtime
 
 WORKDIR /app
 ARG SOURCE_REV=unknown
 LABEL org.opencontainers.image.revision=$SOURCE_REV
 
-COPY law_repository/requirements.txt ./requirements.txt
-
-# torch 는 CPU 휠로 (기본 인덱스는 CUDA 포함이라 이미지가 수 GB 커짐)
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
- && pip install --no-cache-dir -r requirements.txt
+ENV PATH=/opt/venv/bin:$PATH
+COPY --from=builder /opt/venv /opt/venv
 
 # Context is an allowlist bundle generated from one clean commit.  Preserve its
 # paths so provider_identity can verify every manifest entry at runtime.

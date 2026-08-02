@@ -24,7 +24,7 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 COPY pyproject.toml uv.lock ./
-RUN uv sync --locked --no-dev --no-install-project
+RUN uv sync --locked --no-dev --extra rag --no-install-project
 
 # The sealed context contains only committed runtime source, canonical schemas,
 # lockfiles, deployment docs, and the generated source/provider manifests.

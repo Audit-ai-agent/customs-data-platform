@@ -18,11 +18,15 @@ pinned: false
 
 Docker build 중 GitHub repository를 clone하지 않는다. 검토된 Data commit에서
 `tools/build_hf_space_context.py`가 생성한 allowlist context 전체를 Space에 게시한다.
-context에는 `requirements.txt`, `src/**`, 고정 계약 Schema, Dockerfile,
+context에는 root `pyproject.toml`·`uv.lock`, `src/**`, 고정 계약 Schema, Dockerfile,
 `source-manifest.json`, `provider-build.json`만 포함되며 Git history, `.env`,
 raw Data, test, migration은 포함되지 않는다. 런타임은 manifest의 모든 파일,
 Evidence Schema SHA-256, provider revision/build SHA-256이 일치해야 readiness를
 통과한다.
+
+Docker build는 root lock에서 기본 runtime과 `rag` extra만 설치한다. 수집 전용
+`ingestion` extra와 개발 도구는 Space image에 포함하지 않는다. `rag`의 PyTorch는
+root lock이 지정한 CPU wheel만 사용한다.
 
 Public Space는 포함된 Python source도 공개한다. `DEMO_TOKEN`은 HTTP 접근만
 제한하며 source 공개를 막지 못하므로, 기본 배포 대상은 **private Space**다.
@@ -33,7 +37,7 @@ Public Space는 포함된 Python source도 공개한다. `DEMO_TOKEN`은 HTTP �
 2. 저장소 밖의 빈 경로를 지정해 context를 생성한다.
 
    ```powershell
-   uv run --locked python tools/build_hf_space_context.py --output <EXTERNAL_CONTEXT_DIR>
+   uv run --locked --extra rag python tools/build_hf_space_context.py --output <EXTERNAL_CONTEXT_DIR>
    ```
 
 3. `source-manifest.json`의 `source_commit`과 파일 SHA-256 및

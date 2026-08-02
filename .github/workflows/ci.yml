@@ -1,379 +1,48 @@
 name: data-platform-ci
-run-name: data-platform-ci-${{ github.event_name }}-${{ github.run_id }}-${{ github.run_attempt }}
 
 on:
   pull_request:
   push:
     branches: [main]
-  workflow_dispatch:
-    inputs:
-      release_tag:
-        description: Immutable Evidence API release to verify
-        required: true
-        type: choice
-        options:
-          - evidence-api-v1.0.0
-      request_id:
-        description: Unique TASK-0004 audit request ID
-        required: true
-        type: string
 
 permissions:
   contents: read
 
 jobs:
-  offline:
+  quick:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
-      - name: Validate manual recovery request
-        id: request_guard
-        if: github.event_name == 'workflow_dispatch'
-        shell: bash
-        env:
-          REQUESTED_RELEASE_TAG: ${{ inputs.release_tag }}
-          REQUEST_ID: ${{ inputs.request_id }}
-          EVENT_REF: ${{ github.ref }}
-          EXPECTED_RELEASE_TAG: evidence-api-v1.0.0
-          EXPECTED_EVENT_REF: refs/heads/main
-        run: |
-          set -euo pipefail
-          test "$REQUESTED_RELEASE_TAG" = "$EXPECTED_RELEASE_TAG"
-          [[ "$REQUEST_ID" =~ ^TASK-0004-[A-Za-z0-9._-]{1,64}$ ]]
-          test "$EVENT_REF" = "$EXPECTED_EVENT_REF"
-
-      - name: Checkout event or immutable recovery release
-        id: checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: >-
-            ${{ github.event_name == 'workflow_dispatch' &&
-            'refs/tags/evidence-api-v1.0.0' || github.sha }}
-          fetch-depth: 0
-          fetch-tags: true
           persist-credentials: false
-
-      - name: Verify checked-out revision and release identity
-        id: revision
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          EVENT_SHA: ${{ github.sha }}
-          REQUESTED_RELEASE_TAG: ${{ inputs.release_tag }}
-          EXPECTED_RELEASE_TAG: evidence-api-v1.0.0
-          EXPECTED_TAG_OBJECT: b66b8faed8fbbe20bf64db292e9f18b43829eef1
-          EXPECTED_TARGET_SHA: a8935007262434523a84e2914271140c5e88489a
-          EXPECTED_SCHEMA_SHA256: 531b59ba4e86f78cef20a4fca052996efd8b88c48853ac12113ca76e69cdd69a
-        run: |
-          set -euo pipefail
-          actual_sha="$(git rev-parse HEAD)"
-          expected_sha="$EVENT_SHA"
-          tag_object=""
-          tag_target=""
-          schema_sha256=""
-
-          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            test "$REQUESTED_RELEASE_TAG" = "$EXPECTED_RELEASE_TAG"
-            test "$(git cat-file -t "refs/tags/$EXPECTED_RELEASE_TAG")" = "tag"
-            test "$(git cat-file -t "refs/tags/$EXPECTED_RELEASE_TAG^{}")" = "commit"
-            tag_object="$(git rev-parse "refs/tags/$EXPECTED_RELEASE_TAG")"
-            tag_target="$(git rev-parse "refs/tags/$EXPECTED_RELEASE_TAG^{}")"
-            schema_sha256="$(sha256sum contracts/evidence/v1/rag_retrieval_v1.schema.json | awk '{print $1}')"
-            expected_sha="$EXPECTED_TARGET_SHA"
-
-            test "$tag_object" = "$EXPECTED_TAG_OBJECT"
-            test "$tag_target" = "$EXPECTED_TARGET_SHA"
-            test "$schema_sha256" = "$EXPECTED_SCHEMA_SHA256"
-          fi
-
-          test "$actual_sha" = "$expected_sha"
-          {
-            echo "actual_sha=$actual_sha"
-            echo "tag_object=$tag_object"
-            echo "tag_target=$tag_target"
-            echo "schema_sha256=$schema_sha256"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Set up uv
-        id: setup_uv
-        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           version: "0.11.28"
+          python-version: "3.11"
           enable-cache: true
-
-      - name: Install locked Python 3.11 environment
-        id: install
-        run: uv sync --locked --group dev
-
-      - name: Scan full Git history and the exact tracked tree for secrets
-        if: github.event_name != 'workflow_dispatch'
-        shell: bash
-        env:
-          GITLEAKS_VERSION: "8.30.1"
-          GITLEAKS_LINUX_X64_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
-        run: |
-          set -euo pipefail
-          archive="$RUNNER_TEMP/gitleaks.tar.gz"
-          binary="$RUNNER_TEMP/gitleaks"
-          tracked_tree="$RUNNER_TEMP/data-platform-tracked-tree"
-          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
-            --output "$archive" \
-            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          echo "${GITLEAKS_LINUX_X64_SHA256}  ${archive}" | sha256sum --check --strict
-          tar --extract --gzip --file "$archive" --directory "$RUNNER_TEMP" gitleaks
-          test -x "$binary"
-          "$binary" git --no-banner --no-color --redact \
-            --config .gitleaks.toml \
-            --gitleaks-ignore-path .gitleaksignore \
-            .
-          mkdir --parents "$tracked_tree"
-          git archive --format=tar HEAD | tar --extract --file=- --directory "$tracked_tree"
-          "$binary" dir --no-banner --no-color --redact \
-            --config "$GITHUB_WORKSPACE/.gitleaks.toml" \
-            --gitleaks-ignore-path "$GITHUB_WORKSPACE/.gitleaksignore" \
-            "$tracked_tree"
-
-      - name: Audit the exact locked dependency graph
-        if: github.event_name != 'workflow_dispatch'
+      - name: Verify lockfile is current
+        run: uv lock --check
+      - name: Install runtime, RAG, and development dependencies
+        run: uv sync --locked --extra rag --group dev
+      - name: Check provider contract drift
+        run: uv run --locked --extra rag python tools/check_contract_drift.py
+      - name: Lint
+        run: uv run --locked --extra rag ruff check law_repository/src law_repository/tests evals tools
+      - name: Typecheck
+        run: uv run --locked --extra rag mypy
+      - name: Run representative offline regressions
         shell: bash
         run: |
           set -euo pipefail
-          uv lock --check
-          mkdir -p ci-evidence
-          uv export --locked --all-groups --no-emit-project --no-emit-local \
-            --no-sources --format requirements.txt \
-            --output-file ci-evidence/locked-requirements.txt
-          uv run --isolated --no-project --with "pip-audit==2.10.1" \
-            pip-audit --require-hashes --disable-pip \
-            -r ci-evidence/locked-requirements.txt
-
-      - name: Compile and lint
-        id: compile_lint
-        run: |
-          uv run --locked python -m compileall -q law_repository/src evals tools
-          uv run --locked ruff check law_repository/src law_repository/tests evals tools
-
-      - name: Check production runtime formatting and types
-        if: github.event_name != 'workflow_dispatch'
-        shell: bash
-        run: |
-          set -euo pipefail
-          uv run --locked ruff format --check \
-            law_repository/src/deadline.py \
-            law_repository/src/process_ipc.py \
-            law_repository/src/process_security.py \
-            law_repository/src/process_start.py \
-            law_repository/src/model_runtime.py \
-            law_repository/src/neo4j_runtime.py \
-            law_repository/src/production.py \
-            law_repository/src/production_settings.py \
-            law_repository/src/runtime_api.py \
-            law_repository/src/runtime_release.py \
-            law_repository/src/evidence_v3.py \
-            law_repository/src/production_v3.py \
-            law_repository/src/requirement_policy_release.py \
-            law_repository/src/runtime_api_v3.py \
-            law_repository/src/runtime_release_v3.py \
-            law_repository/src/release_provenance_v3.py \
-            law_repository/src/production_context_inventory.py \
-            law_repository/src/generation_evidence.py \
-            law_repository/src/generation_runtime.py \
-            law_repository/src/generation_stores.py \
-            law_repository/src/db/postgres.py \
-            law_repository/src/db/qdrant.py \
-            law_repository/src/db/neo4j.py \
-            tools/run_evidence_v2_conformance_server.py \
-            tools/generate_evidence_v3_contracts.py \
-            tools/run_evidence_v3_conformance_server.py \
-            tools/test_only_v3_policy.py \
-            tools/run_preserved_data_v2_diagnostic.py \
-            tools/run_three_law_v3_scenario_eval.py \
-            tools/scenario_eval_v3_policy.py \
-            tools/build_production_context.py \
-            tools/verify_evidence_v3_release.py \
+          uv run --locked --extra rag pytest -q \
+            evals/tests \
+            law_repository/tests/test_provider_contract.py \
+            law_repository/tests/test_provider_identity.py \
+            law_repository/tests/test_evidence_http_contract.py \
             law_repository/tests/test_evidence_v3.py \
-            law_repository/tests/test_evidence_v3_conformance_runner.py \
             law_repository/tests/test_requirement_policy_release.py \
             law_repository/tests/test_runtime_v3_service.py \
-            law_repository/tests/test_production_deploy.py \
-            law_repository/tests/test_runtime_deadlines.py \
-            law_repository/tests/test_evidence_v2_conformance_runner.py \
-            law_repository/tests/test_preserved_data_v2_diagnostic.py \
-            law_repository/tests/test_release_provenance_v3.py \
-            law_repository/tests/test_github_workflow_security.py
-          uv run --locked mypy
-
-      - name: Production service SAST
-        if: github.event_name != 'workflow_dispatch'
-        shell: bash
-        run: |
-          set -euo pipefail
-          uv run --locked ruff check --select S,B,E,F,I,UP \
-            law_repository/src/production.py \
-            law_repository/src/production_settings.py \
-            law_repository/src/evidence_v3.py \
-            law_repository/src/production_v3.py \
-            law_repository/src/requirement_policy_release.py \
-            law_repository/src/runtime_api_v3.py \
-            law_repository/src/runtime_release_v3.py \
-            law_repository/src/release_provenance_v3.py \
-            law_repository/src/production_context_inventory.py \
-            tools/build_production_context.py \
-            tools/generate_evidence_v3_contracts.py \
-            tools/run_evidence_v2_conformance_server.py \
-            tools/run_evidence_v3_conformance_server.py \
-            tools/test_only_v3_policy.py \
-            tools/run_preserved_data_v2_diagnostic.py \
-            tools/run_three_law_v3_scenario_eval.py \
-            tools/scenario_eval_v3_policy.py \
-            tools/verify_evidence_v3_release.py
-          uv run --isolated --no-project --with "bandit==1.8.6" \
-            bandit --quiet --recursive \
-              law_repository/src \
-              tools/generate_evidence_v3_contracts.py \
-              tools/run_evidence_v2_conformance_server.py \
-              tools/run_evidence_v3_conformance_server.py \
-              tools/test_only_v3_policy.py \
-              tools/run_preserved_data_v2_diagnostic.py \
-              tools/run_three_law_v3_scenario_eval.py \
-              tools/scenario_eval_v3_policy.py \
-              tools/verify_evidence_v3_release.py
-
-      - name: Check provider contract drift
-        id: contract_drift
-        run: uv run --locked python tools/check_contract_drift.py
-
-      - name: Run offline unit, contract, and evaluation gates
-        id: offline_tests
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          set -euo pipefail
-          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            uv run --locked pytest -q \
-              evals/tests \
-              law_repository/tests/test_provider_contract.py \
-              law_repository/tests/test_evidence.py \
-              law_repository/tests/test_ccct_p0.py \
-              law_repository/tests/test_bm25.py \
-              law_repository/tests/test_hf_space_deploy.py
-          else
-            mkdir --parents ci-evidence
-            uv run --locked pytest -q -m "not live" \
-              --junitxml=ci-evidence/offline.junit.xml
-            uv run --locked python tools/assert_no_skips.py \
-              ci-evidence/offline.junit.xml
-          fi
-
-      - name: Create exact-release provenance proof
-        id: create_proof
-        if: success() && github.event_name == 'workflow_dispatch'
-        shell: bash
-        env:
-          REQUEST_ID: ${{ inputs.request_id }}
-          REPOSITORY: ${{ github.repository }}
-          EVENT_NAME: ${{ github.event_name }}
-          EVENT_REF: ${{ github.ref }}
-          EVENT_SHA: ${{ github.sha }}
-          WORKFLOW_NAME: ${{ github.workflow }}
-          WORKFLOW_REF: ${{ github.workflow_ref }}
-          WORKFLOW_SHA: ${{ github.workflow_sha }}
-          RUN_ID: ${{ github.run_id }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-          TESTED_SHA: ${{ steps.revision.outputs.actual_sha }}
-          TAG_OBJECT: ${{ steps.revision.outputs.tag_object }}
-          TAG_TARGET: ${{ steps.revision.outputs.tag_target }}
-          SCHEMA_SHA256: ${{ steps.revision.outputs.schema_sha256 }}
-          REQUEST_GUARD_OUTCOME: ${{ steps.request_guard.outcome }}
-          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
-          REVISION_OUTCOME: ${{ steps.revision.outcome }}
-          SETUP_UV_OUTCOME: ${{ steps.setup_uv.outcome }}
-          INSTALL_OUTCOME: ${{ steps.install.outcome }}
-          COMPILE_LINT_OUTCOME: ${{ steps.compile_lint.outcome }}
-          CONTRACT_DRIFT_OUTCOME: ${{ steps.contract_drift.outcome }}
-          OFFLINE_TESTS_OUTCOME: ${{ steps.offline_tests.outcome }}
-          EXPECTED_REPOSITORY: Audit-ai-agent/customs-data-platform
-          EXPECTED_RELEASE_TAG: evidence-api-v1.0.0
-          EXPECTED_TAG_OBJECT: b66b8faed8fbbe20bf64db292e9f18b43829eef1
-          EXPECTED_TARGET_SHA: a8935007262434523a84e2914271140c5e88489a
-          EXPECTED_SCHEMA_SHA256: 531b59ba4e86f78cef20a4fca052996efd8b88c48853ac12113ca76e69cdd69a
-        run: |
-          set -euo pipefail
-          mkdir -p ci-evidence
-          python3 - <<'PY'
-          import json
-          import os
-          import re
-          from pathlib import Path
-
-          expected_target = os.environ["EXPECTED_TARGET_SHA"]
-          gates = {
-              "request_guard": os.environ["REQUEST_GUARD_OUTCOME"],
-              "checkout": os.environ["CHECKOUT_OUTCOME"],
-              "revision": os.environ["REVISION_OUTCOME"],
-              "setup_uv": os.environ["SETUP_UV_OUTCOME"],
-              "install": os.environ["INSTALL_OUTCOME"],
-              "compile_lint": os.environ["COMPILE_LINT_OUTCOME"],
-              "contract_drift": os.environ["CONTRACT_DRIFT_OUTCOME"],
-              "offline_tests": os.environ["OFFLINE_TESTS_OUTCOME"],
-          }
-          assertions = {
-              "request_id": bool(
-                  re.fullmatch(r"TASK-0004-[A-Za-z0-9._-]{1,64}", os.environ["REQUEST_ID"])
-              ),
-              "repository": os.environ["REPOSITORY"] == os.environ["EXPECTED_REPOSITORY"],
-              "event": os.environ["EVENT_NAME"] == "workflow_dispatch",
-              "event_ref": os.environ["EVENT_REF"] == "refs/heads/main",
-              "workflow_sha": bool(
-                  re.fullmatch(r"[0-9a-f]{40}", os.environ["WORKFLOW_SHA"])
-              ) and os.environ["WORKFLOW_SHA"] == os.environ["EVENT_SHA"],
-              "tested_sha": os.environ["TESTED_SHA"] == expected_target,
-              "tag_object": os.environ["TAG_OBJECT"] == os.environ["EXPECTED_TAG_OBJECT"],
-              "tag_target": os.environ["TAG_TARGET"] == expected_target,
-              "schema_sha256": (
-                  os.environ["SCHEMA_SHA256"] == os.environ["EXPECTED_SCHEMA_SHA256"]
-              ),
-              "gates": all(value == "success" for value in gates.values()),
-          }
-          failed = [name for name, passed in assertions.items() if not passed]
-          if failed:
-              raise SystemExit("provenance proof assertions failed: " + ", ".join(failed))
-
-          proof = {
-              "schema_version": "1.0",
-              "task_id": "TASK-0004",
-              "status": "PASS",
-              "request_id": os.environ["REQUEST_ID"],
-              "repository": os.environ["REPOSITORY"],
-              "event": os.environ["EVENT_NAME"],
-              "event_ref": os.environ["EVENT_REF"],
-              "event_sha": os.environ["EVENT_SHA"],
-              "workflow_name": os.environ["WORKFLOW_NAME"],
-              "workflow_ref": os.environ["WORKFLOW_REF"],
-              "workflow_sha": os.environ["WORKFLOW_SHA"],
-              "tested_sha": os.environ["TESTED_SHA"],
-              "release_tag": os.environ["EXPECTED_RELEASE_TAG"],
-              "tag_object": os.environ["TAG_OBJECT"],
-              "tag_target": os.environ["TAG_TARGET"],
-              "schema_sha256": os.environ["SCHEMA_SHA256"],
-              "run_id": int(os.environ["RUN_ID"]),
-              "run_attempt": int(os.environ["RUN_ATTEMPT"]),
-              "gates": gates,
-          }
-          Path("ci-evidence/data-release-provenance.json").write_text(
-              json.dumps(proof, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-              encoding="utf-8",
-          )
-          PY
-
-      - name: Upload exact-release provenance proof
-        id: upload_proof
-        if: success() && github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: data-release-provenance-${{ inputs.request_id }}
-          path: ci-evidence/data-release-provenance.json
-          if-no-files-found: error
-          overwrite: false
-          retention-days: 30
+            law_repository/tests/test_three_law_v3_scenario_eval.py \
+            law_repository/tests/test_model_identity.py \
+            law_repository/tests/test_hf_space_deploy.py

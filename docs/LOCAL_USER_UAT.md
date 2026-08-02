@@ -60,11 +60,11 @@ Run it only from an exact committed Data revision and keep all generated
 identity/manifest/token files outside the repository and provider context:
 
 ```powershell
-uv run --locked python tools/build_production_context.py `
+uv run --locked --extra rag python tools/build_production_context.py `
   --repository . `
   --output <EMPTY_EXTERNAL_PROVIDER_CONTEXT>
 
-uv run --locked python tools/run_three_law_v3_diagnostic.py `
+uv run --locked --extra rag python tools/run_three_law_v3_diagnostic.py `
   --diagnostic-only-three-law `
   --provider-context <EXTERNAL_PROVIDER_CONTEXT> `
   --service-token-file <ABSOLUTE_EXTERNAL_TOKEN_FILE> `
@@ -95,7 +95,7 @@ With the V3 diagnostic server still running, execute the restricted five-case
 Hybrid Gold and HSK `0303540000` Structured check as follows:
 
 ```powershell
-uv run --locked python tools/run_three_law_v3_restricted_eval.py `
+uv run --locked --extra rag --extra ingestion python tools/run_three_law_v3_restricted_eval.py `
   --diagnostic-only-three-law `
   --evidence-base-url http://127.0.0.1:18013 `
   --service-token-file <ABSOLUTE_EXTERNAL_TOKEN_FILE> `
@@ -179,11 +179,11 @@ Build a provider context from the exact clean committed Data revision, then
 start the service:
 
 ```powershell
-uv run --locked python tools/build_production_context.py `
+uv run --locked --extra rag python tools/build_production_context.py `
   --repository . `
   --output <EMPTY_EXTERNAL_PROVIDER_CONTEXT>
 
-uv run --locked python tools/run_three_law_v3_scenario_eval.py `
+uv run --locked --extra rag python tools/run_three_law_v3_scenario_eval.py `
   --scenario-eval-only-three-law `
   --provider-context <EXTERNAL_PROVIDER_CONTEXT> `
   --service-token-file <ABSOLUTE_EXTERNAL_TOKEN_FILE> `
