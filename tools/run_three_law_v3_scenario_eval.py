@@ -99,8 +99,11 @@ _TRACE_CONTEXT: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "three_law_scenario_eval_trace_context",
     default=None,
 )
+# Keep the required live rerank aligned with the repository's evaluated Hybrid
+# path. Ten RRF candidates preserve the restricted Gold while bounding the
+# 568M-parameter cross-encoder cost on a local CPU.
 _RERANK_MIN_POOL = 10
-_RERANK_MAX_POOL = 40
+_RERANK_MAX_POOL = 10
 
 
 class ThreeLawV3ScenarioEvalError(v2.ThreeLawDiagnosticError):
