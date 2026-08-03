@@ -15,7 +15,7 @@ import multiprocessing
 import os
 import tempfile
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from multiprocessing.context import BaseContext
 from threading import Condition, Lock, Thread
 from typing import Any, NoReturn, Protocol
@@ -49,6 +49,64 @@ class Neo4jQueryExecutor(Protocol):
     ) -> list[dict[str, Any]]: ...
 
 
+def _write_streaming_result(
+    path: str,
+    *,
+    expected_identity: FileIdentity,
+    rows: Iterable[dict[str, Any]],
+    maximum_rows: int,
+    maximum_bytes: int,
+) -> None:
+    """Write a bounded result without retaining the full Neo4j payload twice.
+
+    The parent still validates and decodes one bounded response.  Streaming in
+    the child avoids the previous ``rows list -> giant JSON string`` peak,
+    which could exhaust a constrained UAT host while the dense and reranker
+    models were resident.
+    """
+
+    descriptor = os.open(path, os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0))
+    written = 0
+
+    def write_chunk(chunk: bytes) -> None:
+        nonlocal written
+        if not chunk or written + len(chunk) > maximum_bytes:
+            raise ValueError("Neo4j response exceeds the byte limit")
+        view = memoryview(chunk)
+        offset = 0
+        while offset < len(view):
+            count = os.write(descriptor, view[offset:])
+            if count <= 0:
+                raise OSError("Neo4j response write made no progress")
+            offset += count
+        written += len(chunk)
+
+    try:
+        if file_identity(descriptor) != expected_identity:
+            raise RuntimeError("child response file identity changed")
+        os.ftruncate(descriptor, 0)
+        write_chunk(b'{"rows":[')
+        row_count = 0
+        for row in rows:
+            if row_count >= maximum_rows:
+                raise ValueError("Neo4j query row limit exceeded")
+            serialized = json.dumps(
+                row,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+            if row_count:
+                write_chunk(b",")
+            write_chunk(serialized)
+            row_count += 1
+        write_chunk(b'],"status":"result"}')
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _neo4j_query_worker(
     *,
     uri: str,
@@ -63,7 +121,6 @@ def _neo4j_query_worker(
     response_identity: FileIdentity,
     maximum_response_bytes: int,
 ) -> None:
-    payload: dict[str, Any]
     try:
         from neo4j import GraphDatabase, Query
 
@@ -87,18 +144,20 @@ def _neo4j_query_worker(
             if database:
                 session_config["database"] = database
             with driver.session(**session_config) as session:
-                rows: list[dict[str, Any]] = []
                 result = session.run(
                     Query(query, timeout=timeout_seconds),
                     **parameters,
                 )
-                for record in result:
-                    if len(rows) >= maximum_rows:
-                        raise ValueError("Neo4j query row limit exceeded")
-                    rows.append(dict(record))
+                _write_streaming_result(
+                    response_path,
+                    expected_identity=response_identity,
+                    rows=(dict(record) for record in result),
+                    maximum_rows=maximum_rows,
+                    maximum_bytes=maximum_response_bytes,
+                )
         finally:
             driver.close()
-        payload = {"status": "result", "rows": rows}
+        return
     except BaseException as exc:
         payload = {"status": "error", "code": type(exc).__name__}
     try:
@@ -109,7 +168,7 @@ def _neo4j_query_worker(
             separators=(",", ":"),
             allow_nan=False,
         ).encode("utf-8")
-    except (TypeError, ValueError):
+    except (MemoryError, TypeError, ValueError):
         serialized = b'{"code":"serialization","status":"error"}'
     if len(serialized) > maximum_response_bytes:
         serialized = b'{"code":"response_size","status":"error"}'

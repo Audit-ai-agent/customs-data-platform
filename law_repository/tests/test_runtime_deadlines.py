@@ -481,6 +481,41 @@ def _neo_executor(
     )
 
 
+def test_neo4j_streaming_result_preserves_canonical_wire_without_full_list() -> None:
+    descriptor, name = tempfile.mkstemp(prefix="neo4j-stream-test-", suffix=".json")
+    identity = file_identity(descriptor)
+    consumed: list[int] = []
+
+    def rows():
+        for index in range(1_000):
+            consumed.append(index)
+            yield {"value": index, "label": f"row-{index}"}
+
+    try:
+        neo4j_runtime_module._write_streaming_result(
+            name,
+            expected_identity=identity,
+            rows=rows(),
+            maximum_rows=1_000,
+            maximum_bytes=1_048_576,
+        )
+        payload = json.loads(
+            read_bounded_path(
+                name,
+                expected_identity=identity,
+                maximum_bytes=1_048_576,
+            ).decode("utf-8")
+        )
+    finally:
+        os.close(descriptor)
+        os.unlink(name)
+
+    assert consumed == list(range(1_000))
+    assert payload["status"] == "result"
+    assert payload["rows"][0] == {"label": "row-0", "value": 0}
+    assert payload["rows"][-1] == {"label": "row-999", "value": 999}
+
+
 def test_neo4j_canonical_ipc_scrubs_environment_and_returns_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
