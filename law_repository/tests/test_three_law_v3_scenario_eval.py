@@ -538,7 +538,7 @@ def test_scenario_eval_reranker_failure_is_not_lexically_degraded() -> None:
 
 
 def test_scenario_eval_uses_a_reranker_aware_request_deadline() -> None:
-    assert runner._SCENARIO_EVAL_REQUEST_DEADLINE_SECONDS == 270.0
+    assert runner._SCENARIO_EVAL_REQUEST_DEADLINE_SECONDS == 300.0
 
 
 def test_policy_is_exact_code_only_and_distinct_from_existing_diagnostic() -> None:
