@@ -1048,8 +1048,8 @@ def create_three_law_v3_scenario_eval_application(
             deadline=deadline,
         )
     )
-    startup_deadline = v2._deadline()  # noqa: SLF001 - reviewed bounded observer budget
-    selected_attestor(startup_deadline)
+    attestation_deadline = v2._deadline()  # noqa: SLF001 - bounded source attestation
+    selected_attestor(attestation_deadline)
     token = load_bearer_token_file(service_token_file)
 
     readonly_boundary: v2._ReadOnlyPostgresBoundary | None = None  # noqa: SLF001
@@ -1130,6 +1130,11 @@ def create_three_law_v3_scenario_eval_application(
                     trace_collector,
                 )
 
+        # A cold CPU reranker can spend most of the bounded model-startup
+        # window loading its weights.  Store attestation must receive a fresh
+        # deadline after that one-time warm-up; otherwise a healthy preserved
+        # corpus is rejected before its first read-only observation begins.
+        startup_deadline = v2._deadline()  # noqa: SLF001 - bounded store observation
         initial_observation = selected_observation_loader(startup_deadline)
         _validate_exact_observation(
             initial_observation,
