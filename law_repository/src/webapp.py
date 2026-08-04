@@ -6,7 +6,7 @@ http://<호스트IP>:8010 을 열면 검색/품목요건/조문조회를 바로 
 실행: law_repository/ 에서  python -m src.webapp   [--port 8010]
 - 기동 시 bge-m3 를 미리 로딩(첫 검색 지연 제거).
 - 임베딩 encode 는 스레드 안전하지 않아 lock 으로 직렬화.
-- 포트는 --port 또는 PORT 환경변수 (HF Spaces 등 PaaS 는 PORT 로 지정).
+- 포트는 --port 또는 PORT 환경변수로 지정한다.
 - 접근 보호: DEMO_TOKEN 환경변수를 설정하면 모든 /api 가 토큰을 요구한다.
   팀원에겐 http://<주소>/?token=<값> 링크를 공유하면 UI 가 알아서 붙인다.
   (LAN 데모는 비워도 되지만, 공개 인터넷에 올릴 땐 반드시 설정하거나 Space 를 private 으로.)
@@ -305,7 +305,7 @@ def create_evidence_application() -> FastAPI:
     This factory intentionally preserves the v1.1 contract test boundary.  It
     does not provide service authentication, transport enforcement, admission,
     or lifecycle controls and therefore must not be deployed directly.  Use
-    ``src.production.create_production_evidence_application`` for deployment.
+    ``src.runtime_service.create_runtime_v2_application`` for authenticated runtime use.
     """
     target = FastAPI(title="Customs Evidence API")
     return _configure_evidence_application(
@@ -399,7 +399,7 @@ def main() -> int:
         print("[webapp] reranker 불가 — /api/retrieve 는 RRF 순위로 동작 (reranked=false)")
     print(f"[webapp] 준비 완료 — 팀원 접속: http://<이 PC의 IP>:{port}")
     # This is the explicitly non-production team demo.  Production uses the
-    # authenticated ingress-only factory in src.production.
+    # authenticated runtime factory in src.runtime_service.
     uvicorn.run(
         app,
         # Explicit non-production LAN demo; production uses authenticated ingress.

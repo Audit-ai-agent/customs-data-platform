@@ -1,8 +1,9 @@
-"""Build a secret-free, attested Evidence production image context.
+"""Build a secret-free, attested Evidence provider context.
 
 The context is generated only from one clean committed Data revision.  It is
 an allowlist, not a copy of the working tree, and deliberately excludes
-datasets, migration credentials, tests, local environments, and Git metadata.
+Docker, cloud/release assets, datasets, credentials, tests, local state, and
+Git metadata.
 """
 
 from __future__ import annotations
@@ -12,14 +13,10 @@ import hashlib
 import json
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "law_repository"))
-
-from src.production_context_inventory import FIXED_PRODUCTION_CONTEXT_FILES
-
 try:
+    from tools.provider_context import FIXED_PROVIDER_CONTEXT_FILES
     from tools.provider_build import (
         create_provider_build_document,
         create_runtime_provider_build_document,
@@ -27,6 +24,7 @@ try:
         serialized_document,
     )
 except ModuleNotFoundError:  # direct execution with tools/ as sys.path[0]
+    from provider_context import FIXED_PROVIDER_CONTEXT_FILES  # type: ignore[no-redef]
     from provider_build import (  # type: ignore[no-redef]
         create_provider_build_document,
         create_runtime_provider_build_document,
@@ -35,17 +33,17 @@ except ModuleNotFoundError:  # direct execution with tools/ as sys.path[0]
     )
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-FIXED_FILES = FIXED_PRODUCTION_CONTEXT_FILES
+FIXED_FILES = FIXED_PROVIDER_CONTEXT_FILES
 
 
-class ProductionContextError(RuntimeError):
-    """An immutable production context could not be proven."""
+class ProviderContextError(RuntimeError):
+    """An immutable provider context could not be proven."""
 
 
 def _git_executable() -> str:
     executable = shutil.which("git")
     if executable is None:
-        raise ProductionContextError("git executable is unavailable")
+        raise ProviderContextError("git executable is unavailable")
     return executable
 
 
@@ -59,7 +57,7 @@ def _git(repo: Path, *args: str) -> str:
         check=False,
     )
     if result.returncode:
-        raise ProductionContextError(result.stderr.strip() or f"git {' '.join(args)} failed")
+        raise ProviderContextError(result.stderr.strip() or f"git {' '.join(args)} failed")
     return result.stdout.strip()
 
 
@@ -70,7 +68,7 @@ def _committed_bytes(repo: Path, relative_path: str) -> bytes:
         check=False,
     )
     if result.returncode:
-        raise ProductionContextError(
+        raise ProviderContextError(
             result.stderr.decode("utf-8", errors="replace").strip()
             or f"committed file is missing: {relative_path}"
         )
@@ -89,7 +87,7 @@ def _source_paths(repo: Path) -> list[str]:
     output = _git(repo, "ls-tree", "-r", "--name-only", "HEAD", "--", "law_repository/src")
     paths = sorted(line for line in output.splitlines() if line)
     if not paths:
-        raise ProductionContextError("HEAD does not contain law_repository/src")
+        raise ProviderContextError("HEAD does not contain law_repository/src")
     return paths
 
 
@@ -97,13 +95,13 @@ def build_context(repo: Path, output: Path) -> dict[str, object]:
     repo = repo.resolve()
     output = output.resolve()
     if _is_within(output, repo):
-        raise ProductionContextError("output must be outside the Data repository")
+        raise ProviderContextError("output must be outside the Data repository")
     if _git(repo, "status", "--porcelain"):
-        raise ProductionContextError(
+        raise ProviderContextError(
             "Data repository must be clean; context is built from committed HEAD"
         )
     if output.exists() and any(output.iterdir()):
-        raise ProductionContextError("output directory must not exist or must be empty")
+        raise ProviderContextError("output directory must not exist or must be empty")
 
     revision = _git(repo, "rev-parse", "HEAD")
     mappings = dict(FIXED_FILES)
@@ -182,11 +180,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     manifest = build_context(args.repository, args.output)
+    files = manifest["files"]
+    if not isinstance(files, list):  # defensive: build_context owns this document
+        raise ProviderContextError("provider context manifest file list is invalid")
     print(
         json.dumps(
             {
                 "source_commit": manifest["source_commit"],
-                "file_count": len(manifest["files"]),
+                "file_count": len(files),
             },
             sort_keys=True,
         )

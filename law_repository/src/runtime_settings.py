@@ -1,9 +1,9 @@
-"""Strict configuration for the production Evidence API process.
+"""Strict configuration for the authenticated Evidence runtime.
 
-The team demo intentionally keeps developer-friendly defaults.  The production
-entrypoint does not reuse those defaults as an authorization or transport
-policy: it requires an explicit service credential and an explicit TLS
-termination mode, then validates the Data-store connections before serving.
+The team demo intentionally keeps developer-friendly defaults.  The shared
+runtime does not reuse those defaults as an authorization or transport policy:
+it requires an explicit service credential and validates its Data-store
+connections before serving.
 """
 
 from __future__ import annotations
@@ -34,8 +34,8 @@ _TLS_POSTGRES_MODES = {"require", "verify-ca", "verify-full"}
 TransportMode = Literal["direct_tls", "trusted_proxy_tls", "loopback_dev"]
 
 
-class ProductionConfigurationError(RuntimeError):
-    """The Evidence service must not start with an unsafe deployment config."""
+class RuntimeConfigurationError(RuntimeError):
+    """The Evidence runtime must not start with an unsafe configuration."""
 
 
 @dataclass(frozen=True)
@@ -49,12 +49,12 @@ class RuntimeSecrets:
     service_token: bytes
 
 
-class ProductionSettings(BaseSettings):
-    """Environment-owned production service settings.
+class RuntimeSettings(BaseSettings):
+    """Environment-owned authenticated runtime settings.
 
-    The production process never reads a repository ``.env`` file.  Operators
-    must inject settings through the process environment or a mounted secret
-    file.  This avoids a developer ``.env`` silently changing a deployment.
+    The runtime process never reads a repository ``.env`` file.  Operators
+    inject settings through the process environment or a mounted secret file.
+    This avoids a developer ``.env`` silently changing an approved UAT run.
     """
 
     model_config = SettingsConfigDict(
@@ -74,8 +74,8 @@ class ProductionSettings(BaseSettings):
     trusted_proxy_cidrs: str = ""
     allow_insecure_loopback_dev: bool = False
 
-    # The production container is reachable only through the approved ingress
-    # network; transport/auth middleware still rejects an untrusted caller.
+    # Transport/auth middleware rejects callers outside the configured
+    # runtime boundary.
     bind_host: str = "0.0.0.0"  # noqa: S104  # nosec B104
     port: int = Field(default=8010, ge=1, le=65535)
     max_request_body_bytes: int = Field(
@@ -102,7 +102,7 @@ class ProductionSettings(BaseSettings):
     log_level: str = "info"
 
     @model_validator(mode="after")
-    def validate_security_boundary(self) -> ProductionSettings:
+    def validate_security_boundary(self) -> RuntimeSettings:
         configured = int(self.service_token is not None) + int(self.service_token_file is not None)
         if configured != 1:
             raise ValueError(
@@ -150,26 +150,26 @@ class ProductionSettings(BaseSettings):
             candidate = self.service_token.get_secret_value()
         else:
             if self.service_token_file is None:
-                raise ProductionConfigurationError("service token is unavailable")
+                raise RuntimeConfigurationError("service token is unavailable")
             try:
                 if self.service_token_file.is_symlink():
-                    raise ProductionConfigurationError(
+                    raise RuntimeConfigurationError(
                         "service token file must not be a symbolic link"
                     )
                 raw = self.service_token_file.read_bytes()
             except OSError as exc:
-                raise ProductionConfigurationError("service token file is unavailable") from exc
+                raise RuntimeConfigurationError("service token file is unavailable") from exc
             if len(raw) > 1_024:
-                raise ProductionConfigurationError("service token file is too large")
+                raise RuntimeConfigurationError("service token file is too large")
             try:
                 candidate = raw.decode("ascii").strip()
             except UnicodeDecodeError as exc:
-                raise ProductionConfigurationError(
+                raise RuntimeConfigurationError(
                     "service token file must contain an ASCII bearer token"
                 ) from exc
 
         if not _TOKEN_PATTERN.fullmatch(candidate):
-            raise ProductionConfigurationError(
+            raise RuntimeConfigurationError(
                 "service token must be 32-512 ASCII bearer-safe characters"
             )
         return RuntimeSecrets(service_token=candidate.encode("ascii"))
@@ -220,8 +220,8 @@ def _all_data_stores_are_loopback(settings: DataStoreSettings) -> bool:
     )
 
 
-def validate_production_data_store_settings(
-    service: ProductionSettings,
+def validate_runtime_data_store_settings(
+    service: RuntimeSettings,
     data: DataStoreSettings,
 ) -> None:
     """Reject weak credentials and non-TLS remote store connections.
@@ -232,9 +232,9 @@ def validate_production_data_store_settings(
     """
 
     if data.postgres_password.strip().lower() in _INSECURE_PASSWORDS:
-        raise ProductionConfigurationError("PostgreSQL password is missing or insecure")
+        raise RuntimeConfigurationError("PostgreSQL password is missing or insecure")
     if data.neo4j_password.strip().lower() in _INSECURE_PASSWORDS:
-        raise ProductionConfigurationError("Neo4j password is missing or insecure")
+        raise RuntimeConfigurationError("Neo4j password is missing or insecure")
 
     local_exception = (
         service.transport_mode == "loopback_dev"
@@ -245,16 +245,16 @@ def validate_production_data_store_settings(
         return
 
     if data.postgres_sslmode.lower() not in _TLS_POSTGRES_MODES:
-        raise ProductionConfigurationError("remote PostgreSQL must require TLS")
+        raise RuntimeConfigurationError("remote PostgreSQL must require TLS")
     if urlsplit(data.qdrant_url).scheme.lower() != "https":
-        raise ProductionConfigurationError("remote Qdrant must use HTTPS")
+        raise RuntimeConfigurationError("remote Qdrant must use HTTPS")
     if not data.qdrant_api_key:
-        raise ProductionConfigurationError("remote Qdrant requires an API key")
+        raise RuntimeConfigurationError("remote Qdrant requires an API key")
     if urlsplit(data.neo4j_uri).scheme.lower() not in {"bolt+s", "neo4j+s"}:
-        raise ProductionConfigurationError("remote Neo4j must use an encrypted URI")
+        raise RuntimeConfigurationError("remote Neo4j must use an encrypted URI")
 
 
-def validate_runtime_deadline_settings(service: ProductionSettings) -> None:
+def validate_runtime_deadline_settings(service: RuntimeSettings) -> None:
     """Require every blocking dependency cap to finish before the HTTP deadline."""
 
     usable = service.request_deadline_seconds - service.deadline_completion_reserve_seconds
@@ -262,14 +262,14 @@ def validate_runtime_deadline_settings(service: ProductionSettings) -> None:
         service.store_operation_timeout_seconds + 2 * service.store_termination_timeout_seconds
     )
     if store_worst_case >= usable:
-        raise ProductionConfigurationError(
+        raise RuntimeConfigurationError(
             "store operation and kill bounds must fit inside the request work budget"
         )
     model_worst_case = (
         service.model_inference_timeout_seconds + 2 * service.model_termination_timeout_seconds
     )
     if model_worst_case >= usable:
-        raise ProductionConfigurationError(
+        raise RuntimeConfigurationError(
             "model inference and kill bounds must fit inside the request work budget"
         )
     # Neo4j terminate+kill plus registry coordination and model
@@ -280,7 +280,7 @@ def validate_runtime_deadline_settings(service: ProductionSettings) -> None:
         + 2 * service.model_termination_timeout_seconds
     )
     if shutdown_cleanup >= service.shutdown_grace_seconds:
-        raise ProductionConfigurationError(
+        raise RuntimeConfigurationError(
             "runtime child termination bounds must fit inside shutdown grace"
         )
 
@@ -288,23 +288,23 @@ def validate_runtime_deadline_settings(service: ProductionSettings) -> None:
 def _read_secret_file(path: Path, *, label: str) -> str:
     try:
         if path.is_symlink():
-            raise ProductionConfigurationError(f"{label} file must not be a symbolic link")
+            raise RuntimeConfigurationError(f"{label} file must not be a symbolic link")
         raw = path.read_bytes()
     except OSError as exc:
-        raise ProductionConfigurationError(f"{label} file is unavailable") from exc
+        raise RuntimeConfigurationError(f"{label} file is unavailable") from exc
     if not raw or len(raw) > 4_096:
-        raise ProductionConfigurationError(f"{label} file has an invalid size")
+        raise RuntimeConfigurationError(f"{label} file has an invalid size")
     try:
         value = raw.decode("utf-8").rstrip("\r\n")
     except UnicodeDecodeError as exc:
-        raise ProductionConfigurationError(f"{label} file must be UTF-8") from exc
+        raise RuntimeConfigurationError(f"{label} file must be UTF-8") from exc
     if not value or "\x00" in value or "\r" in value or "\n" in value:
-        raise ProductionConfigurationError(f"{label} file is malformed")
+        raise RuntimeConfigurationError(f"{label} file is malformed")
     return value
 
 
 def apply_runtime_data_store_secrets(
-    service: ProductionSettings,
+    service: RuntimeSettings,
     data: DataStoreSettings,
 ) -> None:
     """Resolve optional mounted DB secret files into the shared process config."""

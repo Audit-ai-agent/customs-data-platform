@@ -2,11 +2,31 @@ name: data-platform-ci
 
 on:
   pull_request:
+    paths:
+      - ".github/workflows/ci.yml"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "contracts/**"
+      - "evals/**"
+      - "law_repository/**"
+      - "tools/**"
   push:
     branches: [main]
+    paths:
+      - ".github/workflows/ci.yml"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "contracts/**"
+      - "evals/**"
+      - "law_repository/**"
+      - "tools/**"
 
 permissions:
   contents: read
+
+concurrency:
+  group: data-platform-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   quick:
@@ -43,6 +63,10 @@ jobs:
             law_repository/tests/test_evidence_v3.py \
             law_repository/tests/test_requirement_policy_release.py \
             law_repository/tests/test_runtime_v3_service.py \
+            law_repository/tests/test_runtime_v2_service.py \
+            law_repository/tests/test_runtime_service.py \
+            law_repository/tests/test_generate_provider_build.py \
+            law_repository/tests/test_local_preflight.py \
             law_repository/tests/test_three_law_v3_scenario_eval.py \
             law_repository/tests/test_model_identity.py \
-            law_repository/tests/test_hf_space_deploy.py
+            law_repository/tests/test_local_compose_security.py

@@ -17,7 +17,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "law_repository"))
 
 from src.evidence_v3 import RetrieveRequestV3, RetrieveResponseV3  # noqa: E402
-from src.release_provenance_v3 import EvidenceV3ReleaseProvenance  # noqa: E402
 from src.requirement_policy_release import (  # noqa: E402
     RequirementPolicyRelease,
     TrustedReviewerStore,
@@ -87,15 +86,6 @@ def main() -> int:
             "trusted_reviewer_lock_v1.schema.json"
         ),
         title="Trusted Domain Reviewer Store Lock v1",
-    )
-    _write(
-        output / "release_provenance_v1.schema.json",
-        EvidenceV3ReleaseProvenance.model_json_schema(),
-        schema_id=(
-            "https://customs-data-platform.invalid/contracts/evidence/v3/"
-            "release_provenance_v1.schema.json"
-        ),
-        title="Evidence v3 Release Provenance v1",
     )
     return 0
 

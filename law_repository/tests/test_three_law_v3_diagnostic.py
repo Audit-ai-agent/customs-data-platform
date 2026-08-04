@@ -265,7 +265,7 @@ def test_v3_identity_manifest_and_diagnostic_readiness_are_bound(
         observation_loader=lambda _deadline=None: observation,
     )
     assert (
-        application.state.production_service.settings.request_deadline_seconds
+        application.state.runtime_service.settings.request_deadline_seconds
         == v2.DIAGNOSTIC_SERVICE_REQUEST_DEADLINE_SECONDS
         == 180.0
     )

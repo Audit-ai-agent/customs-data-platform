@@ -11,8 +11,8 @@ class Settings(BaseSettings):
 
     # Postgres
     postgres_host: str = "localhost"
-    # Production request paths bypass per-request DNS with one explicit
-    # address.  Localhost and literal-IP hosts are derived automatically.
+    # Authenticated runtime paths can bypass per-request DNS with one explicit
+    # address. Localhost and literal-IP hosts are derived automatically.
     postgres_hostaddr: str = ""
     # Keep the local host default aligned with docker-compose.yml. Port 5432
     # may already belong to another project on a developer workstation.
@@ -20,13 +20,13 @@ class Settings(BaseSettings):
     postgres_db: str = "trade_doc"
     postgres_user: str = "trade"
     postgres_password: str = "change_me"
-    postgres_sslmode: str = ""  # 관리형 PG(Neon 등)는 "require"
+    postgres_sslmode: str = ""  # 승인된 외부 runtime은 TLS mode를 명시한다.
 
     # Qdrant
     qdrant_url: str = "http://localhost:6333"
     qdrant_http_port: int = 6333
     qdrant_grpc_port: int = 6334
-    qdrant_api_key: str = ""  # Qdrant Cloud 용 (로컬은 비움)
+    qdrant_api_key: str = ""  # 승인된 외부 runtime만 사용 (로컬은 비움)
 
     # Neo4j
     neo4j_uri: str = "bolt://localhost:7687"

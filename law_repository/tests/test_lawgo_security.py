@@ -30,10 +30,22 @@ class _Response:
         self.closed = True
 
 
-def test_get_requires_real_credential_before_network(monkeypatch) -> None:
+@pytest.fixture
+def initialized_session(monkeypatch: pytest.MonkeyPatch) -> requests.Session:
+    """Preserve the client's lazy session construction in every test."""
+
+    session = requests.Session()
+    monkeypatch.setattr(lawgo, "_session", session)
+    return session
+
+
+def test_get_requires_real_credential_before_network(
+    monkeypatch: pytest.MonkeyPatch,
+    initialized_session: requests.Session,
+) -> None:
     monkeypatch.setattr(lawgo.settings, "law_api_oc", "")
     monkeypatch.setattr(
-        lawgo._session,
+        initialized_session,
         "get",
         lambda *_args, **_kwargs: pytest.fail("network must not be called"),
     )
@@ -42,11 +54,14 @@ def test_get_requires_real_credential_before_network(monkeypatch) -> None:
         lawgo.get("lawService.do", target="law", ID="001556")
 
 
-def test_get_rejects_redirect_without_leaking_credential(monkeypatch) -> None:
+def test_get_rejects_redirect_without_leaking_credential(
+    monkeypatch: pytest.MonkeyPatch,
+    initialized_session: requests.Session,
+) -> None:
     secret = "secret-credential-for-test"
     response = _Response(status=302)
     monkeypatch.setattr(lawgo.settings, "law_api_oc", secret)
-    monkeypatch.setattr(lawgo._session, "get", lambda *_args, **_kwargs: response)
+    monkeypatch.setattr(initialized_session, "get", lambda *_args, **_kwargs: response)
 
     with pytest.raises(lawgo.LawApiError) as captured:
         lawgo.get("lawService.do", target="law", ID="001556")
@@ -56,7 +71,10 @@ def test_get_rejects_redirect_without_leaking_credential(monkeypatch) -> None:
     assert response.closed
 
 
-def test_get_uses_bounded_stream_and_returns_normalized_json(monkeypatch) -> None:
+def test_get_uses_bounded_stream_and_returns_normalized_json(
+    monkeypatch: pytest.MonkeyPatch,
+    initialized_session: requests.Session,
+) -> None:
     response = _Response(
         chunks=(json.dumps({"법 령": {"값": 1}}, ensure_ascii=False).encode("utf-8"),)
     )
@@ -67,7 +85,7 @@ def test_get_uses_bounded_stream_and_returns_normalized_json(monkeypatch) -> Non
         observed.update(kwargs)
         return response
 
-    monkeypatch.setattr(lawgo._session, "get", fake_get)
+    monkeypatch.setattr(initialized_session, "get", fake_get)
 
     assert lawgo.get("lawService.do", target="law", ID="001556") == {"법령": {"값": 1}}
     assert observed["allow_redirects"] is False
@@ -75,10 +93,13 @@ def test_get_uses_bounded_stream_and_returns_normalized_json(monkeypatch) -> Non
     assert response.closed
 
 
-def test_get_stops_when_stream_exceeds_bound(monkeypatch) -> None:
+def test_get_stops_when_stream_exceeds_bound(
+    monkeypatch: pytest.MonkeyPatch,
+    initialized_session: requests.Session,
+) -> None:
     response = _Response(chunks=(b"x" * (lawgo.MAX_RESPONSE_BYTES + 1),))
     monkeypatch.setattr(lawgo.settings, "law_api_oc", "approved-test-credential")
-    monkeypatch.setattr(lawgo._session, "get", lambda *_args, **_kwargs: response)
+    monkeypatch.setattr(initialized_session, "get", lambda *_args, **_kwargs: response)
 
     with pytest.raises(lawgo.LawApiError, match="LAW_API_RESPONSE_TOO_LARGE"):
         lawgo.get("lawService.do", target="law", ID="001556")
@@ -86,7 +107,10 @@ def test_get_stops_when_stream_exceeds_bound(monkeypatch) -> None:
     assert response.closed
 
 
-def test_transport_failure_is_retried_but_error_is_content_free(monkeypatch) -> None:
+def test_transport_failure_is_retried_but_error_is_content_free(
+    monkeypatch: pytest.MonkeyPatch,
+    initialized_session: requests.Session,
+) -> None:
     calls = 0
     secret = "approved-test-credential"
     monkeypatch.setattr(lawgo.settings, "law_api_oc", secret)
@@ -98,7 +122,7 @@ def test_transport_failure_is_retried_but_error_is_content_free(monkeypatch) -> 
         calls += 1
         raise requests.ConnectionError(f"url?OC={secret}")
 
-    monkeypatch.setattr(lawgo._session, "get", fail)
+    monkeypatch.setattr(initialized_session, "get", fail)
 
     with pytest.raises(lawgo.LawApiError) as captured:
         lawgo.get("lawSearch.do", target="law", query="관세법")

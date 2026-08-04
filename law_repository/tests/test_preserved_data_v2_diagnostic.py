@@ -86,7 +86,7 @@ def test_readonly_audit_records_incomplete_corpus_and_generation_tables() -> Non
 
 def test_parser_requires_explicit_ack_and_loopback(tmp_path: Path) -> None:
     common = [
-        "--production-context",
+        "--provider-context",
         str(tmp_path),
         "--service-token-file",
         str(tmp_path / "token"),
@@ -117,7 +117,7 @@ def test_real_v2_boundary_returns_503_and_records_zero_retrievals(tmp_path: Path
     output_root.mkdir()
     audit_output = output_root / "preserved-audit.json"
     app = runner.create_preserved_data_diagnostic_application(
-        production_context=tmp_path / "context",
+        provider_context=tmp_path / "context",
         service_token_file=_token_file(tmp_path),
         audit_output=audit_output,
         host="127.0.0.1",
@@ -145,7 +145,7 @@ def test_real_v2_boundary_returns_503_and_records_zero_retrievals(tmp_path: Path
     assert ready.status_code == 503
     assert 'route="ready",method="GET",status_class="5xx"' in metrics.text
     assert 'route="retrieve"' not in metrics.text
-    assert app.state.test_only_production_shell is True
+    assert app.state.test_only_runtime_shell is True
     assert app.state.test_only_runtime_conformance is False
     assert app.state.test_only_preserved_readonly_diagnostic is True
     assert app.state.release_ready is False
@@ -173,7 +173,7 @@ def test_audit_output_refuses_repository_and_existing_paths(tmp_path: Path) -> N
         runner.write_audit_json(audit, output)
 
 
-def test_audit_output_refuses_production_context_and_symlink_parent(
+def test_audit_output_refuses_provider_context_and_symlink_parent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -186,7 +186,7 @@ def test_audit_output_refuses_production_context_and_symlink_parent(
     )
     context = tmp_path / "context"
     context.mkdir()
-    with pytest.raises(runner.PreservedDataDiagnosticError, match="production context"):
+    with pytest.raises(runner.PreservedDataDiagnosticError, match="provider context"):
         runner.write_audit_json(
             audit,
             context / "audit.json",
@@ -208,7 +208,7 @@ def test_main_redacts_configuration_error_paths(
     exit_code = runner.main(
         [
             "--test-only-preserved-readonly-diagnostic",
-            "--production-context",
+            "--provider-context",
             str(missing_context),
             "--service-token-file",
             str(tmp_path / "missing-secret-token"),

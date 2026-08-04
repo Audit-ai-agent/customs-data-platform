@@ -13,8 +13,8 @@ from fastapi.testclient import TestClient
 from src.conformance import TestOnlyConformanceEvidenceBackend
 from src.deadline import RequestDeadline
 from src.neo4j_runtime import KillableNeo4jQueryExecutor
-from src.production import create_test_runtime_v2_application
-from src.production_settings import ProductionSettings
+from src.runtime_service import create_test_runtime_v2_application
+from src.runtime_settings import RuntimeSettings
 from src.runtime_api import (
     RUNTIME_LIVENESS_PATH,
     RUNTIME_READINESS_PATH,
@@ -138,7 +138,7 @@ class ReadyConformanceBackend(TestOnlyConformanceEvidenceBackend):
         )
 
 
-def _settings(**overrides: Any) -> ProductionSettings:
+def _settings(**overrides: Any) -> RuntimeSettings:
     values: dict[str, Any] = {
         "service_token": _TOKEN,
         "transport_mode": "direct_tls",
@@ -150,7 +150,7 @@ def _settings(**overrides: Any) -> ProductionSettings:
         "shutdown_grace_seconds": 5,
     }
     values.update(overrides)
-    return ProductionSettings(
+    return RuntimeSettings(
         _env_file=None,
         **values,
     )
@@ -195,7 +195,7 @@ def _app(
     *,
     loader: FakeRuntimeLoader | None = None,
     backend: ReadyConformanceBackend | None = None,
-    settings: ProductionSettings | None = None,
+    settings: RuntimeSettings | None = None,
 ):
     selected_loader = loader or FakeRuntimeLoader()
     selected_backend = backend or ReadyConformanceBackend()
@@ -577,8 +577,8 @@ def test_hung_store_is_reaped_before_max_concurrency_slot_recovers() -> None:
     assert recovered.status_code == 200
     assert elapsed < 4
     assert executor.active_process_count == 0
-    assert app.state.production_service.admission._active == 0
-    assert not app.state.production_service.background_tasks
+    assert app.state.runtime_service.admission._active == 0
+    assert not app.state.runtime_service.background_tasks
 
 
 def _wait_for_executor_child(
@@ -636,8 +636,8 @@ def test_shutdown_kills_hung_store_after_bounded_drain() -> None:
     assert shutdown_elapsed < 2
     assert _status(response) == 503
     assert executor.active_process_count == 0
-    assert app.state.production_service.admission._active == 0
-    assert not app.state.production_service.background_tasks
+    assert app.state.runtime_service.admission._active == 0
+    assert not app.state.runtime_service.background_tasks
 
 
 async def _invoke_without_body(

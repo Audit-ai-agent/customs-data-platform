@@ -37,14 +37,15 @@
 - OpenAPI와 canonical schema의 wire keyword 차이는 `tools/check_contract_drift.py`가 실패시킨다.
 - v1 breaking change는 금지한다. 필요한 경우 `contracts/evidence/v2`와 새 endpoint를 추가한다.
 - 소비자는 provider release/revision/build와 retrieval schema SHA-256을 함께 고정한다.
-- production app은 Database backend만 만들며 test-only conformance backend를 환경변수로
-  활성화할 수 없다.
+- authenticated runtime factory는 Database backend만 만들며 test-only
+  conformance backend를 환경변수로 활성화할 수 없다. Test fixture는 명시적인
+  runner와 provider context로만 생성한다.
 
 ## 평가 기준
 
 - Structured gold: 모든 case 계약 유효, required document/agency row 보존, false-positive 0
 - Hybrid gold: Hit@5 1.0, Recall@10 1.0, nDCG@10 0.8 이상
 - citation metadata completeness 1.0
-- Live suite의 예상치 못한 skip 0
+- 로컬 통합 검사의 예상치 못한 skip 0
 
-평가 기준은 release gate이며 실세계 전체 모집단 성능을 보장한다는 의미가 아닙니다.
+평가 기준은 기능 검증 기준이며 실세계 전체 모집단 성능을 보장한다는 의미가 아닙니다.

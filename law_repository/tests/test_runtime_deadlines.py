@@ -33,9 +33,9 @@ from src.process_ipc import (
     write_bounded_response,
 )
 from src.process_start import start_process_bounded
-from src.production_settings import (
-    ProductionConfigurationError,
-    ProductionSettings,
+from src.runtime_settings import (
+    RuntimeConfigurationError,
+    RuntimeSettings,
     validate_runtime_deadline_settings,
 )
 
@@ -201,7 +201,7 @@ def test_request_deadline_fake_clock_floor_and_libpq_minimum() -> None:
 
 def test_runtime_settings_require_kill_reserves_inside_deadline() -> None:
     token = "deadline-test-token-" + ("x" * 40)
-    invalid = ProductionSettings(
+    invalid = RuntimeSettings(
         _env_file=None,
         service_token=token,
         transport_mode="direct_tls",
@@ -212,7 +212,7 @@ def test_runtime_settings_require_kill_reserves_inside_deadline() -> None:
         model_termination_timeout_seconds=1,
         shutdown_grace_seconds=5,
     )
-    with pytest.raises(ProductionConfigurationError, match="store operation"):
+    with pytest.raises(RuntimeConfigurationError, match="store operation"):
         validate_runtime_deadline_settings(invalid)
 
 

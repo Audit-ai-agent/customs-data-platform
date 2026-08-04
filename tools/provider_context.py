@@ -1,14 +1,11 @@
-"""Single source of truth for the Evidence production image context inventory.
-
-The build tool and the independent release verifier must agree on this mapping.
-Keeping it in the runtime source tree means the mapping itself is included in,
-and attested by, every production context.
-"""
+"""Canonical, secret-free file inventory for an Evidence provider context."""
 
 from __future__ import annotations
 
-FIXED_PRODUCTION_CONTEXT_FILES: dict[str, str] = {
-    ".dockerignore": ".dockerignore",
+# The context carries only the source and canonical contract bytes needed to
+# verify one Data revision.  It deliberately excludes Docker, cloud, release,
+# tests, datasets, local state, and repository metadata.
+FIXED_PROVIDER_CONTEXT_FILES: dict[str, str] = {
     "pyproject.toml": "pyproject.toml",
     "uv.lock": "uv.lock",
     "contracts/evidence/v1/rag_retrieval_v1.schema.json": (
@@ -41,14 +38,9 @@ FIXED_PRODUCTION_CONTEXT_FILES: dict[str, str] = {
     "contracts/evidence/v3/trusted-reviewers.lock.json": (
         "contracts/evidence/v3/trusted-reviewers.lock.json"
     ),
-    "contracts/evidence/v3/release_provenance_v1.schema.json": (
-        "contracts/evidence/v3/release_provenance_v1.schema.json"
-    ),
-    "law_repository/deploy/production/Dockerfile": "Dockerfile",
-    "law_repository/deploy/production/README.md": "README.md",
 }
 
-GENERATED_PRODUCTION_CONTEXT_FILES = frozenset(
+GENERATED_PROVIDER_CONTEXT_FILES = frozenset(
     {
         "source-manifest.json",
         "provider-build.json",
@@ -58,4 +50,4 @@ GENERATED_PRODUCTION_CONTEXT_FILES = frozenset(
 )
 
 
-__all__ = ["FIXED_PRODUCTION_CONTEXT_FILES", "GENERATED_PRODUCTION_CONTEXT_FILES"]
+__all__ = ["FIXED_PROVIDER_CONTEXT_FILES", "GENERATED_PROVIDER_CONTEXT_FILES"]

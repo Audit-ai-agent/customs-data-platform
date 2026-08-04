@@ -9,14 +9,20 @@ import subprocess
 from pathlib import Path, PurePosixPath
 
 try:
-    from tools.build_hf_space_context import FIXED_FILES
+    from tools.provider_context import (
+        FIXED_PROVIDER_CONTEXT_FILES,
+        GENERATED_PROVIDER_CONTEXT_FILES,
+    )
     from tools.provider_build import (
         ProviderBuildError,
         create_provider_build_document,
         serialized_document,
     )
 except ModuleNotFoundError:  # direct execution with tools/ as sys.path[0]
-    from build_hf_space_context import FIXED_FILES  # type: ignore[no-redef]
+    from provider_context import (  # type: ignore[no-redef]
+        FIXED_PROVIDER_CONTEXT_FILES,
+        GENERATED_PROVIDER_CONTEXT_FILES,
+    )
     from provider_build import (  # type: ignore[no-redef]
         ProviderBuildError,
         create_provider_build_document,
@@ -27,6 +33,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_MANIFEST_NAME = "source-manifest.json"
 PROVIDER_BUILD_NAME = "provider-build.json"
 RETRIEVAL_SCHEMA_SOURCE = "contracts/evidence/v1/rag_retrieval_v1.schema.json"
+FIXED_FILES = FIXED_PROVIDER_CONTEXT_FILES
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -219,7 +226,9 @@ def generate_provider_build(
             "source manifest is not the canonical committed provider allowlist"
         )
 
-    expected_inventory = set(mappings) | {SOURCE_MANIFEST_NAME}
+    expected_inventory = set(mappings) | (
+        GENERATED_PROVIDER_CONTEXT_FILES - {PROVIDER_BUILD_NAME}
+    )
     if _bundle_inventory(bundle_root) != expected_inventory:
         raise ProviderBuildError("provider bundle file inventory is not the safe builder allowlist")
     for destination_path, committed_content in committed_files.items():

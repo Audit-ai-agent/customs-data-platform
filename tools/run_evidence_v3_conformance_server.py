@@ -14,7 +14,6 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
 
 from pydantic import SecretStr
 
@@ -24,8 +23,8 @@ for import_root in (ROOT, ROOT / "law_repository"):
         sys.path.insert(0, str(import_root))
 
 from src.deadline import RequestDeadline  # noqa: E402
-from src.production import create_test_runtime_v3_application  # noqa: E402
-from src.production_settings import ProductionSettings  # noqa: E402
+from src.runtime_service import create_test_runtime_v3_application  # noqa: E402
+from src.runtime_settings import RuntimeSettings  # noqa: E402
 from src.runtime_release import GenerationRequestLease, RuntimeReleaseError  # noqa: E402
 from src.runtime_release_v3 import (  # noqa: E402
     EvidenceRuntimeReleaseIdentityV3,
@@ -46,10 +45,6 @@ from tools.test_only_v3_policy import build_test_only_policy_fixture  # noqa: E4
 _MAX_IDENTITY_BYTES = 64 * 1024
 _LITERAL_LOOPBACK_HOSTS = ("127.0.0.1", "::1")
 _PROFILE_WIRE_CONFORMANCE = "wire-conformance"
-_PROFILE_LOCAL_USER_UAT = "local-user-uat"
-_PROFILES = (_PROFILE_WIRE_CONFORMANCE, _PROFILE_LOCAL_USER_UAT)
-_LOCAL_USER_UAT_NO_REQUIREMENT_HSK10 = "7318151000"
-_UAT_READINESS_PATH = "/internal/rag/v3/health/uat-ready"
 
 
 def _is_within(path: Path, parent: Path) -> bool:
@@ -64,12 +59,12 @@ def write_test_only_v3_identity_json(
     identity: EvidenceRuntimeReleaseIdentityV3,
     *,
     output: Path,
-    production_context: Path,
+    provider_context: Path,
 ) -> None:
     destination = output.resolve()
-    if _is_within(destination, production_context):
+    if _is_within(destination, provider_context):
         raise TestOnlyConformanceConfigurationError(
-            "identity output must be outside the immutable production context"
+            "identity output must be outside the immutable provider context"
         )
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.is_symlink():
@@ -116,27 +111,24 @@ def write_test_only_v3_identity_json(
 
 def create_test_only_v3_conformance_application(
     *,
-    production_context: Path,
+    provider_context: Path,
     service_token_file: Path,
     identity_output: Path,
     host: str,
     port: int,
-    profile: str = _PROFILE_WIRE_CONFORMANCE,
-) -> Any:
+):
     """Create the explicit synthetic V3 fixture with no production selectors."""
 
     if host not in _LITERAL_LOOPBACK_HOSTS:
         raise TestOnlyConformanceConfigurationError("host must be loopback-only")
     if not 1 <= port <= 65535:
         raise TestOnlyConformanceConfigurationError("port must be from 1 to 65535")
-    if profile not in _PROFILES:
-        raise TestOnlyConformanceConfigurationError("diagnostic profile is not supported")
-    context = production_context.resolve()
+    context = provider_context.resolve()
     provider_lock = load_verified_provider_runtime_lock(context)
     token = load_bearer_token_file(service_token_file)
     base_lease = derive_test_only_runtime_lease(
         provider_lock,
-        diagnostic_profile=profile,
+        diagnostic_profile=_PROFILE_WIRE_CONFORMANCE,
     )
     policy_fixture = build_test_only_policy_fixture(
         knowledge_source_manifest_sha256=(base_lease.identity.knowledge_source_manifest_sha256),
@@ -156,9 +148,9 @@ def create_test_only_v3_conformance_application(
     write_test_only_v3_identity_json(
         runtime_lease.identity,
         output=identity_output,
-        production_context=context,
+        provider_context=context,
     )
-    settings = ProductionSettings(
+    settings = RuntimeSettings(
         _env_file=None,
         service_token=SecretStr(token),
         service_token_file=None,
@@ -181,9 +173,7 @@ def create_test_only_v3_conformance_application(
     backend = ReadyTestOnlyV2ConformanceBackend(
         snapshot_id=base_lease.identity.knowledge_snapshot_id,
         supported_review_as_of=base_lease.identity.supported_review_as_of,
-        no_requirement_hsk10=(
-            _LOCAL_USER_UAT_NO_REQUIREMENT_HSK10 if profile == _PROFILE_LOCAL_USER_UAT else None
-        ),
+        no_requirement_hsk10=None,
     )
 
     def backend_factory(
@@ -204,27 +194,7 @@ def create_test_only_v3_conformance_application(
     application.state.domain_reviewed = False
     application.state.release_ready = False
     application.state.automatic_completion_eligible = False
-    application.state.diagnostic_profile = profile
-    application.state.no_requirement_positive_control_hsk10 = (
-        _LOCAL_USER_UAT_NO_REQUIREMENT_HSK10 if profile == _PROFILE_LOCAL_USER_UAT else None
-    )
-
-    if profile == _PROFILE_LOCAL_USER_UAT:
-
-        @application.get(_UAT_READINESS_PATH, include_in_schema=False)
-        async def local_user_uat_readiness() -> dict[str, Any]:
-            return {
-                "status": "ready",
-                "mode": "LOCAL_USER_UAT_DIAGNOSTIC",
-                "diagnostic_profile": profile,
-                "claude_dependency": "owned_by_agent",
-                "data_source": "SYNTHETIC_V3_NO_RAG_QUALITY",
-                "no_requirement_positive_control_hsk10": (_LOCAL_USER_UAT_NO_REQUIREMENT_HSK10),
-                "release_ready": False,
-                "rag_quality_evaluated": False,
-                "automatic_completion_eligible": False,
-                "evidence_runtime_release": runtime_lease.identity.model_dump(mode="json"),
-            }
+    application.state.diagnostic_profile = _PROFILE_WIRE_CONFORMANCE
 
     return application
 
@@ -247,29 +217,22 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="mandatory acknowledgement that this is not production, legal, or RAG QA",
     )
-    parser.add_argument("--production-context", type=Path, required=True)
+    parser.add_argument("--provider-context", type=Path, required=True)
     parser.add_argument("--service-token-file", type=Path, required=True)
     parser.add_argument("--identity-output", type=Path, required=True)
     parser.add_argument("--host", choices=_LITERAL_LOOPBACK_HOSTS, required=True)
     parser.add_argument("--port", type=_port, required=True)
-    parser.add_argument(
-        "--profile",
-        choices=_PROFILES,
-        default=_PROFILE_WIRE_CONFORMANCE,
-        help="explicit non-release fixture profile",
-    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     application = create_test_only_v3_conformance_application(
-        production_context=args.production_context,
+        provider_context=args.provider_context,
         service_token_file=args.service_token_file,
         identity_output=args.identity_output,
         host=args.host,
         port=args.port,
-        profile=args.profile,
     )
     identity = application.state.runtime_v3_release_loader.acquire().identity
     print(
@@ -280,7 +243,7 @@ def main(argv: list[str] | None = None) -> int:
                 "event": "test_only_evidence_v3_conformance_starting",
                 "host": args.host,
                 "port": args.port,
-                "diagnostic_profile": args.profile,
+                "diagnostic_profile": _PROFILE_WIRE_CONFORMANCE,
                 "rag_quality_evaluated": False,
                 "release_ready": False,
                 "runtime_release_v3_sha256": identity.runtime_release_v3_sha256,

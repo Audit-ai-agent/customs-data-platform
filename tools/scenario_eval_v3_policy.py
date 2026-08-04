@@ -3,7 +3,7 @@
 The material in this module is a public UAT fixture.  Its deterministic private
 keys are intentionally recoverable and therefore have no legal, domain-review,
 deployment, or Production authority.  The module lives outside
-``law_repository/src`` and is not part of the Production image allowlist.
+``law_repository/src`` and is not part of the provider-context source allowlist.
 """
 
 from __future__ import annotations
