@@ -477,17 +477,23 @@ def test_required_reranker_reorders_rrf_candidates_and_scores_graph_results() ->
     }
 
     class SearchBackend(runner.ScenarioEvalDatabaseBackend):
-        def __init__(self) -> None:
+        def __init__(
+            self,
+            *,
+            graph_rows: list[dict[str, Any]] | None = None,
+            graph_error: bool = False,
+        ) -> None:
             self._scenario_trace_collector = runner.ScenarioEvalTraceCollector()
             self._scenario_reranker_readiness = lambda: True
+            self.graph_calls: list[tuple[str, dict[str, Any]]] = []
+            self.graph_rows = (
+                [{"seed_article_pk": 2, "article_pk": 3}] if graph_rows is None else graph_rows
+            )
+            self.graph_error = graph_error
 
             def score(_query: str, passages: list[str]) -> list[float]:
                 return [
-                    0.95
-                    if "submission" in passage
-                    else 0.8
-                    if "correction" in passage
-                    else 0.1
+                    0.95 if "submission" in passage else 0.8 if "correction" in passage else 0.1
                     for passage in passages
                 ]
 
@@ -507,20 +513,35 @@ def test_required_reranker_reorders_rrf_candidates_and_scores_graph_results() ->
                 SimpleNamespace(article_pk=1, score=7.0, text=rows[1]["content"]),
             ]
 
-        def _run_neo4j(self, _query, parameters):
-            return [{"article_pk": 3}] if parameters["pk"] == 2 else []
+        def _run_neo4j(self, query, parameters):
+            self.graph_calls.append((query, parameters))
+            if self.graph_error:
+                raise TimeoutError("bounded graph query timed out")
+            return list(self.graph_rows)
 
         def _law_rows(self, article_pks, _as_of):
             return {article_pk: rows[article_pk] for article_pk in article_pks}
 
-    matches = SearchBackend().search_law_articles("submission correction", 3, _AS_OF)
+    backend = SearchBackend()
+    matches = backend.search_law_articles("submission correction", 3, _AS_OF)
 
+    assert backend.graph_calls == [
+        (runner._BATCH_EXPAND_CYPHER, {"seed_pks": [2, 1]})  # noqa: SLF001
+    ]
     assert [match.row["article_pk"] for match in matches] == [2, 3, 1]
     assert matches[0].score == 0.95
     assert matches[1].retrieval_methods == ("graph",)
     assert matches[1].score == 0.8
     assert all("reranker" not in match.raw_scores for match in matches)
     assert all(0.0 <= match.score <= 1.0 for match in matches)
+
+    with pytest.raises(TimeoutError, match="graph query timed out"):
+        SearchBackend(graph_error=True).search_law_articles("submission correction", 3, _AS_OF)
+
+    with pytest.raises(runner.ThreeLawV3ScenarioEvalError, match="requested seed"):
+        SearchBackend(graph_rows=[{"seed_article_pk": 99, "article_pk": 3}]).search_law_articles(
+            "submission correction", 3, _AS_OF
+        )
 
 
 def test_scenario_eval_reranker_failure_is_not_lexically_degraded() -> None:

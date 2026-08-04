@@ -104,6 +104,15 @@ _TRACE_CONTEXT: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 # 568M-parameter cross-encoder cost on a local CPU.
 _RERANK_MIN_POOL = 10
 _RERANK_MAX_POOL = 10
+_BATCH_EXPAND_CYPHER = """
+UNWIND $seed_pks AS requested_seed_pk
+MATCH (a:Article {article_pk: requested_seed_pk})-[rel]->(t)
+RETURN a.article_pk AS seed_article_pk,
+       type(rel) AS rel, properties(rel) AS props,
+       labels(t) AS labels, t.article_pk AS article_pk,
+       t.law_id AS law_id, t.article_no AS article_no,
+       coalesce(t.title, t.name) AS title
+"""
 
 
 class ThreeLawV3ScenarioEvalError(v2.ThreeLawDiagnosticError):
@@ -284,8 +293,7 @@ class _StageTrace:
 class _RequestTrace:
     stages: dict[str, _StageTrace] = field(
         default_factory=lambda: {
-            name: _StageTrace()
-            for name in ("structured", "dense", "bm25", "rerank", "graph")
+            name: _StageTrace() for name in ("structured", "dense", "bm25", "rerank", "graph")
         }
     )
 
@@ -484,7 +492,10 @@ class ScenarioEvalDatabaseBackend(v2.ThreeLawDiagnosticDatabaseBackend):
         # "graph" stage means the one-hop law expansion specifically.  Keeping
         # those meanings separate prevents a successful HSK lookup from being
         # reported as successful graph expansion.
-        if query != v2.repository_module._EXPAND_CYPHER:  # noqa: SLF001
+        if query not in {
+            v2.repository_module._EXPAND_CYPHER,  # noqa: SLF001
+            _BATCH_EXPAND_CYPHER,
+        }:
             return super()._run_neo4j(query, parameters)
         started = time.monotonic()
         try:
@@ -607,12 +618,22 @@ class ScenarioEvalDatabaseBackend(v2.ThreeLawDiagnosticDatabaseBackend):
                 article_pk,
             ),
         )[:3]
+        related_rows = self._run_neo4j(
+            _BATCH_EXPAND_CYPHER,
+            {"seed_pks": seeds},
+        )
+        rows_by_seed: dict[int, list[dict[str, Any]]] = {seed_pk: [] for seed_pk in seeds}
+        for related in related_rows:
+            seed_article_pk = related.get("seed_article_pk")
+            if type(seed_article_pk) is not int or seed_article_pk not in rows_by_seed:
+                raise ThreeLawV3ScenarioEvalError(
+                    "graph expansion result is not bound to a requested seed"
+                )
+            rows_by_seed[seed_article_pk].append(related)
+
         for seed_pk in seeds:
-            related_rows = self._run_neo4j(
-                v2.repository_module._EXPAND_CYPHER,  # noqa: SLF001
-                {"pk": seed_pk},
-            )
-            for related in related_rows:
+            related_rows_for_seed = rows_by_seed[seed_pk]
+            for related in related_rows_for_seed:
                 related_pk = related.get("article_pk")
                 if not isinstance(related_pk, int) or related_pk == seed_pk:
                     continue
@@ -649,9 +670,7 @@ class ScenarioEvalDatabaseBackend(v2.ThreeLawDiagnosticDatabaseBackend):
         matches: list[LawArticleMatch] = []
         for article_pk, candidate in candidates.items():
             row = rows[article_pk]
-            text_tokens = set(
-                re.findall(r"[0-9A-Za-z가-힣]{2,}", str(row["content"]).lower())
-            )
+            text_tokens = set(re.findall(r"[0-9A-Za-z가-힣]{2,}", str(row["content"]).lower()))
             lexical = len(query_tokens & text_tokens) / len(query_tokens) if query_tokens else 0.0
             reranker_score = float(reranker_scores[article_pk])
             methods = cast(
