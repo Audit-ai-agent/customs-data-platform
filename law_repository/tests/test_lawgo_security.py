@@ -54,6 +54,14 @@ def test_get_requires_real_credential_before_network(
         lawgo.get("lawService.do", target="law", ID="001556")
 
 
+def test_official_client_has_no_checkout_raw_cache_writer() -> None:
+    """Only the bounded UAT builder owns raw official source persistence."""
+
+    assert not hasattr(lawgo, "RAW_DIR")
+    assert not hasattr(lawgo, "fetch_current_law")
+    assert not hasattr(lawgo, "fetch_law_by_mst")
+
+
 def test_get_rejects_redirect_without_leaking_credential(
     monkeypatch: pytest.MonkeyPatch,
     initialized_session: requests.Session,

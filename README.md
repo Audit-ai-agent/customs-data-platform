@@ -1,80 +1,115 @@
 # Customs Data Platform
 
 Korean customs-law ingestion, three local knowledge stores, and the typed
-Evidence API consumed by `customs-ai-agent`. The repository owns public
-Evidence schemas and provider-context generation; it does not publish a
-deployment image, cloud recipe, or release workflow.
+Evidence API consumed by `customs-ai-agent`. This repository owns the Evidence
+schemas and Data-side development/UAT profiles; it does not publish an image,
+cloud deployment, or release workflow.
 
 ## Team development
 
 Clone this repository beside the other product repositories and the shared
-`customs-engineering-harness`. The normal team path is:
+`customs-engineering-harness`, then run the normal checks once:
 
 ```powershell
 Set-Location ..\customs-engineering-harness
 .\harness\eng.ps1 doctor
-.\harness\eng.ps1 setup --repo customs-data-platform
-.\harness\eng.ps1 check quick --repo customs-data-platform
-.\harness\eng.ps1 check contract --repo customs-data-platform
+.\harness\eng.ps1 setup --repo data_platform
+.\harness\eng.ps1 check quick --repo data_platform
 ```
 
-The platform never imports sibling repositories or grants them direct access
-to PostgreSQL, Qdrant, or Neo4j. Agent consumers use the versioned Evidence
-HTTP schemas in `contracts/evidence/`.
-
-## Local knowledge stores
-
-For ingestion or local database work, use Docker Desktop and Python 3.11.
-Credentials and downloaded source data stay in the ignored `law_repository/.env`
-and `law_repository/data/raw/` paths.
+The default full-stack Data dependency is a deterministic, loopback-only
+fixture. It needs no Docker, model cache, Law API key, or Claude key.
 
 ```powershell
-uv sync --locked --extra rag --extra ingestion --group dev
-Copy-Item law_repository/.env.example law_repository/.env
-docker compose -f law_repository/docker-compose.yml up -d --wait
-uv run --locked --extra rag --extra ingestion python tools/local_preflight.py --phase services
-Push-Location law_repository
-uv run --project .. --locked --extra rag --extra ingestion python scripts/migrate.py
-uv run --project .. --locked --extra rag --extra ingestion python -m src.ingest.hsk
-uv run --project .. --locked --extra rag --extra ingestion python -m src.ingest.laws
-uv run --project .. --locked --extra rag --extra ingestion python -m src.ingest.ccct --load-only
-uv run --project .. --locked --extra rag --extra ingestion python -m src.ingest.graph
-Pop-Location
+Set-Location ..\customs-data-platform
+# The Harness setup command performs this once; direct use is identical.
+uv sync --locked --group dev --python 3.11
+uv run --locked --no-sync --group dev python tools/run_dev_fixture_evidence.py `
+  --host 127.0.0.1 --port 18083
 ```
 
-`src.webapp` is a local demo only. Bind it only to a trusted local network; it
-is not an Agent runtime endpoint.
+The generated bearer token remains only in
+`_local/profiles/dev-fixture/evidence-service-token`. The Agent sends it as
+`Authorization: Bearer ...` with `X-Customs-Service-Mode: local-development`.
+The fixture preserves the Evidence V3 request/response body but is synthetic,
+human-review-only, and never a legal or release result.
 
-## Contracts and provider context
+## Optional Data-store development
 
-Contract byte drift is checked locally and in the repository CI:
+Use real local PostgreSQL/Qdrant/Neo4j only while changing Data ingestion or
+retrieval behavior. This profile has its own Docker project, ports, volumes,
+and random local passwords, so it does not collide with functional UAT.
 
 ```powershell
-uv run --locked --extra rag python tools/check_contract_drift.py
+uv run --locked --no-sync --group dev python tools/dev_store.py init
+uv run --locked --no-sync --group dev python tools/dev_store.py compose up
+uv sync --locked --group dev --extra store --extra ingestion --python 3.11
+uv run --locked --no-sync --group dev --extra store --extra ingestion python tools/dev_store.py exec -- `
+  python -m src.ingest.hsk
 ```
 
-An approved operator can make a secret-free provider context from one clean
-commit. The output directory must be outside the repository. It contains only
-runtime source, canonical schemas, `source-manifest.json`, and provider digest
-documents; it never copies data, secrets, tests, Docker assets, or Git metadata.
+## Real functional UAT: three customs laws
+
+`functional-uat-3law` verifies the actual local service path with the exact
+three law IDs `001556`, `002421`, and `006392` as of `2026-08-05`. It is a
+functional check, not Production approval: results remain human-review-only,
+and there is no release admission, signature, trust store, quality gate, or
+deployment step.
 
 ```powershell
-uv run --locked --extra rag python tools/build_provider_context.py `
-  --repository . --output <EXTERNAL_PROVIDER_CONTEXT>
+uv sync --locked --group dev --extra store --extra rag --extra ingestion --python 3.11
+uv run --locked --no-sync --group dev --extra store --extra rag --extra ingestion python tools/functional_uat_3law.py init
+# Add only your personal LAW_API_OC to the ignored _local profile config.
+uv run --locked --no-sync --group dev --extra store --extra rag --extra ingestion python tools/functional_uat_3law.py compose up
+uv run --locked --no-sync --group dev --extra store --extra rag --extra ingestion python tools/functional_uat_3law.py build --as-of 2026-08-05
+uv run --locked --no-sync --group dev --extra store --extra rag --extra ingestion python tools/functional_uat_3law.py serve `
+  --host 127.0.0.1 --port 18083
 ```
 
-The generic v2/v3 conformance servers accept `--provider-context` and a
-separately supplied token file. They are test fixtures, not a deployment path.
-Authorized local UAT is delivered as a Git-external operator bundle; its data,
-secrets, state, and results remain under the operator's `_local`/`_artifacts`
-boundary.
+To run a new three-law build on the same workstation, reset only this profile
+explicitly after the prior local run has finished:
+
+```powershell
+uv run --locked --no-sync --group dev --extra store --extra rag --extra ingestion python tools/functional_uat_3law.py reset `
+  --confirm-profile functional-uat-3law
+```
+
+This stops and removes only the `customs-functional-uat-3law` Docker project's
+volumes and its active build marker. It does not touch any other Docker
+project, legacy state, raw local law sources, or `_artifacts` results.
+
+The build downloads the pinned BGE models into `_local/cache/huggingface`,
+writes official raw law source only below
+`_local/profiles/functional-uat-3law/data/laws/`, and writes a redacted manifest
+with collection time, hashes, revisions, and counts to
+`_artifacts/functional-uat/<run-id>/manifest.json`. The server checks source
+hashes, model revisions/cache, Docker image digests, and store counts before it
+starts. `LAW_API_OC` is loaded only while `build` collects the three laws; the
+long-running `serve` process removes it from its environment and settings.
+Its Agent-facing mode is `functional-uat`. The bounded CCCT reference
+input is already versioned in this repository, so no data.go.kr key, bulk
+collection, or external refresh is part of team development or UAT.
 
 ## Boundaries
 
-- PostgreSQL is the source of truth; Qdrant and Neo4j are rebuildable projections.
-- Missing coverage, ambiguity, or store failures remain `partial` or `failed`.
-- Contract fields such as `production` and `production_release` keep their
-  fail-closed diagnostic meaning even though this repository has no production
-  deployment path.
-- See [ARCHITECTURE.md](ARCHITECTURE.md) and [docs/SECURITY.md](docs/SECURITY.md)
-  for the data and security invariants.
+- Agent consumers use versioned Evidence HTTP schemas in `contracts/evidence/`;
+  they never access Data stores directly.
+- Git contains code, V3 contracts, bounded HSK/CCCT reference inputs, and
+  tests only. Secrets, raw official responses, model binaries, Docker volumes,
+  and UAT results remain outside Git.
+- `dev-fixture` is the team default. `dev-store` is Data-only development.
+  `functional-uat-3law` is the explicit real-data functional check.
+
+## Local checks
+
+`setup` is the only step that installs or reuses dependencies. The following
+commands are deliberately `--no-sync`, so checks do not install, delete, or
+clean caches:
+
+```powershell
+uv run --locked --no-sync --group dev python tools/check_contract_drift.py
+uv run --locked --no-sync --group dev ruff format --check law_repository/src law_repository/tests tools
+uv run --locked --no-sync --group dev ruff check law_repository/src law_repository/tests tools
+uv run --locked --no-sync --group dev mypy
+uv run --locked --no-sync --group dev pytest -q
+```

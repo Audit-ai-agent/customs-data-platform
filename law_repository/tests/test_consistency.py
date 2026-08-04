@@ -1,13 +1,11 @@
-"""Phase 6 — 정합성 검증 (로드맵: EXCLUDE 겹침·시점쿼리 정확성·delta 멱등·HSK 상속 누락).
+"""Local-store consistency checks for optional Data implementation work.
 
 실데이터(적재 완료된 3-스토어)를 대상으로 저장소 간 불변식을 전수 검사한다.
-합성 데이터 단위검증은 test_schema.py(EXCLUDE 거부)·test_delta.py(델타 시나리오)가
-담당하고, 여기는 "지금 들어있는 데이터"가 불변식을 만족하는지를 본다.
+합성 데이터 단위검증과 달리, 여기는 "지금 들어있는 데이터"가 불변식을
+만족하는지를 확인한다.
 
 전제: docker compose 기동 + Phase 0~5 적재 완료. 미기동/미적재 시 skip.
-delta 멱등 재실행(네트워크 잡)은 pytest 가 아니라 운영 절차로 검증:
-  python -m src.sync.delta  두 번 → 두 번째가 "신규 버전 없음"이어야 한다.
-여기서는 promote() 의 실데이터 멱등만 트랜잭션 롤백 안에서 검사한다.
+이 검사는 기능 UAT의 품질 인증이나 배포 판정이 아니다.
 """
 
 from __future__ import annotations
@@ -43,7 +41,7 @@ def pg():
         cur.execute("SELECT count(*) FROM law_articles")
         if cur.fetchone()[0] == 0:
             conn.close()
-            pytest.skip("law_articles 비어있음 (python -m src.ingest.laws 필요)")
+            pytest.skip("law_articles 비어있음 (functional UAT build 필요)")
     yield conn
     conn.rollback()
     conn.close()
@@ -125,7 +123,7 @@ def test_no_overlapping_intervals_in_real_data(pg):
 
 
 def test_is_current_iff_effective_today(pg):
-    """is_current ⇔ 오늘 ∈ [valid_from, valid_to) — 전 행. 위반은 promote 잡 미실행 신호."""
+    """is_current ⇔ 오늘 ∈ [valid_from, valid_to) — 전 행."""
     with pg.cursor() as cur:
         cur.execute(
             """
@@ -134,9 +132,7 @@ def test_is_current_iff_effective_today(pg):
                                  AND (valid_to > current_date OR valid_to IS NULL))
             """
         )
-        assert cur.fetchone()[0] == 0, (
-            "is_current 와 유효구간 불일치 (python -m src.sync.delta 필요)"
-        )
+        assert cur.fetchone()[0] == 0
 
 
 def test_qdrant_point_id_iff_indexable(pg):
@@ -212,17 +208,6 @@ def test_as_of_boundaries_exactly_one_version(pg):
                         assert pk not in hits, (
                             f"as_of=valid_to({as_of}) 에 닫힌 버전 혼입(반열림 위반)"
                         )
-
-
-def test_promote_idempotent_on_real_data(pg):
-    """promote() 재실행 멱등 — 1회 정렬 후 2회째는 반드시 no-op. 롤백으로 미영속."""
-    from src.sync.delta import promote
-
-    with pg.cursor() as cur:
-        promote(cur, qc=None)  # 상태 정렬 (Qdrant 는 건드리지 않음)
-        second = promote(cur, qc=None)
-        assert second == {"demoted": 0, "promoted": 0}
-    pg.rollback()
 
 
 # ------------------------------------------------- B. PG ↔ Qdrant

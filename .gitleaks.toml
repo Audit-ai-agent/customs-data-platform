@@ -2,3 +2,11 @@ title = "customs-data-platform secret scanning"
 
 [extend]
 useDefault = true
+
+[[rules]]
+id = "customs-law-api-oc"
+description = "Non-empty LAW_API_OC credential assignment"
+regex = '''(?im)^[ \t]*["']?LAW_API_OC["']?[ \t]*(?:=|:)[ \t]*(["'][^"'\r\n]+["']|[^ \t\r\n"'#$(){}]+)[ \t]*(?:#[^\r\n]*)?$'''
+secretGroup = 1
+keywords = ["LAW_API_OC", "law_api_oc"]
+tags = ["customs", "law-api", "credential"]

@@ -1,8 +1,8 @@
-"""Fail when any Evidence runtime body/OpenAPI component drifts from schemas.
+"""Verify the two provider-owned Evidence V3 schemas used by local profiles.
 
-The JSON Schema is the provider-owned source of truth.  This check resolves
-local references and compares every wire-relevant JSON Schema keyword while
-ignoring documentation-only titles and descriptions.
+This intentionally checks only the live team boundary: V3 retrieval and
+readiness. Historical release/trust/provenance schemas are not an active
+contract and are deliberately absent from the check.
 """
 
 from __future__ import annotations
@@ -15,252 +15,65 @@ from typing import Any
 
 from pydantic import TypeAdapter
 
-
 ROOT = Path(__file__).resolve().parents[1]
 LAW_REPOSITORY = ROOT / "law_repository"
-SCHEMA_PATH = ROOT / "contracts" / "evidence" / "v1" / "rag_retrieval_v1.schema.json"
-READINESS_SCHEMA_PATH = ROOT / "contracts" / "evidence" / "v1" / "readiness_v1.schema.json"
-RUNTIME_READINESS_SCHEMA_PATH = ROOT / "contracts" / "evidence" / "v2" / "readiness_v2.schema.json"
-V3_SCHEMA_PATH = ROOT / "contracts" / "evidence" / "v3" / "rag_retrieval_v3.schema.json"
-POLICY_SCHEMA_PATH = ROOT / "contracts" / "evidence" / "v3" / "requirement_policy_v1.schema.json"
+V3_RETRIEVAL_SCHEMA_PATH = ROOT / "contracts" / "evidence" / "v3" / "rag_retrieval_v3.schema.json"
 V3_READINESS_SCHEMA_PATH = ROOT / "contracts" / "evidence" / "v3" / "readiness_v3.schema.json"
-TRUST_STORE_SCHEMA_PATH = (
-    ROOT / "contracts" / "evidence" / "v3" / "trusted_reviewer_store_v1.schema.json"
-)
-TRUST_LOCK_SCHEMA_PATH = (
-    ROOT / "contracts" / "evidence" / "v3" / "trusted_reviewer_lock_v1.schema.json"
-)
+
 sys.path.insert(0, str(LAW_REPOSITORY))
 
-from fastapi import FastAPI  # noqa: E402
-from src.runtime_api import configure_runtime_v2_application  # noqa: E402
-from src.runtime_api_v3 import configure_runtime_v3_application  # noqa: E402
 from src.evidence_v3 import RetrieveRequestV3, RetrieveResponseV3  # noqa: E402
-from src.requirement_policy_release import (  # noqa: E402
-    RequirementPolicyRelease,
-    TrustedReviewerStore,
-    TrustedReviewerStoreLock,
-)
-from src.runtime_release_v3 import EvidenceRuntimeReadinessV3  # noqa: E402
-from src.webapp import app  # noqa: E402
+from src.profile_wire import EvidenceRuntimeReadinessV3  # noqa: E402
 
 
-COMPONENTS = {
-    "RetrieveItem": "RetrieveItem",
-    "RetrieveRequest": "RetrieveRequest",
-    "RetrievalError": "EvidenceError",
-    "Evidence": "Evidence",
-    "RetrieveResult": "ItemEvidenceResult",
-    "RetrieveResponse": "RetrieveResponse",
-}
-READINESS_COMPONENTS = {
-    "ProviderBuildIdentity": "ProviderBuildIdentity",
-    "LawCorpusReadiness": "LawCorpusReadiness",
-    "LawIndexReadiness": "LawIndexReadiness",
-    "ReadinessResponse": "ReadinessResponse",
-}
-RUNTIME_READINESS_COMPONENTS = {
-    "EvidenceRuntimeReleaseIdentity": "EvidenceRuntimeReleaseIdentity",
-    "EvidenceRuntimeReadiness": "EvidenceRuntimeReadiness",
-}
-V3_COMPONENTS = {
-    "RetrieveItem": "RetrieveItem",
-    "EvidenceError": "EvidenceError",
-    "RequirementPolicyBinding": "RequirementPolicyBinding",
-    "EvidenceV3": "EvidenceV3",
-    "ItemEvidenceResultV3": "ItemEvidenceResultV3",
-    "RetrieveRequestV3": "RetrieveRequestV3",
-    "RetrieveResponseV3": "RetrieveResponseV3",
-}
-V3_READINESS_COMPONENTS = {
-    "EvidenceRuntimeReleaseIdentity": "EvidenceRuntimeReleaseIdentity",
-    "EvidenceRuntimeReleaseIdentityV3": "EvidenceRuntimeReleaseIdentityV3",
-}
+def _without_document_metadata(schema: dict[str, Any]) -> dict[str, Any]:
+    """Copy schema and remove the root metadata excluded from canonical bytes."""
+
+    normalized = dict(schema)
+    for key in ("$schema", "$id", "title"):
+        normalized.pop(key, None)
+    return normalized
 
 
-class _SchemaOnlyRuntimeLoader:
-    def acquire(self):
-        raise RuntimeError("schema-only application")
-
-    def assert_unchanged(self, _lease):
-        raise RuntimeError("schema-only application")
-
-
-runtime_app = configure_runtime_v2_application(
-    FastAPI(title="Evidence runtime v2 schema check"),
-    runtime_release_loader=_SchemaOnlyRuntimeLoader(),  # type: ignore[arg-type]
-    backend_factory=lambda _lease: None,  # type: ignore[arg-type,return-value]
-    test_only_conformance=True,
-)
-runtime_v3_app = configure_runtime_v3_application(
-    FastAPI(title="Evidence runtime v3 schema check"),
-    runtime_release_loader=_SchemaOnlyRuntimeLoader(),  # type: ignore[arg-type]
-    backend_factory=lambda _lease, _deadline: None,  # type: ignore[return-value]
-    test_only_conformance=True,
-)
-
-WIRE_KEYWORDS = {
-    "type",
-    "const",
-    "enum",
-    "required",
-    "additionalProperties",
-    "properties",
-    "items",
-    "anyOf",
-    "oneOf",
-    "minLength",
-    "maxLength",
-    "pattern",
-    "format",
-    "minimum",
-    "maximum",
-    "minItems",
-    "maxItems",
-    "uniqueItems",
-    "default",
-}
-
-
-def _resolve_ref(ref: str, root: dict[str, Any]) -> dict[str, Any]:
-    if not ref.startswith("#/"):
-        raise ValueError(f"Only local references are supported: {ref}")
-    node: Any = root
-    for part in ref[2:].split("/"):
-        node = node[part.replace("~1", "/").replace("~0", "~")]
-    return node
-
-
-def _signature(rule: Any, root: dict[str, Any]) -> Any:
-    if not isinstance(rule, dict):
-        return rule
-    if "$ref" in rule:
-        return _signature(_resolve_ref(rule["$ref"], root), root)
-
-    signature: dict[str, Any] = {}
-    for key in sorted(WIRE_KEYWORDS & rule.keys()):
-        value = rule[key]
-        if key == "properties":
-            signature[key] = {
-                name: _signature(child, root) for name, child in sorted(value.items())
-            }
-        elif key in {"items", "additionalProperties"} and isinstance(value, dict):
-            signature[key] = _signature(value, root)
-        elif key in {"anyOf", "oneOf"}:
-            children = [_signature(child, root) for child in value]
-            signature[key] = sorted(
-                children,
-                key=lambda child: json.dumps(child, ensure_ascii=False, sort_keys=True),
-            )
-        elif key in {"required", "enum"}:
-            signature[key] = sorted(value)
-        else:
-            signature[key] = value
-    # ``const`` already fixes the JSON value and therefore its type. Pydantic
-    # emits the redundant type keyword while the canonical schema omits it.
-    if "const" in signature:
-        signature.pop("type", None)
-    return signature
-
-
-def _compare_components(
-    *,
-    canonical_path: Path,
-    canonical: dict[str, Any],
-    openapi: dict[str, Any],
-    component_mapping: dict[str, str],
-) -> list[str]:
-    components = openapi["components"]["schemas"]
-    errors: list[str] = []
-    for canonical_name, openapi_name in component_mapping.items():
-        expected = _signature(canonical["$defs"][canonical_name], canonical)
-        actual = _signature(components[openapi_name], openapi)
-        if expected == actual:
-            continue
-        expected_text = json.dumps(expected, ensure_ascii=False, indent=2, sort_keys=True)
-        actual_text = json.dumps(actual, ensure_ascii=False, indent=2, sort_keys=True)
-        diff = "\n".join(
-            difflib.unified_diff(
-                expected_text.splitlines(),
-                actual_text.splitlines(),
-                fromfile=f"canonical:{canonical_path.name}:{canonical_name}",
-                tofile=f"openapi:{openapi_name}",
-                lineterm="",
-            )
+def _diff(*, expected: dict[str, Any], actual: dict[str, Any], path: Path) -> str:
+    expected_text = json.dumps(expected, ensure_ascii=False, indent=2, sort_keys=True)
+    actual_text = json.dumps(actual, ensure_ascii=False, indent=2, sort_keys=True)
+    return "\n".join(
+        difflib.unified_diff(
+            expected_text.splitlines(),
+            actual_text.splitlines(),
+            fromfile=f"canonical:{path.relative_to(ROOT)}",
+            tofile="runtime-model",
+            lineterm="",
         )
-        errors.append(diff)
-    return errors
+    )
 
 
 def check_contract_drift() -> list[str]:
-    openapi = app.openapi()
-    runtime_openapi = runtime_app.openapi()
-    runtime_v3_openapi = runtime_v3_app.openapi()
-    checks = (
-        (SCHEMA_PATH, COMPONENTS, openapi),
-        (READINESS_SCHEMA_PATH, READINESS_COMPONENTS, openapi),
-        (SCHEMA_PATH, COMPONENTS, runtime_openapi),
-        (
-            RUNTIME_READINESS_SCHEMA_PATH,
-            RUNTIME_READINESS_COMPONENTS,
-            runtime_openapi,
-        ),
-        (V3_SCHEMA_PATH, V3_COMPONENTS, runtime_v3_openapi),
-        (V3_READINESS_SCHEMA_PATH, V3_READINESS_COMPONENTS, runtime_v3_openapi),
-    )
+    """Return textual diffs if the active V3 models drift from canonical bytes."""
+
+    generated = {
+        V3_RETRIEVAL_SCHEMA_PATH: TypeAdapter(RetrieveRequestV3 | RetrieveResponseV3).json_schema(),
+        V3_READINESS_SCHEMA_PATH: EvidenceRuntimeReadinessV3.model_json_schema(),
+    }
     errors: list[str] = []
-    for path, mapping, selected_openapi in checks:
-        canonical = json.loads(path.read_text(encoding="utf-8"))
-        errors.extend(
-            _compare_components(
-                canonical_path=path,
-                canonical=canonical,
-                openapi=selected_openapi,
-                component_mapping=mapping,
-            )
-        )
-    generated_contracts = (
-        (V3_SCHEMA_PATH, TypeAdapter(RetrieveRequestV3 | RetrieveResponseV3).json_schema()),
-        (POLICY_SCHEMA_PATH, RequirementPolicyRelease.model_json_schema()),
-        (V3_READINESS_SCHEMA_PATH, EvidenceRuntimeReadinessV3.model_json_schema()),
-        (TRUST_STORE_SCHEMA_PATH, TrustedReviewerStore.model_json_schema()),
-        (TRUST_LOCK_SCHEMA_PATH, TrustedReviewerStoreLock.model_json_schema()),
-    )
-    for path, generated in generated_contracts:
-        canonical = json.loads(path.read_text(encoding="utf-8"))
-        for metadata_key in ("$schema", "$id", "title"):
-            canonical.pop(metadata_key, None)
-            generated.pop(metadata_key, None)
-        if canonical != generated:
-            expected_text = json.dumps(canonical, ensure_ascii=False, indent=2, sort_keys=True)
-            actual_text = json.dumps(generated, ensure_ascii=False, indent=2, sort_keys=True)
-            errors.append(
-                "\n".join(
-                    difflib.unified_diff(
-                        expected_text.splitlines(),
-                        actual_text.splitlines(),
-                        fromfile=f"canonical:{path.name}",
-                        tofile="runtime-model",
-                        lineterm="",
-                    )
-                )
-            )
+    for path, actual in generated.items():
+        expected = _without_document_metadata(json.loads(path.read_text(encoding="utf-8")))
+        normalized_actual = _without_document_metadata(actual)
+        if expected != normalized_actual:
+            errors.append(_diff(expected=expected, actual=normalized_actual, path=path))
     return errors
 
 
 def main() -> int:
     errors = check_contract_drift()
     if errors:
-        print("Evidence v1 contract drift detected:\n" + "\n\n".join(errors))
+        print("Evidence V3 contract drift detected:\n" + "\n\n".join(errors))
         return 1
     print(
-        "Evidence contracts match OpenAPI: "
-        f"{SCHEMA_PATH.relative_to(ROOT)}, {READINESS_SCHEMA_PATH.relative_to(ROOT)}, "
-        f"{RUNTIME_READINESS_SCHEMA_PATH.relative_to(ROOT)}, "
-        f"{V3_SCHEMA_PATH.relative_to(ROOT)}, {POLICY_SCHEMA_PATH.relative_to(ROOT)}, "
-        f"{V3_READINESS_SCHEMA_PATH.relative_to(ROOT)}, "
-        f"{TRUST_STORE_SCHEMA_PATH.relative_to(ROOT)}, "
-        f"{TRUST_LOCK_SCHEMA_PATH.relative_to(ROOT)}"
+        "Evidence V3 contracts match: "
+        f"{V3_RETRIEVAL_SCHEMA_PATH.relative_to(ROOT)}, "
+        f"{V3_READINESS_SCHEMA_PATH.relative_to(ROOT)}"
     )
     return 0
 

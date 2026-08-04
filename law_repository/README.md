@@ -1,54 +1,54 @@
-# Law repository
+# Local knowledge stores and Evidence API
 
-The Data Platform keeps Korean customs-law, HS, and CCCT knowledge in three
-local stores:
+The Data Platform uses three local stores:
 
 | Store | Responsibility |
 | --- | --- |
 | PostgreSQL | versioned law and requirement ledger |
 | Qdrant | dense/BM25 retrieval projection |
-| Neo4j | article and requirement graph projection |
+| Neo4j | article and HSK/requirement graph |
 
-`docker-compose.yml` is the only Docker definition in this repository. It
-binds all ports to `127.0.0.1` and is intended for a developer's workstation
-or an approved local UAT operator, not an internet-facing service.
+`docker-compose.yml` is a local-only store definition. It exposes ports only
+on `127.0.0.1`, uses immutable image digests, and relies on a profile-specific
+Compose project name rather than fixed container names.
 
-## Start a local workspace
-
-From the repository root:
-
-```powershell
-uv sync --locked --extra rag --extra ingestion --group dev
-Copy-Item law_repository/.env.example law_repository/.env
-docker compose -f law_repository/docker-compose.yml up -d --wait
-uv run --locked --extra rag --extra ingestion python tools/local_preflight.py --phase services
-Push-Location law_repository
-uv run --project .. --locked --extra rag --extra ingestion python scripts/migrate.py
-Pop-Location
-```
-
-The committed HSK and CCCT source files can be ingested without downloading
-external data. `src.ingest.laws` and `src.sync.delta` require approved external
-credentials supplied only through the local environment.
+Do not copy this repository's `.env.example` into a shared secret file. The
+profile commands generate random local database passwords outside Git:
 
 ```powershell
-Push-Location law_repository
-uv run --project .. --locked --extra rag --extra ingestion python -m src.ingest.hsk
-uv run --project .. --locked --extra rag --extra ingestion python -m src.ingest.ccct --load-only
-uv run --project .. --locked --extra rag --extra ingestion python -m src.ingest.graph
-Pop-Location
+# Optional real-store Data development
+uv run --locked --no-sync --group dev python tools/dev_store.py init
+uv run --locked --no-sync --group dev python tools/dev_store.py compose up
+
+# Real three-law functional UAT
+uv sync --locked --group dev --extra store --extra rag --extra ingestion --python 3.11
+uv run --locked --no-sync --group dev --extra store --extra rag --extra ingestion python tools/functional_uat_3law.py init
+uv run --locked --no-sync --group dev --extra store --extra rag --extra ingestion python tools/functional_uat_3law.py compose up
 ```
 
-## Local demo and Evidence API
+If a completed three-law run must be rebuilt, use the explicit scoped reset:
 
-`python -m src.webapp` is an unauthenticated local demo. Do not expose it to
-the public internet.
+```powershell
+uv run --locked --no-sync --group dev --extra store --extra rag --extra ingestion python tools/functional_uat_3law.py reset `
+  --confirm-profile functional-uat-3law
+```
 
-The authenticated Evidence runtime is created through
-`src.runtime_service` with `src.runtime_settings`. Its public API remains the
-versioned `/internal/rag/v1`, `/internal/rag/v2`, and `/internal/rag/v3`
-contracts. Agent consumers must not connect directly to these stores.
+It removes only the matching Compose project's volumes and active manifest;
+raw local source files and `_artifacts` outputs remain intact.
 
-The repository intentionally has no cloud, HF Space, image, release, or
-deployment instructions. Use the shared engineering harness for everyday
-checks and the separately provided operator bundle for authorized local UAT.
+For normal team full-stack development, do not start stores. Use
+`tools/run_dev_fixture_evidence.py` from the repository root. It provides the
+authenticated Evidence V3 endpoints on loopback with deterministic synthetic
+data and a generated local token. Its base setup requires only FastAPI,
+Pydantic, Uvicorn, and the development test tools; it does not install store
+clients or model packages.
+
+The functional UAT builder uses the official Law API only for the bounded
+three-law source collection. It requires a personal `LAW_API_OC` placed in its
+ignored profile config, stores raw official responses below that profile and
+models at `_local/cache/huggingface`, and records only collection time,
+hashes/counts/revisions in a UAT manifest. The CCCT reference input is already tracked, so no second
+API credential or bulk collection command is required. It does not represent a
+Production deployment or approval. The `serve` command deliberately removes
+the collection key from its process environment and settings before accepting
+any Evidence request.

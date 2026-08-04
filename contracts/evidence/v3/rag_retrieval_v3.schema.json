@@ -1,34 +1,6 @@
 {
   "$defs": {
-    "EvidenceError": {
-      "additionalProperties": false,
-      "properties": {
-        "code": {
-          "maxLength": 128,
-          "minLength": 1,
-          "title": "Code",
-          "type": "string"
-        },
-        "message": {
-          "maxLength": 2000,
-          "minLength": 1,
-          "title": "Message",
-          "type": "string"
-        },
-        "retryable": {
-          "title": "Retryable",
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "code",
-        "message",
-        "retryable"
-      ],
-      "title": "EvidenceError",
-      "type": "object"
-    },
-    "EvidenceV3": {
+    "Evidence": {
       "additionalProperties": false,
       "properties": {
         "agencies": {
@@ -143,16 +115,6 @@
             }
           ],
           "title": "Required Document Name"
-        },
-        "requirement_verification": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/RequirementPolicyBinding"
-            },
-            {
-              "type": "null"
-            }
-          ]
         },
         "retrieval_methods": {
           "items": {
@@ -275,13 +237,40 @@
         "retrieval_methods",
         "eligibility",
         "score",
-        "raw_scores",
-        "requirement_verification"
+        "raw_scores"
       ],
-      "title": "EvidenceV3",
+      "title": "Evidence",
       "type": "object"
     },
-    "ItemEvidenceResultV3": {
+    "EvidenceError": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        },
+        "retryable": {
+          "title": "Retryable",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "title": "EvidenceError",
+      "type": "object"
+    },
+    "ItemEvidenceResult": {
       "additionalProperties": false,
       "properties": {
         "candidate_hsk10s": {
@@ -311,7 +300,7 @@
         },
         "evidence": {
           "items": {
-            "$ref": "#/$defs/EvidenceV3"
+            "$ref": "#/$defs/Evidence"
           },
           "title": "Evidence",
           "type": "array"
@@ -360,52 +349,7 @@
         "evidence",
         "errors"
       ],
-      "title": "ItemEvidenceResultV3",
-      "type": "object"
-    },
-    "RequirementPolicyBinding": {
-      "additionalProperties": false,
-      "properties": {
-        "approved": {
-          "title": "Approved",
-          "type": "boolean"
-        },
-        "policy_release": {
-          "maxLength": 128,
-          "minLength": 1,
-          "title": "Policy Release",
-          "type": "string"
-        },
-        "policy_source_sha256": {
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Policy Source Sha256",
-          "type": "string"
-        },
-        "required_document_code": {
-          "maxLength": 128,
-          "minLength": 1,
-          "title": "Required Document Code",
-          "type": "string"
-        },
-        "verification_policy": {
-          "enum": [
-            "presence_only",
-            "content_match_required",
-            "external_verification_required",
-            "human_only"
-          ],
-          "title": "Verification Policy",
-          "type": "string"
-        }
-      },
-      "required": [
-        "required_document_code",
-        "verification_policy",
-        "policy_source_sha256",
-        "policy_release",
-        "approved"
-      ],
-      "title": "RequirementPolicyBinding",
+      "title": "ItemEvidenceResult",
       "type": "object"
     },
     "RetrieveItem": {
@@ -596,7 +540,7 @@
         },
         "results": {
           "items": {
-            "$ref": "#/$defs/ItemEvidenceResultV3"
+            "$ref": "#/$defs/ItemEvidenceResult"
           },
           "maxItems": 100,
           "title": "Results",

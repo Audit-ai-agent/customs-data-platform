@@ -298,18 +298,9 @@ def test_evidence_id_is_stable_across_requests_and_items():
     assert second.item_id == "invoice:99"
 
 
-def test_webapp_exposes_versioned_internal_route():
-    from src.webapp import app
-
-    paths = app.openapi()["paths"]
-    assert "post" in paths["/internal/rag/v1/retrieve"]
-    assert "/internal/rag/v1/health/live" in paths
-    assert "/internal/rag/v1/health/ready" in paths
-
-
 def test_readiness_rejects_a_partially_loaded_target_law_corpus(monkeypatch):
     from src.evidence import DatabaseEvidenceBackend
-    from src.ingest.laws import TARGET_LAWS
+    from src.functional_uat_spec import FUNCTIONAL_UAT_TARGET_LAWS as TARGET_LAWS
 
     content = "verified current article"
 
@@ -359,9 +350,9 @@ def test_readiness_rejects_a_partially_loaded_target_law_corpus(monkeypatch):
 
 def test_readiness_rejects_target_law_with_no_verified_current_article(monkeypatch):
     from src.evidence import DatabaseEvidenceBackend
-    from src.ingest.laws import TARGET_LAWS
+    from src.functional_uat_spec import FUNCTIONAL_UAT_TARGET_LAWS as TARGET_LAWS
 
-    assert len(TARGET_LAWS) == 58
+    assert len(TARGET_LAWS) == 3
 
     class FakeCursor:
         def __enter__(self):
@@ -402,7 +393,8 @@ def test_readiness_rejects_target_law_with_no_verified_current_article(monkeypat
     with pytest.raises(
         RuntimeError,
         match=(
-            r"expected=58, loaded=58, article_backed=57, "
+            rf"expected={len(TARGET_LAWS)}, loaded={len(TARGET_LAWS)}, "
+            rf"article_backed={len(TARGET_LAWS) - 1}, "
             r"missing=0, without_current_articles=1, "
             r"invalid_current_articles=0"
         ),
@@ -423,7 +415,7 @@ def test_readiness_rejects_any_invalid_current_target_article(
     monkeypatch, content, content_hash, version_mst, has_version
 ):
     from src.evidence import DatabaseEvidenceBackend
-    from src.ingest.laws import TARGET_LAWS
+    from src.functional_uat_spec import FUNCTIONAL_UAT_TARGET_LAWS as TARGET_LAWS
 
     rows = []
     for index, law in enumerate(TARGET_LAWS):
@@ -526,7 +518,7 @@ def test_law_graph_readiness_detects_equal_count_id_replacement(monkeypatch):
 
     monkeypatch.setattr("src.evidence.connect", lambda: FakeConnection())
     monkeypatch.setattr(
-        "src.db.qdrant.client",
+        "src.evidence.qdrant_client",
         lambda: SimpleNamespace(
             count=lambda *_args, **_kwargs: SimpleNamespace(count=2),
             scroll=lambda **_kwargs: (
@@ -607,7 +599,7 @@ def test_qdrant_readiness_detects_equal_count_id_replacement(monkeypatch):
 
     monkeypatch.setattr("src.evidence.connect", lambda: FakeConnection())
     monkeypatch.setattr(
-        "src.db.qdrant.client",
+        "src.evidence.qdrant_client",
         lambda: SimpleNamespace(
             count=lambda *_args, **_kwargs: SimpleNamespace(count=2),
             scroll=lambda **_kwargs: (
@@ -686,7 +678,7 @@ def test_qdrant_readiness_detects_duplicate_ids(monkeypatch):
 
     monkeypatch.setattr("src.evidence.connect", lambda: FakeConnection())
     monkeypatch.setattr(
-        "src.db.qdrant.client",
+        "src.evidence.qdrant_client",
         lambda: SimpleNamespace(
             count=lambda *_args, **_kwargs: SimpleNamespace(count=2),
             scroll=lambda **_kwargs: (

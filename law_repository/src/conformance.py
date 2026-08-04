@@ -1,8 +1,8 @@
-"""Explicit test-only backend for Evidence HTTP conformance tests.
+"""Deterministic fixture backend for tests and the default development profile.
 
-This module is never selected by an environment variable and is not used by
-the production ``app``.  It proves request/response/header behavior without
-pretending that the required 58-law production corpus has been loaded.
+It is selected only explicitly by the dev-fixture factory, never by an
+environment variable. It proves the Evidence HTTP behavior without claiming
+that stores or official law sources have been loaded.
 """
 
 from __future__ import annotations

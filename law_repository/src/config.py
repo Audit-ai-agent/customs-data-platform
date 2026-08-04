@@ -1,4 +1,4 @@
-"""환경설정 로딩 — 모든 시크릿/접속정보는 .env 에서. 값 하드코딩 금지."""
+"""Local Data profile settings; never auto-load a repository ``.env`` file."""
 
 from __future__ import annotations
 
@@ -7,37 +7,36 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # A generated workspace ``_local`` profile is imported explicitly by the
+    # launcher.  Reading a checkout-local .env implicitly would mix stale
+    # state into another developer's profile.
+    model_config = SettingsConfigDict(env_file=None, extra="ignore")
 
     # Postgres
     postgres_host: str = "localhost"
-    # Authenticated runtime paths can bypass per-request DNS with one explicit
-    # address. Localhost and literal-IP hosts are derived automatically.
-    postgres_hostaddr: str = ""
     # Keep the local host default aligned with docker-compose.yml. Port 5432
     # may already belong to another project on a developer workstation.
     postgres_port: int = 55432
     postgres_db: str = "trade_doc"
     postgres_user: str = "trade"
-    postgres_password: str = "change_me"
-    postgres_sslmode: str = ""  # 승인된 외부 runtime은 TLS mode를 명시한다.
+    # A profile initializer writes an actual local value under workspace
+    # _local.  Repository defaults must never make a weak database start.
+    postgres_password: str = ""
 
     # Qdrant
     qdrant_url: str = "http://localhost:6333"
     qdrant_http_port: int = 6333
     qdrant_grpc_port: int = 6334
-    qdrant_api_key: str = ""  # 승인된 외부 runtime만 사용 (로컬은 비움)
 
     # Neo4j
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_http_port: int = 7474
     neo4j_bolt_port: int = 7687
     neo4j_user: str = "neo4j"
-    neo4j_password: str = "change_me"
+    neo4j_password: str = ""
 
     # 외부 API
     law_api_oc: str = ""
-    data_go_kr_service_key: str = ""
 
     @model_validator(mode="after")
     def align_local_service_ports(self) -> "Settings":
@@ -59,7 +58,7 @@ class Settings(BaseSettings):
             f"postgresql://{self.postgres_user}:{self.postgres_password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
-        return dsn + (f"?sslmode={self.postgres_sslmode}" if self.postgres_sslmode else "")
+        return dsn
 
 
 settings = Settings()

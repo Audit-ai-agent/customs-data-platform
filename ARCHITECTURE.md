@@ -1,51 +1,50 @@
 # Data Platform Architecture
 
-## 목적과 불변식
+## Responsibility
 
-이 플랫폼의 목적은 Agent가 검증 가능한 법령·요건 근거를 재현 가능하게 받도록 하는 것입니다. 검색 결과의 편의보다 다음 안전 불변식을 우선합니다.
-
-1. PostgreSQL 원장이 진실의 원천이며 Qdrant와 Neo4j는 재생성 가능한 projection이다.
-2. `knowledge_snapshot_id`, source record, version hash가 없는 결과는 최종 근거가 될 수 없다.
-3. 정확한 HSK10 또는 유일한 HSK10 descendant로 해소된 HS6만 finding 근거를 만들 수 있다.
-4. 장애·모호성·커버리지 누락은 `partial|failed`로 반환하며 “요건 없음”으로 바꾸지 않는다.
-5. Structured CCCT Requirement는 `top_k`로 자르지 않는다. Hybrid 법령 결과만 순위를 사용한다.
-6. 설정된 대상 법령 corpus가 일부만 적재되면 readiness와 Hybrid 법령 검색은 fail-closed 한다.
-7. 대상 58개 법령은 비어 있지 않은 현행 조문과 content hash·version provenance가
-   있어야 하며, PostgreSQL/Qdrant index count 및 PostgreSQL/Neo4j article_pk
-   양방향 집합이 일치해야 한다.
-8. readiness에서 확인한 provider build와 POST 요청·응답의 네 결속 헤더가 다르면
-   Evidence 본문을 사용하지 않는다.
-
-## 데이터 흐름
+The platform owns Korean customs knowledge ingestion, PostgreSQL/Qdrant/Neo4j
+local stores, and the versioned Evidence HTTP schemas consumed by the Agent.
+The Agent is the only sibling service that calls Evidence; no sibling imports
+Data code or accesses these stores directly.
 
 ```text
-공식 법령/HSK/CCCT source
-  -> raw/normalized ingestion
-  -> PostgreSQL versioned ledger + snapshot
-  -> Qdrant dense/BM25 projection
-  -> Neo4j article and HSK/Requirement projection
-  -> Evidence API v1
-  -> AI Agent (version-pinned consumer)
+official law / tracked HSK + CCCT inputs
+  -> PostgreSQL ledger
+  -> Qdrant and Neo4j projections
+  -> Evidence V3 HTTP
+  -> AI Agent
 ```
 
-`/api/search`와 `/api/retrieve`는 데모·기존 Hybrid 검색 경로이고, Agent의 안정 경계는 `/internal/rag/v1/retrieve`입니다. 두 경로는 공존하지만 Agent 계약은 후자만 보장합니다.
+PostgreSQL remains the source of truth. Qdrant and Neo4j are local,
+rebuildable projections. Missing data, ambiguous HS resolution, or store
+failure returns `partial` or `failed`; it never becomes a claim that no
+requirement exists.
 
-## 계약 변경 정책
+## Profiles
 
-- retrieval canonical schema: `contracts/evidence/v1/rag_retrieval_v1.schema.json`
-- readiness canonical schema: `contracts/evidence/v1/readiness_v1.schema.json`
-- OpenAPI와 canonical schema의 wire keyword 차이는 `tools/check_contract_drift.py`가 실패시킨다.
-- v1 breaking change는 금지한다. 필요한 경우 `contracts/evidence/v2`와 새 endpoint를 추가한다.
-- 소비자는 provider release/revision/build와 retrieval schema SHA-256을 함께 고정한다.
-- authenticated runtime factory는 Database backend만 만들며 test-only
-  conformance backend를 환경변수로 활성화할 수 없다. Test fixture는 명시적인
-  runner와 provider context로만 생성한다.
+| Profile | Purpose | Dependencies | Result boundary |
+| --- | --- | --- | --- |
+| `dev-fixture` | normal full-stack development | Python only | deterministic synthetic Evidence, human review only |
+| `dev-store` | Data implementation work | local Docker | isolated disposable stores |
+| `functional-uat-3law` | actual local feature check | local Docker, Law API, model cache | bounded real Data state, human review only |
 
-## 평가 기준
+All profile services bind to literal loopback addresses. The caller must send a
+profile-specific bearer token and `X-Customs-Service-Mode`; Data returns the
+same mode header. This prevents a development fixture and actual functional
+UAT from being combined accidentally.
 
-- Structured gold: 모든 case 계약 유효, required document/agency row 보존, false-positive 0
-- Hybrid gold: Hit@5 1.0, Recall@10 1.0, nDCG@10 0.8 이상
-- citation metadata completeness 1.0
-- 로컬 통합 검사의 예상치 못한 skip 0
+## Contracts and UAT boundary
 
-평가 기준은 기능 검증 기준이며 실세계 전체 모집단 성능을 보장한다는 의미가 아닙니다.
+`contracts/evidence/v3/` remains the canonical Evidence request/response
+shape. The local profile servers preserve that JSON body. Readiness is limited
+to an operational `status`; the mode response header is the local-profile
+binding. It carries no release, signature, trust, approval, quality-gate, or
+deployment-admission metadata.
+
+The functional UAT manifest contains only profile, date, law IDs, official
+source hashes/MSTs, source-collection time, model IDs/revisions, store counts,
+image digests, and a build timestamp. Raw source stays under the profile-local
+`_local` path; models are cached once at `_local/cache/huggingface`. The bounded CCCT
+reference input is tracked and loaded locally; no data.go.kr credential or
+bulk refresh path remains. Passwords, bearer tokens, Docker volumes, and
+output artifacts stay outside Git.

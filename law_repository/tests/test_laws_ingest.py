@@ -1,6 +1,6 @@
-"""Phase 2 적재 결과 정합성 검증.
+"""Local functional-UAT store result consistency checks.
 
-전제: python -m src.ingest.laws 완료 상태. 미적재/미기동 시 skip.
+전제: functional UAT build 완료 상태. 미적재/미기동 시 skip.
 """
 
 from __future__ import annotations
@@ -23,13 +23,13 @@ def cur():
     with conn.cursor() as c:
         c.execute("SELECT count(*) FROM law_articles")
         if c.fetchone()[0] == 0:
-            pytest.skip("law_articles 미적재 (python -m src.ingest.laws 필요)")
+            pytest.skip("law_articles 미적재 (functional UAT build 필요)")
         yield c
     conn.close()
 
 
 def test_target_laws_loaded(cur):
-    """laws 테이블 ⊇ TARGET_LAWS (관세 3법 + 특수물자 개별법령 55, 2026-07-12 확장)."""
+    """The functional-UAT stores contain exactly the fixed customs three-law set."""
     from src.ingest.laws import TARGET_LAWS
 
     cur.execute("SELECT law_id, law_name, hierarchy FROM laws")
@@ -42,11 +42,7 @@ def test_target_laws_loaded(cur):
 
 
 def test_temporal_current_invariant(cur):
-    """불변식: is_current ⇔ 오늘이 유효구간 [valid_from, valid_to) 안.
-
-    (초기적재 직후엔 전부 열린 행이지만, 델타 반영 후엔 닫힌 이력 행이 정상 존재 —
-    승격 잡이 매일 이 동치를 유지한다.)
-    """
+    """``is_current`` agrees with the stored validity interval."""
     cur.execute(
         """
         SELECT count(*) FROM law_articles
@@ -56,7 +52,7 @@ def test_temporal_current_invariant(cur):
         )
         """
     )
-    assert cur.fetchone()[0] == 0, "is_current 가 유효구간과 불일치 (승격 잡 누락?)"
+    assert cur.fetchone()[0] == 0, "is_current 가 유효구간과 불일치"
 
 
 def test_content_hash_present(cur):
@@ -67,7 +63,7 @@ def test_content_hash_present(cur):
 
 
 def test_version_mst_matches_law_versions(cur):
-    """조문의 version_mst 는 law_versions 에 등록된 MST 여야 한다 (Phase 3 조인 전제)."""
+    """Every stored article MST belongs to its law version ledger."""
     cur.execute(
         """
         SELECT count(*) FROM law_articles a

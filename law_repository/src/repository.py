@@ -30,14 +30,12 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Iterable, Literal
 
-from psycopg import sql
-from psycopg.rows import dict_row
-
-from src.db.neo4j import driver as make_driver
-from src.db.postgres import connect
-from src.db.qdrant import BM25_VECTOR, COLLECTION, DENSE_VECTOR, client as qdrant_client
-from src.embed import bm25
-
+# Keep the default fixture import free of store/RAG packages.  The values also
+# intentionally match ``src.db.qdrant``; only store-backed calls import that
+# module at execution time.
+COLLECTION = "customs_law_current"
+DENSE_VECTOR = "dense"
+BM25_VECTOR = "bm25"
 ARMS = (DENSE_VECTOR, BM25_VECTOR)
 
 
@@ -73,6 +71,11 @@ def resolve_as_of(
     """(law_id, article_no, paragraph_no) 의 as_of 시점 유효 버전 1건. EXCLUDE 제약이
     구간 겹침을 막으므로 최대 1건. 그 시점에 조문이 없었으면 None."""
     pred, params = _temporal_predicate(as_of)
+    from psycopg import sql
+    from psycopg.rows import dict_row
+
+    from src.db.postgres import connect
+
     with connect() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             sql.SQL(
@@ -105,6 +108,8 @@ def _arm_query(qc, arm: str, query: str, limit: int):
     if arm == BM25_VECTOR:
         from qdrant_client import models
 
+        from src.embed import bm25
+
         sidx, sval = bm25.encode_query(query)
         return qc.query_points(
             COLLECTION,
@@ -125,6 +130,8 @@ def search(
     D 시점 버전으로 재확정해 그 시점 본문을 반환한다(설계 §6). D 에 존재하지
     않던 조문은 탈락.
     """
+    from src.db.qdrant import client as qdrant_client
+
     qc = qdrant_client()
     recall = limit if as_of is None else max(limit * 3, limit)
     points = _arm_query(qc, arm, query, recall)
@@ -205,6 +212,8 @@ def resolve_hsk(code: str | None) -> HskResolution:
     if normalized is None:
         return HskResolution("missing", None, None)
     prefix = normalized if len(normalized) == 6 else None
+    from src.db.neo4j import driver as make_driver
+
     drv = make_driver()
     try:
         with drv.session() as s:
@@ -278,6 +287,8 @@ def hsk_requirements(code: str, trade_type: str | None = None, as_of: date | Non
     }
     as_of_str = (as_of or date.today()).isoformat()
     wire_trade_type = {"수입": "import", "수출": "export"}.get(trade_type, trade_type)
+
+    from src.db.neo4j import driver as make_driver
 
     drv = make_driver()
     try:
@@ -355,6 +366,8 @@ def expand_article(article_pk: int) -> list[dict]:
     설계 §4.3 의 조문 그래프는 별도 적재 단계에서 구축된다. 아직 미구축이면
     매칭이 없어 [] 를 반환(graceful) — 그래프가 생기면 코드 변경 없이 동작한다.
     """
+    from src.db.neo4j import driver as make_driver
+
     drv = make_driver()
     try:
         with drv.session() as s:
@@ -367,6 +380,8 @@ def expand_article(article_pk: int) -> list[dict]:
 
 
 def _demo() -> int:
+    from src.db.neo4j import driver as make_driver
+
     print("[repository/dense] '수입신고 시 세관장 확인이 필요한 물품'")
     for h in search("수입신고 시 세관장 확인이 필요한 물품", arm=DENSE_VECTOR, limit=3):
         head = h.text.splitlines()[0]
