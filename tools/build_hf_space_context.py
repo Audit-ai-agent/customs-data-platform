@@ -30,7 +30,8 @@ FIXED_FILES = {
     ),
     "law_repository/deploy/hf_space/Dockerfile": "Dockerfile",
     "law_repository/deploy/hf_space/README.md": "README.md",
-    "law_repository/requirements.txt": "law_repository/requirements.txt",
+    "pyproject.toml": "pyproject.toml",
+    "uv.lock": "uv.lock",
 }
 
 

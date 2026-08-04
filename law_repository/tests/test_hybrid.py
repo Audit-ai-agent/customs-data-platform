@@ -9,6 +9,7 @@ from datetime import date
 import pytest
 
 import src.hybrid as hy
+from src.embed import rerank
 from src.repository import Hit
 
 
@@ -131,6 +132,13 @@ def test_retrieve_degrades_to_rrf_when_reranker_unavailable(monkeypatch):
     assert not r["reranked"]
     assert r["evidence"][0]["score"] is None
     assert r["evidence"][0]["rrf_score"] > 0
+
+
+def test_required_rerank_boundary_never_degrades(monkeypatch):
+    monkeypatch.setattr(rerank, "scores", lambda _query, _passages, **_kwargs: None)
+
+    with pytest.raises(rerank.RerankUnavailable, match="unavailable"):
+        rerank.required_scores("query", ["passage"])
 
 
 # ------------------------------------------------------------ 실데이터 스모크

@@ -757,7 +757,7 @@ def test_hybrid_law_support_is_packaged_but_not_counted_as_requirement():
         lookup = RequirementLookup(True, ())
 
         def search_law_articles(self, query, top_k, as_of):
-            assert "세관장 확인 관세법" in query
+            assert query == "수입 신고 제출서류 세관장 확인 허가 승인 증명 관세법"
             assert top_k == 8
             return (
                 LawArticleMatch(
@@ -796,6 +796,23 @@ def test_hybrid_law_support_is_packaged_but_not_counted_as_requirement():
     assert evidence.eligibility == "supporting"
     assert evidence.article_no == "제226조"
     assert evidence.retrieval_methods == ["dense", "bm25", "graph"]
+
+
+def test_law_support_query_uses_issue_meaning_without_product_noise():
+    from src.evidence import _law_query
+
+    request = _request(
+        validation_issue_codes=["INVOICE_NO_MISMATCH"],
+        query_intent="law_support",
+    )
+    query = _law_query(request, request.items[0], "0303540000")
+
+    assert query == (
+        "수입 신고 제출서류 세관장 확인 허가 승인 증명 관세법 "
+        "송장번호 불일치 신고사항 보완 상업송장 대조"
+    )
+    assert "0303540000" not in query
+    assert request.items[0].description not in query
 
 
 def test_requested_law_support_failure_makes_coverage_partial():

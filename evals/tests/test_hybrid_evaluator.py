@@ -1,4 +1,9 @@
-from evals.hybrid.evaluator import evaluate_hybrid_case, summarize_hybrid
+from evals.hybrid.evaluator import (
+    evaluate_hybrid_case,
+    load_hybrid_gold,
+    load_scenario_eval_hybrid_gold,
+    summarize_hybrid,
+)
 from evals.contract import stable_evidence_id
 
 
@@ -86,3 +91,41 @@ def test_hybrid_gate_fails_when_relevant_article_is_missing():
     assert report["passed"] is False
     assert report["metrics"]["hit_at_5"] == 0
     assert report["metrics"]["recall_at_10"] == 0.0
+
+
+def test_scenario_eval_gold_is_additive_and_rejects_unrelated_top_three():
+    original = load_hybrid_gold()
+    scenario = load_scenario_eval_hybrid_gold()
+    assert len(original) == 5
+    assert len(scenario) == 2
+    assert {item["case_id"] for item in scenario} == {
+        "scenario_eval_clean_7318151000",
+        "scenario_eval_invoice_number_mismatch",
+    }
+
+    case = scenario[0]
+    passed = evaluate_hybrid_case(
+        case,
+        _response(
+            [
+                ("001556", "제245조"),
+                ("001556", "제226조"),
+                ("002421", "제250조"),
+            ]
+        ),
+    )
+    assert passed["passed"] is True
+    assert passed["forbidden_top3_hits"] == []
+
+    failed = evaluate_hybrid_case(
+        case,
+        _response(
+            [
+                ("006392", "제44조"),
+                ("001556", "제245조"),
+                ("001556", "제226조"),
+            ]
+        ),
+    )
+    assert failed["passed"] is False
+    assert failed["forbidden_top3_hits"] == ["006392:제44조"]

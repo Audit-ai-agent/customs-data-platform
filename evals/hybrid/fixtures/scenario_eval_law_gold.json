@@ -1,0 +1,26 @@
+[
+  {
+    "case_id": "scenario_eval_clean_7318151000",
+    "description": "요건이 없는 정상 수입 심사에서 신고 제출서류와 세관장 확인 조문을 우선한다.",
+    "query": "수입 신고 제출서류 세관장 확인 허가 승인 증명 관세법",
+    "relevant": [
+      {"law_id": "001556", "article_no": "제245조", "gain": 3},
+      {"law_id": "001556", "article_no": "제226조", "gain": 2}
+    ],
+    "forbidden_top3": [
+      {"law_id": "006392", "article_no": "제44조"}
+    ]
+  },
+  {
+    "case_id": "scenario_eval_invoice_number_mismatch",
+    "description": "송장번호 불일치 재심사에서 제출서류와 신고사항 보완 조문을 우선한다.",
+    "query": "수입 신고 제출서류 세관장 확인 허가 승인 증명 관세법 송장번호 불일치 신고사항 보완 상업송장 대조",
+    "relevant": [
+      {"law_id": "001556", "article_no": "제249조", "gain": 3},
+      {"law_id": "001556", "article_no": "제245조", "gain": 2}
+    ],
+    "forbidden_top3": [
+      {"law_id": "006392", "article_no": "제44조"}
+    ]
+  }
+]

@@ -69,7 +69,7 @@ jobs:
           enable-cache: true
 
       - name: Install locked environment
-        run: uv sync --locked --group dev
+        run: uv sync --locked --extra rag --extra ingestion --group dev
 
       - name: Start run-scoped ephemeral knowledge stores
         shell: bash
@@ -110,19 +110,23 @@ jobs:
           LAW_API_OC: ${{ secrets.LAW_API_OC }}
           DATA_GO_KR_SERVICE_KEY: ${{ secrets.DATA_GO_KR_SERVICE_KEY }}
         run: |
-          uv run --locked python scripts/migrate.py
-          uv run --locked python -m src.ingest.hsk
-          uv run --locked python -m src.ingest.laws
-          uv run --locked python -m src.ingest.ccct --load-only
-          uv run --locked python -m src.ingest.graph
-          uv run --locked python -m src.sync.delta --since "$DELTA_SINCE"
+          uv run --locked --extra rag --extra ingestion python scripts/migrate.py
+          uv run --locked --extra rag --extra ingestion python -m src.ingest.hsk
+          uv run --locked --extra rag --extra ingestion python -m src.ingest.laws
+          uv run --locked --extra rag --extra ingestion python -m src.ingest.ccct --load-only
+          uv run --locked --extra rag --extra ingestion python -m src.ingest.graph
+          uv run --locked --extra rag --extra ingestion python -m src.sync.delta --since "$DELTA_SINCE"
 
       - name: Run live suite and reject every skip
         working-directory: law_repository
-        run: uv run --locked pytest -q --junitxml=../live.junit.xml tests
+        run: >-
+          uv run --locked --extra rag --extra ingestion
+          pytest -q --junitxml=../live.junit.xml tests
 
       - name: Enforce Live Gate semantics
-        run: uv run --locked python tools/assert_no_skips.py live.junit.xml
+        run: >-
+          uv run --locked --extra rag --extra ingestion
+          python tools/assert_no_skips.py live.junit.xml
 
       - name: Upload exact-run result
         if: always()

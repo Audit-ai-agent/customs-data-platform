@@ -617,6 +617,14 @@ _BACKEND_ERROR_MESSAGES = {
     "LAW_RETRIEVAL_FAILED": "Law retrieval failed",
 }
 
+_VALIDATION_ISSUE_LAW_TERMS = {
+    "INVOICE_NO_MISMATCH": "송장번호 불일치 신고사항 보완 상업송장 대조",
+    "INV_LINE_AMOUNT_MISMATCH": "송장 품목금액 불일치 과세가격 신고사항 보완",
+    "QTY_MISMATCH_INVOICE_PACKING": "송장 포장명세서 수량 불일치 신고사항 보완",
+    "ORIGIN_MISMATCH": "원산지증명서 원산지 불일치 신고사항 보완",
+    "COUNTRY_OF_ORIGIN_MISMATCH": "원산지 국가 불일치 신고사항 보완",
+}
+
 
 def _backend_error(code: str) -> EvidenceError:
     """Return a fixed public message; backend exception text stays server-side."""
@@ -703,16 +711,21 @@ def _law_match_to_evidence(
     )
 
 
-def _law_query(request: RetrieveRequest, item: RetrieveItem, hsk10: str) -> str:
+def _law_query(request: RetrieveRequest, _item: RetrieveItem, _hsk10: str) -> str:
+    # HSK-specific legal requirements are resolved authoritatively by the
+    # structured lookup above.  Law-article retrieval supports explanation,
+    # so goods descriptions and HSK digits must not drown out the procedural
+    # customs-law intent (the former ranking put an unrelated exemption rule
+    # above declaration-document provisions for ordinary steel fasteners).
     direction = "수입" if request.trade_type == "import" else "수출"
-    issues = " ".join(request.validation_issue_codes)
+    issue_terms = " ".join(
+        _VALIDATION_ISSUE_LAW_TERMS.get(code, "") for code in request.validation_issue_codes
+    )
     return " ".join(
         part
         for part in (
-            item.description,
-            f"HSK {hsk10}",
-            f"{direction} 신고 제출서류 세관장 확인 관세법",
-            issues,
+            f"{direction} 신고 제출서류 세관장 확인 허가 승인 증명 관세법",
+            issue_terms,
         )
         if part
     )

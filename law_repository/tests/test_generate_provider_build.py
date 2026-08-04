@@ -28,7 +28,12 @@ def _repository(tmp_path: Path) -> Path:
         ".dockerignore": "**/.env*\n",
         "law_repository/deploy/hf_space/Dockerfile": "COPY law_repository/src ./src\n",
         "law_repository/deploy/hf_space/README.md": "private space\n",
-        "law_repository/requirements.txt": "fastapi==1\n",
+        "pyproject.toml": (
+            "[project]\nname='fixture'\nversion='1.0.0'\n"
+            "requires-python='==3.11.*'\ndependencies=['fastapi==1','neo4j==1']\n"
+            "[project.optional-dependencies]\nrag=['numpy==1']\n"
+        ),
+        "uv.lock": "version = 1\nrevision = 3\nrequires-python = '==3.11.*'\n",
         "contracts/evidence/v1/rag_retrieval_v1.schema.json": '{"title":"retrieval"}\n',
         "contracts/evidence/v1/readiness_v1.schema.json": '{"title":"readiness"}\n',
         "law_repository/src/webapp.py": "COMMITTED = True\n",

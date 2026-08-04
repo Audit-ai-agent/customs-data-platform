@@ -5,6 +5,7 @@ import json
 from dataclasses import replace
 from datetime import date, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -310,6 +311,16 @@ def test_manifest_and_readiness_expose_exact_profile_policy_and_identity(
     assert manifest["release_ready"] is False
     assert manifest["domain_reviewed"] is False
     assert manifest["automatic_completion_eligible"] is False
+    assert manifest["retrieval_runtime"] == {
+        "postgresql": "structured-ledger-read-only",
+        "qdrant": ["bge-m3-dense", "bm25-sparse", "rrf"],
+        "reranker": {
+            "model_id": "BAAI/bge-reranker-v2-m3",
+            "revision": "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
+            "mode": "required-fail-closed",
+        },
+        "neo4j": "one-hop-law-and-requirement-expansion",
+    }
     assert manifest["store_state"] == {
         "knowledge_snapshot_id": observation.knowledge_snapshot_id,
         "postgres_article_count": 1_007,
@@ -347,6 +358,12 @@ def test_manifest_and_readiness_expose_exact_profile_policy_and_identity(
     assert payload["release_ready"] is False
     assert payload["rag_quality_evaluated"] is False
     assert payload["automatic_completion_eligible"] is False
+    assert payload["reranker"] == {
+        "model_id": "BAAI/bge-reranker-v2-m3",
+        "revision": "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
+        "ready": True,
+        "mode": "required-fail-closed",
+    }
     assert payload["evidence_runtime_release"] == identity_file
 
 
@@ -398,7 +415,13 @@ def test_actual_code_is_approved_human_only_and_trace_is_safe(tmp_path: Path) ->
     assert trace["evidence_profile"] == runner.EVIDENCE_PROFILE
     assert trace["evidence_policy_mode"] == SCENARIO_EVAL_POLICY_MODE
     assert trace["knowledge_snapshot_id"] == _SNAPSHOT
-    assert set(trace["retrieval"]) == {"structured", "dense", "bm25", "graph"}
+    assert set(trace["retrieval"]) == {
+        "structured",
+        "dense",
+        "bm25",
+        "rerank",
+        "graph",
+    }
     assert all(trace["retrieval"][stage]["attempted"] for stage in trace["retrieval"])
     assert all(trace["retrieval"][stage]["succeeded"] for stage in trace["retrieval"])
     assert trace["retrieval"]["structured"]["result_count"] == 1
@@ -427,6 +450,117 @@ def test_actual_code_is_approved_human_only_and_trace_is_safe(tmp_path: Path) ->
         runner.SCENARIO_EVAL_HSK10,
     ):
         assert forbidden not in raw_trace
+
+
+def test_required_reranker_reorders_rrf_candidates_and_scores_graph_results() -> None:
+    rows = {
+        article_pk: {
+            "article_pk": article_pk,
+            "law_id": "001556",
+            "law_name": "관세법",
+            "hierarchy": "법률",
+            "article_no": article_no,
+            "paragraph_no": None,
+            "item_no": None,
+            "title": title,
+            "content": content,
+            "content_hash": f"{article_pk:064x}",
+            "version_mst": "mst-1",
+            "valid_from": _AS_OF,
+            "valid_to": None,
+        }
+        for article_pk, article_no, title, content in (
+            (1, 4400, "연관성 낮음", "unrelated article"),
+            (2, 24500, "신고 시의 제출서류", "relevant submission documents"),
+            (3, 24900, "신고사항의 보완", "relevant declaration correction"),
+        )
+    }
+
+    class SearchBackend(runner.ScenarioEvalDatabaseBackend):
+        def __init__(
+            self,
+            *,
+            graph_rows: list[dict[str, Any]] | None = None,
+            graph_error: bool = False,
+        ) -> None:
+            self._scenario_trace_collector = runner.ScenarioEvalTraceCollector()
+            self._scenario_reranker_readiness = lambda: True
+            self.graph_calls: list[tuple[str, dict[str, Any]]] = []
+            self.graph_rows = (
+                [{"seed_article_pk": 2, "article_pk": 3}] if graph_rows is None else graph_rows
+            )
+            self.graph_error = graph_error
+
+            def score(_query: str, passages: list[str]) -> list[float]:
+                return [
+                    0.95 if "submission" in passage else 0.8 if "correction" in passage else 0.1
+                    for passage in passages
+                ]
+
+            self._scenario_rerank_scorer = score
+
+        def _require_deadline(self):
+            return None
+
+        def _arm_hits(self, _query, arm, _recall, _as_of):
+            if arm == runner.DENSE_VECTOR:
+                return [
+                    SimpleNamespace(article_pk=1, score=0.9, text=rows[1]["content"]),
+                    SimpleNamespace(article_pk=2, score=0.8, text=rows[2]["content"]),
+                ]
+            return [
+                SimpleNamespace(article_pk=2, score=8.0, text=rows[2]["content"]),
+                SimpleNamespace(article_pk=1, score=7.0, text=rows[1]["content"]),
+            ]
+
+        def _run_neo4j(self, query, parameters):
+            self.graph_calls.append((query, parameters))
+            if self.graph_error:
+                raise TimeoutError("bounded graph query timed out")
+            return list(self.graph_rows)
+
+        def _law_rows(self, article_pks, _as_of):
+            return {article_pk: rows[article_pk] for article_pk in article_pks}
+
+    backend = SearchBackend()
+    matches = backend.search_law_articles("submission correction", 3, _AS_OF)
+
+    assert backend.graph_calls == [
+        (runner._BATCH_EXPAND_CYPHER, {"seed_pks": [2, 1]})  # noqa: SLF001
+    ]
+    assert [match.row["article_pk"] for match in matches] == [2, 3, 1]
+    assert matches[0].score == 0.95
+    assert matches[1].retrieval_methods == ("graph",)
+    assert matches[1].score == 0.8
+    assert all("reranker" not in match.raw_scores for match in matches)
+    assert all(0.0 <= match.score <= 1.0 for match in matches)
+
+    with pytest.raises(TimeoutError, match="graph query timed out"):
+        SearchBackend(graph_error=True).search_law_articles("submission correction", 3, _AS_OF)
+
+    with pytest.raises(runner.ThreeLawV3ScenarioEvalError, match="requested seed"):
+        SearchBackend(graph_rows=[{"seed_article_pk": 99, "article_pk": 3}]).search_law_articles(
+            "submission correction", 3, _AS_OF
+        )
+
+
+def test_scenario_eval_reranker_failure_is_not_lexically_degraded() -> None:
+    with pytest.raises(runner.ThreeLawV3ScenarioEvalError, match="reranking failed"):
+        runner._validated_rerank_scores(
+            lambda _query, _passages: (_ for _ in ()).throw(RuntimeError("model unavailable")),
+            "safe query",
+            ["safe passage"],
+        )
+
+    with pytest.raises(runner.ThreeLawV3ScenarioEvalError, match="reranker is unavailable"):
+        runner._require_reranker_ready(lambda: False)
+
+    runner._warm_reranker(lambda _query, passages: [0.5 for _passage in passages])
+
+
+def test_scenario_eval_uses_a_reranker_aware_request_deadline() -> None:
+    assert runner._SCENARIO_EVAL_REQUEST_DEADLINE_SECONDS == 300.0
+    assert (runner._RERANK_MIN_POOL, runner._RERANK_MAX_POOL) == (10, 10)
 
 
 def test_policy_is_exact_code_only_and_distinct_from_existing_diagnostic() -> None:

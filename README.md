@@ -75,9 +75,14 @@ readiness가 열리지 않습니다. 현재 검수자가 없고 trust lock도 `u
 Python 3.11과 [uv](https://docs.astral.sh/uv/)를 사용합니다.
 
 ```powershell
-uv sync --locked --group dev
+uv sync --locked --extra rag --group dev
 Copy-Item law_repository/.env.example law_repository/.env
 ```
+
+기본 dependency는 Evidence HTTP runtime과 PostgreSQL·Qdrant·Neo4j client를 포함합니다.
+검색 모델·수치 계산은 `rag`, 외부 수집·Excel/XML 처리는 `ingestion`, 검사 도구는
+`dev`로 분리되어 있습니다. 수집과 검색 인덱스 생성까지 수행할 때는
+`--extra rag --extra ingestion`을 함께 지정합니다.
 
 실제 API key와 DB 비밀번호는 `.env` 또는 secret manager에만 입력합니다. example 파일에는 비밀값을 넣지 않습니다.
 로컬 PostgreSQL host port 기본값은 다른 개발 stack과 충돌하지 않도록 `55432`이며,
@@ -91,17 +96,21 @@ Copy-Item law_repository/.env.example law_repository/.env
 DB가 필요 없는 계약·평가·단위 검증:
 
 ```powershell
-uv run --locked python tools/check_contract_drift.py
-uv run --locked pytest -q evals/tests law_repository/tests/test_provider_contract.py law_repository/tests/test_provider_identity.py law_repository/tests/test_evidence.py law_repository/tests/test_evidence_http_contract.py law_repository/tests/test_hf_space_deploy.py law_repository/tests/test_ccct_p0.py law_repository/tests/test_bm25.py
+uv run --locked --extra rag python tools/check_contract_drift.py
+uv run --locked --extra rag pytest -q evals/tests law_repository/tests/test_provider_contract.py law_repository/tests/test_provider_identity.py law_repository/tests/test_evidence.py law_repository/tests/test_evidence_http_contract.py law_repository/tests/test_hf_space_deploy.py law_repository/tests/test_ccct_p0.py law_repository/tests/test_bm25.py
 ```
+
+일반 PR CI는 lock·계약 drift·lint·type과 대표 offline 회귀만 확인합니다. 전체 test와
+3-store ingestion/live 경로는 보존합니다. 보안·provenance를 포함한 전체 인증은 일반
+CI 범위가 아니며 Release 판정 때만 별도로 실행합니다.
 
 서로 다른 프로세스의 Agent HTTP conformance를 검증할 때만 clean commit에서
 sealed bundle을 만든 뒤 loopback 전용 runner를 명시적으로 실행합니다. 이
 fixture는 58개 법령 Live readiness를 대체하지 않습니다.
 
 ```powershell
-uv run --locked python tools/build_hf_space_context.py --output <EMPTY_EXTERNAL_BUNDLE>
-uv run --locked python tools/run_evidence_conformance_server.py `
+uv run --locked --extra rag python tools/build_hf_space_context.py --output <EMPTY_EXTERNAL_BUNDLE>
+uv run --locked --extra rag python tools/run_evidence_conformance_server.py `
   --test-only-conformance --bundle-root <EMPTY_EXTERNAL_BUNDLE> `
   --host 127.0.0.1 --port 18010
 ```
@@ -110,9 +119,9 @@ runtime v2 Agent 상호운용은 exact clean commit에서 production context를 
 loopback runner로 검증합니다. token 값은 argv나 저장소에 넣지 않습니다.
 
 ```powershell
-uv run --locked python tools/build_production_context.py `
+uv run --locked --extra rag python tools/build_production_context.py `
   --repository . --output <EMPTY_EXTERNAL_CONTEXT>
-uv run --locked python tools/run_evidence_v2_conformance_server.py `
+uv run --locked --extra rag python tools/run_evidence_v2_conformance_server.py `
   --test-only-conformance `
   --production-context <EMPTY_EXTERNAL_CONTEXT> `
   --service-token-file <ABSOLUTE_EXTERNAL_TOKEN_FILE> `
@@ -126,7 +135,7 @@ uv run --locked python tools/run_evidence_v2_conformance_server.py `
 항상 release-ready를 거부합니다. DB 접속정보는 process environment/secret으로만 주입합니다.
 
 ```powershell
-uv run --locked python tools/run_preserved_data_v2_diagnostic.py `
+uv run --locked --extra rag python tools/run_preserved_data_v2_diagnostic.py `
   --test-only-preserved-readonly-diagnostic `
   --production-context <EMPTY_EXTERNAL_CONTEXT> `
   --service-token-file <ABSOLUTE_EXTERNAL_TOKEN_FILE> `
@@ -155,20 +164,20 @@ test-only `approved=true`, `human_only` 정책을 결박합니다. 정책 모드
 3-store 통합 검증은 Docker 서비스를 기동하고 migration·ingestion을 완료한 별도 환경에서 실행합니다. 연결 실패나 미적재 상태의 skip은 Live Gate 통과가 아닙니다.
 
 ```powershell
-uv run --locked python tools/live_preflight.py --phase assets
+uv run --locked --extra rag --extra ingestion python tools/live_preflight.py --phase assets
 docker compose -f law_repository/docker-compose.yml up -d --wait
-uv run --locked python tools/live_preflight.py --phase services
+uv run --locked --extra rag --extra ingestion python tools/live_preflight.py --phase services
 Set-Location law_repository
-uv run --locked python scripts/migrate.py
-uv run --locked python -m src.ingest.hsk
-uv run --locked python -m src.ingest.laws
-uv run --locked python -m src.ingest.ccct --load-only
-uv run --locked python -m src.ingest.graph
+uv run --locked --extra rag --extra ingestion python scripts/migrate.py
+uv run --locked --extra rag --extra ingestion python -m src.ingest.hsk
+uv run --locked --extra rag --extra ingestion python -m src.ingest.laws
+uv run --locked --extra rag --extra ingestion python -m src.ingest.ccct --load-only
+uv run --locked --extra rag --extra ingestion python -m src.ingest.graph
 # 유효한 LAW_API_OC로 실제 변경이력이 존재하는 기간을 지정한다.
-uv run --locked python -m src.sync.delta --since 20260701
-uv run --locked pytest -q --junitxml=../live.junit.xml tests
+uv run --locked --extra rag --extra ingestion python -m src.sync.delta --since 20260701
+uv run --locked --extra rag --extra ingestion pytest -q --junitxml=../live.junit.xml tests
 Set-Location ..
-uv run --locked python tools/assert_no_skips.py live.junit.xml
+uv run --locked --extra rag --extra ingestion python tools/assert_no_skips.py live.junit.xml
 ```
 
 `--phase release`는 secret 값을 출력하지 않고 `LAW_API_OC`와

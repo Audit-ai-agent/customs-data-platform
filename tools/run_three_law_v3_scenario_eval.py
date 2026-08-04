@@ -13,6 +13,7 @@ import argparse
 import contextvars
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -22,9 +23,10 @@ import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 from fastapi import Request
+from psycopg.rows import dict_row
 from pydantic import SecretStr
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -43,6 +45,8 @@ from src.db.qdrant import BM25_VECTOR, DENSE_VECTOR  # noqa: E402
 from src.deadline import RequestDeadline  # noqa: E402
 from src.evidence import LawArticleMatch, RequirementLookup  # noqa: E402
 from src.evidence_v3 import RequirementPolicyBinding  # noqa: E402
+from src.embed import rerank  # noqa: E402
+from src.embed.model_identity import RERANK_MODEL  # noqa: E402
 from src.model_runtime import DenseModelSupervisor  # noqa: E402
 from src.neo4j_runtime import Neo4jQueryExecutor  # noqa: E402
 from src.production import create_test_runtime_v3_application  # noqa: E402
@@ -85,16 +89,87 @@ SCENARIO_EVAL_HSK10 = "0303540000"
 SCENARIO_EVAL_TRADE_TYPE = "import"
 SCENARIO_EVAL_READINESS_PATH = "/internal/rag/v3/health/scenario-eval-ready"
 _MANIFEST_SCHEMA_VERSION = "three-law-evidence-v3-scenario-eval/v1"
-_TRACE_SCHEMA_VERSION = "three-law-evidence-v3-scenario-eval-trace/v1"
+_TRACE_SCHEMA_VERSION = "three-law-evidence-v3-scenario-eval-trace/v2"
+# Local CPU inference needs enough room to finish the required BGE rerank and
+# both fail-closed store observations that bind the response.  This is the
+# configured runtime safety ceiling; it does not change candidates or ranking.
+_SCENARIO_EVAL_REQUEST_DEADLINE_SECONDS = 300.0
 _REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _TRACE_CONTEXT: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "three_law_scenario_eval_trace_context",
     default=None,
 )
+# Keep the required live rerank aligned with the repository's evaluated Hybrid
+# path. Ten RRF candidates preserve the restricted Gold while bounding the
+# 568M-parameter cross-encoder cost on a local CPU.
+_RERANK_MIN_POOL = 10
+_RERANK_MAX_POOL = 10
+_BATCH_EXPAND_CYPHER = """
+UNWIND $seed_pks AS requested_seed_pk
+MATCH (a:Article {article_pk: requested_seed_pk})-[rel]->(t)
+RETURN a.article_pk AS seed_article_pk,
+       type(rel) AS rel, properties(rel) AS props,
+       labels(t) AS labels, t.article_pk AS article_pk,
+       t.law_id AS law_id, t.article_no AS article_no,
+       coalesce(t.title, t.name) AS title
+"""
 
 
 class ThreeLawV3ScenarioEvalError(v2.ThreeLawDiagnosticError):
     """The scenario runner cannot prove its narrow read-only UAT boundary."""
+
+
+def _require_reranker_ready(checker: Callable[[], bool]) -> None:
+    """Reject scenario-eval startup when its attested reranker is unavailable."""
+
+    try:
+        ready = checker()
+    except Exception as exc:
+        raise ThreeLawV3ScenarioEvalError("scenario-eval reranker is unavailable") from exc
+    if ready is not True:
+        raise ThreeLawV3ScenarioEvalError("scenario-eval reranker is unavailable")
+
+
+def _warm_reranker(scorer: Callable[[str, list[str]], list[float]]) -> None:
+    """Prove one real inference before the request deadline starts."""
+
+    values = _validated_rerank_scores(
+        scorer,
+        "통관 요건",
+        ["통관 요건과 관련된 법령 근거"],
+    )
+    if len(values) != 1:
+        raise ThreeLawV3ScenarioEvalError("scenario-eval reranker warm-up is incomplete")
+
+
+def _validated_rerank_scores(
+    scorer: Callable[[str, list[str]], list[float]],
+    query: str,
+    passages: list[str],
+) -> list[float]:
+    """Validate a strict score batch without exposing query or passage content."""
+
+    try:
+        values = scorer(query, passages)
+    except Exception as exc:
+        raise ThreeLawV3ScenarioEvalError("scenario-eval reranking failed") from exc
+    try:
+        complete = len(values) == len(passages)
+    except TypeError as exc:
+        raise ThreeLawV3ScenarioEvalError(
+            "scenario-eval reranking returned an invalid batch"
+        ) from exc
+    if not complete:
+        raise ThreeLawV3ScenarioEvalError("scenario-eval reranking returned an incomplete batch")
+    try:
+        normalized = [float(value) for value in values]
+    except (TypeError, ValueError) as exc:
+        raise ThreeLawV3ScenarioEvalError(
+            "scenario-eval reranking returned an invalid score"
+        ) from exc
+    if any(not math.isfinite(value) or not 0.0 <= value <= 1.0 for value in normalized):
+        raise ThreeLawV3ScenarioEvalError("scenario-eval reranking returned an invalid score")
+    return normalized
 
 
 def _store_state_projection(
@@ -218,7 +293,7 @@ class _StageTrace:
 class _RequestTrace:
     stages: dict[str, _StageTrace] = field(
         default_factory=lambda: {
-            name: _StageTrace() for name in ("structured", "dense", "bm25", "graph")
+            name: _StageTrace() for name in ("structured", "dense", "bm25", "rerank", "graph")
         }
     )
 
@@ -336,9 +411,22 @@ def _duration_ms(started: float) -> int:
 class ScenarioEvalDatabaseBackend(v2.ThreeLawDiagnosticDatabaseBackend):
     """Actual three-store backend with content-free per-arm observations."""
 
-    def __init__(self, *args: Any, trace_collector: ScenarioEvalTraceCollector, **kwargs: Any):
+    def __init__(
+        self,
+        *args: Any,
+        trace_collector: ScenarioEvalTraceCollector,
+        rerank_scorer: Callable[[str, list[str]], list[float]],
+        reranker_readiness: Callable[[], bool],
+        **kwargs: Any,
+    ):
         super().__init__(*args, **kwargs)
         self._scenario_trace_collector = trace_collector
+        self._scenario_rerank_scorer = rerank_scorer
+        self._scenario_reranker_readiness = reranker_readiness
+
+    def validate_ready(self) -> None:
+        super().validate_ready()
+        _require_reranker_ready(self._scenario_reranker_readiness)
 
     def lookup_requirements(
         self,
@@ -404,7 +492,10 @@ class ScenarioEvalDatabaseBackend(v2.ThreeLawDiagnosticDatabaseBackend):
         # "graph" stage means the one-hop law expansion specifically.  Keeping
         # those meanings separate prevents a successful HSK lookup from being
         # reported as successful graph expansion.
-        if query != v2.repository_module._EXPAND_CYPHER:  # noqa: SLF001
+        if query not in {
+            v2.repository_module._EXPAND_CYPHER,  # noqa: SLF001
+            _BATCH_EXPAND_CYPHER,
+        }:
             return super()._run_neo4j(query, parameters)
         started = time.monotonic()
         try:
@@ -425,17 +516,197 @@ class ScenarioEvalDatabaseBackend(v2.ThreeLawDiagnosticDatabaseBackend):
         )
         return rows
 
+    def _law_rows(self, article_pks: list[int], as_of: Any) -> dict[int, dict[str, Any]]:
+        with self._connection() as connection, connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                SELECT a.id AS article_pk, a.law_id, l.law_name, l.hierarchy,
+                       a.article_no, a.paragraph_no, a.item_no, a.title, a.content,
+                       a.content_hash, a.version_mst, a.valid_from, a.valid_to
+                FROM law_articles a JOIN laws l USING (law_id)
+                WHERE a.id = ANY(%s)
+                  AND a.valid_from <= %s
+                  AND (a.valid_to IS NULL OR a.valid_to > %s)
+                """,
+                (article_pks, as_of, as_of),
+            )
+            return {int(row["article_pk"]): dict(row) for row in cursor.fetchall()}
+
+    def _rerank(
+        self,
+        query: str,
+        article_pks: list[int],
+        passages: list[str],
+    ) -> dict[int, float]:
+        started = time.monotonic()
+        try:
+            values = _validated_rerank_scores(
+                self._scenario_rerank_scorer,
+                query,
+                passages,
+            )
+        except Exception:
+            self._scenario_trace_collector.record(
+                "rerank",
+                success=False,
+                result_count=0,
+                duration_ms=_duration_ms(started),
+            )
+            raise
+        self._scenario_trace_collector.record(
+            "rerank",
+            success=True,
+            result_count=len(values),
+            duration_ms=_duration_ms(started),
+        )
+        return dict(zip(article_pks, values, strict=True))
+
     def search_law_articles(
         self,
         query: str,
         top_k: int,
         as_of: Any,
     ) -> tuple[LawArticleMatch, ...]:
-        matches = super().search_law_articles(query, top_k, as_of)
+        """Dense+BM25 RRF -> required BGE rerank -> graph -> final ranking."""
+
+        self._require_deadline()
+        recall = min(max(top_k * 2, 8), _RERANK_MAX_POOL)
+        dense_hits = self._arm_hits(query, DENSE_VECTOR, recall, as_of)
+        bm25_hits = self._arm_hits(query, BM25_VECTOR, recall, as_of)
+        rrf_k = 60
+        candidates: dict[int, dict[str, Any]] = {}
+        texts: dict[int, str] = {}
+        for method, hits in (("dense", dense_hits), ("bm25", bm25_hits)):
+            for rank, hit in enumerate(hits, start=1):
+                entry = candidates.setdefault(
+                    hit.article_pk,
+                    {"methods": set(), "raw": {}, "rrf": 0.0},
+                )
+                entry["methods"].add(method)
+                entry["raw"][method] = float(hit.score)
+                entry["rrf"] += 1.0 / (rrf_k + rank)
+                existing_text = texts.setdefault(hit.article_pk, str(hit.text))
+                if existing_text != str(hit.text):
+                    raise ThreeLawV3ScenarioEvalError(
+                        "retrieval arms disagree on law article content"
+                    )
+
+        if not candidates:
+            return ()
+
+        rrf_order = sorted(
+            candidates,
+            key=lambda article_pk: (-float(candidates[article_pk]["rrf"]), article_pk),
+        )
+        pool_size = min(
+            len(rrf_order),
+            max(_RERANK_MIN_POOL, min(top_k * 2, _RERANK_MAX_POOL)),
+        )
+        initial_pool = rrf_order[:pool_size]
+        candidates = {article_pk: candidates[article_pk] for article_pk in initial_pool}
+        reranker_scores = self._rerank(
+            query,
+            initial_pool,
+            [texts[article_pk] for article_pk in initial_pool],
+        )
+
+        seeds = sorted(
+            initial_pool,
+            key=lambda article_pk: (
+                -reranker_scores[article_pk],
+                -float(candidates[article_pk]["rrf"]),
+                article_pk,
+            ),
+        )[:3]
+        related_rows = self._run_neo4j(
+            _BATCH_EXPAND_CYPHER,
+            {"seed_pks": seeds},
+        )
+        rows_by_seed: dict[int, list[dict[str, Any]]] = {seed_pk: [] for seed_pk in seeds}
+        for related in related_rows:
+            seed_article_pk = related.get("seed_article_pk")
+            if type(seed_article_pk) is not int or seed_article_pk not in rows_by_seed:
+                raise ThreeLawV3ScenarioEvalError(
+                    "graph expansion result is not bound to a requested seed"
+                )
+            rows_by_seed[seed_article_pk].append(related)
+
+        for seed_pk in seeds:
+            related_rows_for_seed = rows_by_seed[seed_pk]
+            for related in related_rows_for_seed:
+                related_pk = related.get("article_pk")
+                if not isinstance(related_pk, int) or related_pk == seed_pk:
+                    continue
+                entry = candidates.setdefault(
+                    related_pk,
+                    {
+                        "methods": set(),
+                        "raw": {},
+                        "rrf": float(candidates[seed_pk]["rrf"]) * 0.65,
+                    },
+                )
+                entry["methods"].add("graph")
+                entry["raw"]["graph"] = max(
+                    float(entry["raw"].get("graph", 0.0)),
+                    float(candidates[seed_pk]["rrf"]),
+                )
+
+        rows = self._law_rows(list(candidates), as_of)
+        if set(rows) != set(candidates):
+            raise ThreeLawV3ScenarioEvalError(
+                "retrieval candidate is absent from the attested PostgreSQL snapshot"
+            )
+
+        graph_only = [article_pk for article_pk in candidates if article_pk not in reranker_scores]
+        if graph_only:
+            graph_scores = self._rerank(
+                query,
+                graph_only,
+                [str(rows[article_pk]["content"]) for article_pk in graph_only],
+            )
+            reranker_scores.update(graph_scores)
+
+        query_tokens = set(re.findall(r"[0-9A-Za-z가-힣]{2,}", query.lower()))
+        matches: list[LawArticleMatch] = []
+        for article_pk, candidate in candidates.items():
+            row = rows[article_pk]
+            text_tokens = set(re.findall(r"[0-9A-Za-z가-힣]{2,}", str(row["content"]).lower()))
+            lexical = len(query_tokens & text_tokens) / len(query_tokens) if query_tokens else 0.0
+            reranker_score = float(reranker_scores[article_pk])
+            methods = cast(
+                tuple[Literal["dense", "bm25", "graph"], ...],
+                tuple(
+                    method
+                    for method in ("dense", "bm25", "graph")
+                    if method in candidate["methods"]
+                ),
+            )
+            matches.append(
+                LawArticleMatch(
+                    row=row,
+                    retrieval_methods=methods,
+                    score=reranker_score,
+                    raw_scores={
+                        **candidate["raw"],
+                        "rrf": float(candidate["rrf"]),
+                        "lexical_overlap": float(lexical),
+                    },
+                )
+            )
+        matches.sort(
+            key=lambda match: (
+                -match.score,
+                -float(match.raw_scores["rrf"]),
+                int(match.row["article_pk"]),
+            )
+        )
+        matches = matches[:top_k]
+        self._scenario_trace_collector.top_k("rerank", len(matches))
         for stage in ("dense", "bm25", "graph"):
             count = sum(stage in match.retrieval_methods for match in matches)
             self._scenario_trace_collector.top_k(stage, count)
-        return matches
+        self._require_deadline()
+        return tuple(matches)
 
 
 class _TracingBackendProxy:
@@ -512,6 +783,14 @@ class _TracingBackendProxy:
                 duration_ms=duration,
             )
             self._trace_collector.top_k(stage, count)
+        reranked_count = sum("reranker" in match.raw_scores for match in matches)
+        self._trace_collector.record(
+            "rerank",
+            success=reranked_count == len(matches),
+            result_count=reranked_count,
+            duration_ms=duration,
+        )
+        self._trace_collector.top_k("rerank", reranked_count)
         return matches
 
 
@@ -684,7 +963,12 @@ class ThreeLawV3ScenarioEvalManifest:
             "automatic_completion_eligible": False,
             "retrieval_runtime": {
                 "postgresql": "structured-ledger-read-only",
-                "qdrant": ["bge-m3-dense", "bm25-sparse", "rrf", "lexical-rerank"],
+                "qdrant": ["bge-m3-dense", "bm25-sparse", "rrf"],
+                "reranker": {
+                    "model_id": RERANK_MODEL.model_id,
+                    "revision": RERANK_MODEL.revision,
+                    "mode": "required-fail-closed",
+                },
                 "neo4j": "one-hop-law-and-requirement-expansion",
             },
             "trace_schema_version": _TRACE_SCHEMA_VERSION,
@@ -735,6 +1019,8 @@ def create_three_law_v3_scenario_eval_application(
     executing_repository_attestor: v2.ExecutingRepositoryAttestor | None = None,
     neo4j_query_executor: Neo4jQueryExecutor | None = None,
     model_supervisor: DenseModelSupervisor | None = None,
+    rerank_scorer: Callable[[str, list[str]], list[float]] | None = None,
+    reranker_readiness: Callable[[], bool] | None = None,
     install_readonly_boundary: bool = True,
 ) -> Any:
     """Create the fail-closed actual-store scenario evaluation service."""
@@ -781,8 +1067,8 @@ def create_three_law_v3_scenario_eval_application(
             deadline=deadline,
         )
     )
-    startup_deadline = v2._deadline()  # noqa: SLF001 - reviewed bounded observer budget
-    selected_attestor(startup_deadline)
+    attestation_deadline = v2._deadline()  # noqa: SLF001 - bounded source attestation
+    selected_attestor(attestation_deadline)
     token = load_bearer_token_file(service_token_file)
 
     readonly_boundary: v2._ReadOnlyPostgresBoundary | None = None  # noqa: SLF001
@@ -790,6 +1076,8 @@ def create_three_law_v3_scenario_eval_application(
     shared_neo4j_executor = neo4j_query_executor
     created_model_supervisor = False
     shared_model_supervisor = model_supervisor
+    selected_rerank_scorer = rerank_scorer or rerank.required_scores
+    selected_reranker_readiness = reranker_readiness or rerank.available
     trace_collector = ScenarioEvalTraceCollector()
     trace_writer: SafeScenarioEvalTraceWriter | None = None
     wrote_identity = False
@@ -829,6 +1117,8 @@ def create_three_law_v3_scenario_eval_application(
                     termination_timeout_seconds=0.5,
                 )
                 created_model_supervisor = True
+            _require_reranker_ready(selected_reranker_readiness)
+            _warm_reranker(selected_rerank_scorer)
 
             def selected_database_backend_factory(
                 observation: v2.ThreeLawObservation,
@@ -844,6 +1134,8 @@ def create_three_law_v3_scenario_eval_application(
                     neo4j_query_executor=shared_neo4j_executor,
                     dense_encoder=shared_model_supervisor.encode,
                     trace_collector=trace_collector,
+                    rerank_scorer=selected_rerank_scorer,
+                    reranker_readiness=selected_reranker_readiness,
                 )
 
         else:
@@ -857,6 +1149,11 @@ def create_three_law_v3_scenario_eval_application(
                     trace_collector,
                 )
 
+        # A cold CPU reranker can spend most of the bounded model-startup
+        # window loading its weights.  Store attestation must receive a fresh
+        # deadline after that one-time warm-up; otherwise a healthy preserved
+        # corpus is rejected before its first read-only observation begins.
+        startup_deadline = v2._deadline()  # noqa: SLF001 - bounded store observation
         initial_observation = selected_observation_loader(startup_deadline)
         _validate_exact_observation(
             initial_observation,
@@ -919,7 +1216,7 @@ def create_three_law_v3_scenario_eval_application(
             bind_host=host,
             port=port,
             max_concurrency=1,
-            request_deadline_seconds=v2.DIAGNOSTIC_SERVICE_REQUEST_DEADLINE_SECONDS,
+            request_deadline_seconds=_SCENARIO_EVAL_REQUEST_DEADLINE_SECONDS,
             store_operation_timeout_seconds=20,
             store_termination_timeout_seconds=0.5,
             model_inference_timeout_seconds=20,
@@ -1048,6 +1345,12 @@ def create_three_law_v3_scenario_eval_application(
             "rag_quality_evaluated": False,
             "domain_reviewed": False,
             "automatic_completion_eligible": False,
+            "reranker": {
+                "model_id": RERANK_MODEL.model_id,
+                "revision": RERANK_MODEL.revision,
+                "ready": True,
+                "mode": "required-fail-closed",
+            },
             # `runtime_v3_readiness()` immediately above re-observes all three
             # stores and rejects any difference from this sealed observation.
             "store_state": _store_state_projection(initial_observation),

@@ -23,9 +23,10 @@ import re
 import time
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import requests
+if TYPE_CHECKING:
+    import requests
 
 from src.config import settings
 
@@ -36,9 +37,7 @@ CONNECT_TIMEOUT_SECONDS = 10
 READ_TIMEOUT_SECONDS = 60
 MAX_ATTEMPTS = 4
 
-_session = requests.Session()
-_session.headers.update({"User-Agent": "trade-doc-auditor/law-repository"})
-_session.trust_env = False
+_session: Any | None = None
 
 
 class LawApiError(RuntimeError):
@@ -47,6 +46,19 @@ class LawApiError(RuntimeError):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+def _request_runtime() -> tuple[Any, Any]:
+    """Load the official-law HTTP client only for ingestion commands."""
+
+    global _session
+    import requests
+
+    if _session is None:
+        _session = requests.Session()
+        _session.headers.update({"User-Agent": "trade-doc-auditor/law-repository"})
+        _session.trust_env = False
+    return requests, _session
 
 
 def _clean_keys(obj):
@@ -120,6 +132,7 @@ def _retry_delay(attempt: int) -> float:
 
 
 def get(endpoint: str, **params) -> dict:
+    requests, session = _request_runtime()
     api_credential = settings.law_api_oc.strip()
     if not api_credential or api_credential.casefold() in {"test", "change_me"}:
         raise LawApiError("LAW_API_CREDENTIAL_UNAVAILABLE")
@@ -133,7 +146,7 @@ def get(endpoint: str, **params) -> dict:
             time.sleep(_retry_delay(attempt))
         response: requests.Response | None = None
         try:
-            response = _session.get(
+            response = session.get(
                 f"{BASE}/{endpoint}",
                 params=params,
                 timeout=(CONNECT_TIMEOUT_SECONDS, READ_TIMEOUT_SECONDS),

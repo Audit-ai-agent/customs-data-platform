@@ -33,20 +33,20 @@
 ```bash
 gh repo clone Audit-ai-agent/customs-data-platform
 cd customs-data-platform
-uv sync --locked --group dev --python 3.11
+uv sync --locked --extra rag --extra ingestion --group dev --python 3.11
 cd law_repository
 
 cp .env.example .env        # 비밀번호 등 값 채우기 (기본값으로도 로컬 구동 가능)
 docker compose up -d        # Postgres / Qdrant / Neo4j 기동
-uv run --project .. --locked python ../tools/live_preflight.py --phase services
-uv run --project .. --locked python scripts/migrate.py   # 스키마 적용
+uv run --project .. --locked --extra rag --extra ingestion python ../tools/live_preflight.py --phase services
+uv run --project .. --locked --extra rag --extra ingestion python scripts/migrate.py   # 스키마 적용
 
-uv run --project .. --locked python -m src.ingest.hsk
-uv run --project .. --locked python -m src.ingest.laws
-uv run --project .. --locked python -m src.ingest.ccct --load-only
-uv run --project .. --locked python -m src.ingest.graph
+uv run --project .. --locked --extra rag --extra ingestion python -m src.ingest.hsk
+uv run --project .. --locked --extra rag --extra ingestion python -m src.ingest.laws
+uv run --project .. --locked --extra rag --extra ingestion python -m src.ingest.ccct --load-only
+uv run --project .. --locked --extra rag --extra ingestion python -m src.ingest.graph
 
-uv run --project .. --locked pytest tests/   # 단위 + 3-store 통합 검증
+uv run --project .. --locked --extra rag --extra ingestion pytest tests/   # 단위 + 3-store 통합 검증
 ```
 
 로컬 host port는 `.env`의 `POSTGRES_PORT`, `QDRANT_HTTP_PORT`,

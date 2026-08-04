@@ -178,7 +178,8 @@ def test_production_dockerfile_requires_immutable_inputs_and_non_root() -> None:
     assert "arg python_image\n" in lowered
     assert "from ${uv_image}" in lowered
     assert "from ${python_image}" in lowered
-    assert "uv sync --locked --no-dev" in lowered
+    assert "uv sync --locked --no-dev --extra rag --no-install-project" in lowered
+    assert "--extra ingestion" not in lowered
     assert "hf_hub_offline=1" in lowered
     assert "transformers_offline=1" in lowered
     assert "user 65532:65532" in lowered
