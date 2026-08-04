@@ -566,7 +566,7 @@ def test_same_request_deadline_reaches_attestor_observer_backend_and_postcheck(
         install_readonly_boundary=False,
     )
     assert (
-        app.state.production_service.settings.request_deadline_seconds
+        app.state.runtime_service.settings.request_deadline_seconds
         == runner.DIAGNOSTIC_SERVICE_REQUEST_DEADLINE_SECONDS
         == 180.0
     )

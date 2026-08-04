@@ -12,7 +12,6 @@ import requests
 import uvicorn
 from fastapi.testclient import TestClient
 
-from src.deadline import RequestDeadline
 from tools.provider_build import (
     create_runtime_provider_build_document,
     create_runtime_provider_lock_document,
@@ -33,8 +32,8 @@ def _write(root: Path, relative: str, payload: bytes) -> None:
     path.write_bytes(payload)
 
 
-def _production_context(tmp_path: Path) -> Path:
-    root = tmp_path / "production-context"
+def _provider_context(tmp_path: Path) -> Path:
+    root = tmp_path / "provider-context"
     revision = "1" * 40
     retrieval_schema = b'{"title":"fixture retrieval v1"}\n'
     readiness_schema = b'{"title":"fixture readiness v2"}\n'
@@ -86,12 +85,12 @@ def _token_file(tmp_path: Path) -> Path:
 
 
 def _application(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    context = _production_context(tmp_path)
+    context = _provider_context(tmp_path)
     identity_output = tmp_path / "artifacts/test-only-v3-identity.json"
     monkeypatch.setenv("EVIDENCE_SERVICE_TOKEN", "must-not-be-used-" + ("b" * 40))
     monkeypatch.setenv("EVIDENCE_REQUIREMENT_POLICY_RELEASE_FILE", "must-not-be-used")
     application = create_test_only_v3_conformance_application(
-        production_context=context,
+        provider_context=context,
         service_token_file=_token_file(tmp_path),
         identity_output=identity_output,
         host="127.0.0.1",
@@ -125,20 +124,9 @@ def _body() -> dict[str, Any]:
     }
 
 
-def _no_requirement_body() -> dict[str, Any]:
-    body = _body()
-    body["request_id"] = "req-local-uat-clean"
-    body["case_id"] = "case-local-uat-clean"
-    body["review_run_id"] = "run-local-uat-clean"
-    body["items"][0]["description"] = "Stainless steel bolts"
-    body["items"][0]["hs_code"] = "7318151000"
-    body["query_intent"] = "required_import_documents_and_law_support"
-    return body
-
-
 def test_parser_requires_ack_file_token_and_loopback(tmp_path: Path) -> None:
     common = [
-        "--production-context",
+        "--provider-context",
         str(tmp_path),
         "--service-token-file",
         str(tmp_path / "token"),
@@ -172,7 +160,7 @@ def test_factory_rejects_localhost_alias_even_without_cli_parser(
 ) -> None:
     with pytest.raises(_ConfigurationError, match="loopback-only"):
         create_test_only_v3_conformance_application(
-            production_context=_production_context(tmp_path),
+            provider_context=_provider_context(tmp_path),
             service_token_file=_token_file(tmp_path),
             identity_output=tmp_path / "identity.json",
             host="localhost",
@@ -200,110 +188,14 @@ def test_fixture_identity_is_explicitly_non_release_and_has_17_bindings(
     )
 
 
-def test_local_user_uat_profile_has_distinct_identity_and_clean_covered_case(
-    tmp_path: Path,
-) -> None:
-    context = _production_context(tmp_path)
-    token_file = _token_file(tmp_path)
-    wire = create_test_only_v3_conformance_application(
-        production_context=context,
-        service_token_file=token_file,
-        identity_output=tmp_path / "wire-identity.json",
-        host="127.0.0.1",
-        port=18011,
-    )
-    uat = create_test_only_v3_conformance_application(
-        production_context=context,
-        service_token_file=token_file,
-        identity_output=tmp_path / "uat-identity.json",
-        host="127.0.0.1",
-        port=18012,
-        profile="local-user-uat",
-    )
-    wire_identity = wire.state.runtime_v3_release_loader.acquire().identity
-    uat_lease = uat.state.runtime_v3_release_loader.acquire()
-    assert uat_lease.identity != wire_identity
-    assert uat.state.diagnostic_profile == "local-user-uat"
-    assert uat.state.no_requirement_positive_control_hsk10 == "7318151000"
-    backend = uat.state.runtime_backend_factory(
-        uat_lease.base_lease,
-        RequestDeadline.start(
-            started_at=time.monotonic(),
-            request_timeout_seconds=10,
-            store_timeout_seconds=1,
-            model_timeout_seconds=1,
-            completion_reserve_seconds=0.25,
-        ),
-    )
-    response = backend.lookup_requirements(
-        uat_lease.identity.base_runtime_release.knowledge_snapshot_id,
-        "7318151000",
-        "import",
-        uat_lease.identity.base_runtime_release.supported_review_as_of,
-    )
-    assert response.covered is True
-    assert response.rows == ()
-
-
-def test_local_user_uat_http_reports_diagnostic_mode_and_clean_covered_result(
-    tmp_path: Path,
-) -> None:
-    application = create_test_only_v3_conformance_application(
-        production_context=_production_context(tmp_path),
-        service_token_file=_token_file(tmp_path),
-        identity_output=tmp_path / "uat-http-identity.json",
-        host="127.0.0.1",
-        port=18012,
-        profile="local-user-uat",
-    )
-    identity = application.state.runtime_v3_release_loader.acquire().identity
-    body = _no_requirement_body()
-    headers = {
-        "Authorization": f"Bearer {TOKEN}",
-        "Content-Type": "application/json",
-        "X-Request-ID": body["request_id"],
-        **identity.binding_headers(),
-    }
-    with TestClient(
-        application,
-        base_url="http://127.0.0.1",
-        client=("127.0.0.1", 50000),
-    ) as client:
-        ready = client.get(
-            "/internal/rag/v3/health/uat-ready",
-            headers={"Authorization": f"Bearer {TOKEN}"},
-        )
-        response = client.post(
-            "/internal/rag/v3/retrieve",
-            json=body,
-            headers=headers,
-        )
-    assert ready.status_code == 200
-    assert ready.json()["mode"] == "LOCAL_USER_UAT_DIAGNOSTIC"
-    assert ready.json()["release_ready"] is False
-    assert ready.json()["automatic_completion_eligible"] is False
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["status"] == "ok"
-    assert payload["results"][0]["coverage"] == "complete"
-    assert payload["results"][0]["requirements_found"] is False
-    assert len(payload["results"][0]["evidence"]) == 1
-    evidence = payload["results"][0]["evidence"][0]
-    assert evidence["source_type"] == "law_article"
-    assert evidence["eligibility"] == "supporting"
-    assert evidence["matched_hs_code"] is None
-    assert evidence["retrieval_methods"] == ["bm25"]
-    assert "LOCAL UAT" in evidence["title"]
-
-
 def test_output_cannot_be_written_inside_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    context = _production_context(tmp_path)
+    context = _provider_context(tmp_path)
     with pytest.raises(_ConfigurationError, match="outside"):
         create_test_only_v3_conformance_application(
-            production_context=context,
+            provider_context=context,
             service_token_file=_token_file(tmp_path),
             identity_output=context / "identity.json",
             host="127.0.0.1",

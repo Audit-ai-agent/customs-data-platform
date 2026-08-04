@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from tools.build_hf_space_context import build_context
+from tools.build_provider_context import build_context
 from tools.generate_provider_build import generate_provider_build
 from tools.provider_build import ProviderBuildError
 
@@ -25,9 +25,6 @@ def _git(repo: Path, *args: str) -> str:
 def _repository(tmp_path: Path) -> Path:
     repo = tmp_path / "provider"
     files = {
-        ".dockerignore": "**/.env*\n",
-        "law_repository/deploy/hf_space/Dockerfile": "COPY law_repository/src ./src\n",
-        "law_repository/deploy/hf_space/README.md": "private space\n",
         "pyproject.toml": (
             "[project]\nname='fixture'\nversion='1.0.0'\n"
             "requires-python='==3.11.*'\ndependencies=['fastapi==1','neo4j==1']\n"
@@ -36,6 +33,14 @@ def _repository(tmp_path: Path) -> Path:
         "uv.lock": "version = 1\nrevision = 3\nrequires-python = '==3.11.*'\n",
         "contracts/evidence/v1/rag_retrieval_v1.schema.json": '{"title":"retrieval"}\n',
         "contracts/evidence/v1/readiness_v1.schema.json": '{"title":"readiness"}\n',
+        "contracts/evidence/v2/readiness_v2.schema.json": '{"title":"runtime readiness"}\n',
+        "contracts/evidence/v3/rag_retrieval_v3.schema.json": '{"title":"v3 retrieval"}\n',
+        "contracts/evidence/v3/readiness_v3.schema.json": '{"title":"v3 readiness"}\n',
+        "contracts/evidence/v3/requirement_policy_v1.schema.json": '{"title":"policy"}\n',
+        "contracts/evidence/v3/requirement-policy.lock.json": '{}\n',
+        "contracts/evidence/v3/trusted_reviewer_store_v1.schema.json": '{"title":"trust"}\n',
+        "contracts/evidence/v3/trusted_reviewer_lock_v1.schema.json": '{"title":"trust lock"}\n',
+        "contracts/evidence/v3/trusted-reviewers.lock.json": '{}\n',
         "law_repository/src/webapp.py": "COMMITTED = True\n",
         "law_repository/src/evidence.py": "EVIDENCE = True\n",
     }

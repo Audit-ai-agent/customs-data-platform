@@ -37,8 +37,8 @@ for import_root in (ROOT, ROOT / "law_repository"):
 from src.deadline import RequestDeadline  # noqa: E402
 from src.model_runtime import DenseModelSupervisor  # noqa: E402
 from src.neo4j_runtime import Neo4jQueryExecutor  # noqa: E402
-from src.production import create_test_runtime_v3_application  # noqa: E402
-from src.production_settings import ProductionSettings  # noqa: E402
+from src.runtime_service import create_test_runtime_v3_application  # noqa: E402
+from src.runtime_settings import RuntimeSettings  # noqa: E402
 from src.runtime_api_v3 import runtime_v3_readiness  # noqa: E402
 from src.runtime_release import GenerationRequestLease, RuntimeReleaseError  # noqa: E402
 from src.runtime_release_v3 import (  # noqa: E402
@@ -335,7 +335,7 @@ def create_three_law_v3_diagnostic_application(
                 "preserved three-law V3 identity must expose exactly 17 bindings"
             )
 
-        service_settings = ProductionSettings(
+        service_settings = RuntimeSettings(
             _env_file=None,
             service_token=SecretStr(token),
             service_token_file=None,
@@ -394,7 +394,7 @@ def create_three_law_v3_diagnostic_application(
         write_test_only_v3_identity_json(
             runtime_lease.identity,
             output=identity_destination,
-            production_context=context,
+            provider_context=context,
         )
         wrote_identity = True
         v2.write_diagnostic_manifest(

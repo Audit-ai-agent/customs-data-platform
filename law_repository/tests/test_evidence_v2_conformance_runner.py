@@ -37,12 +37,12 @@ def _write_bytes(root: Path, relative_path: str, payload: bytes) -> None:
     destination.write_bytes(payload)
 
 
-def _production_context(
+def _provider_context(
     tmp_path: Path,
     *,
     source_commit: str | None = None,
 ) -> tuple[Path, dict[str, str]]:
-    root = tmp_path / "production-context"
+    root = tmp_path / "provider-context"
     revision = "1" * 40
     retrieval_schema = b'{"title":"fixture retrieval v1"}\n'
     readiness_schema = b'{"title":"fixture readiness v2"}\n'
@@ -99,13 +99,13 @@ def _application(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    context, lock = _production_context(tmp_path)
+    context, lock = _provider_context(tmp_path)
     token_file = _token_file(tmp_path)
     identity_output = tmp_path / "artifacts" / "test-only-identity.json"
     monkeypatch.setenv("EVIDENCE_SERVICE_TOKEN", _ENV_TOKEN)
     monkeypatch.setenv("EVIDENCE_SERVICE_TOKEN_FILE", str(tmp_path / "not-used"))
     application = runner.create_test_only_v2_conformance_application(
-        production_context=context,
+        provider_context=context,
         service_token_file=token_file,
         identity_output=identity_output,
         host="127.0.0.1",
@@ -152,7 +152,7 @@ def test_parser_requires_explicit_test_only_ack_and_loopback_host(
     tmp_path: Path,
 ) -> None:
     common = [
-        "--production-context",
+        "--provider-context",
         str(tmp_path),
         "--service-token-file",
         str(tmp_path / "token"),
@@ -196,7 +196,7 @@ def test_provider_context_mismatch_fails_closed(
     tmp_path: Path,
     mutation: str,
 ) -> None:
-    context, lock = _production_context(
+    context, lock = _provider_context(
         tmp_path,
         source_commit="3" * 40 if mutation == "source_revision" else None,
     )
@@ -266,7 +266,7 @@ def test_identity_is_deterministic_test_only_and_nonsecret(
     assert first.identity.supported_review_as_of.isoformat() == "2026-07-10"
     assert _TOKEN not in identity_output.read_text(encoding="utf-8")
     assert _ENV_TOKEN not in identity_output.read_text(encoding="utf-8")
-    assert application.state.test_only_production_shell is True
+    assert application.state.test_only_runtime_shell is True
     assert application.state.test_only_runtime_conformance is True
     assert application.state.rag_quality_evaluated is False
     assert application.state.release_ready is False
@@ -390,7 +390,7 @@ def test_actual_uvicorn_socket_is_loopback_and_serves_exact_get_post(
 def test_output_cannot_mutate_context_or_replace_different_identity(
     tmp_path: Path,
 ) -> None:
-    context, _lock = _production_context(tmp_path)
+    context, _lock = _provider_context(tmp_path)
     verified = runner.load_verified_provider_runtime_lock(context)
     identity = runner.derive_test_only_runtime_lease(verified).identity
 
@@ -398,7 +398,7 @@ def test_output_cannot_mutate_context_or_replace_different_identity(
         runner.write_identity_json(
             identity,
             output=context / "identity.json",
-            production_context=context,
+            provider_context=context,
         )
 
     output = tmp_path / "identity.json"
@@ -407,5 +407,5 @@ def test_output_cannot_mutate_context_or_replace_different_identity(
         runner.write_identity_json(
             identity,
             output=output,
-            production_context=context,
+            provider_context=context,
         )

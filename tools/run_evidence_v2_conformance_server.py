@@ -29,8 +29,8 @@ for import_root in (ROOT, ROOT / "law_repository"):
 from src import repository  # noqa: E402
 from src.deadline import RequestDeadline  # noqa: E402
 from src.evidence import LawArticleMatch, RequirementLookup  # noqa: E402
-from src.production import create_test_runtime_v2_application  # noqa: E402
-from src.production_settings import ProductionSettings  # noqa: E402
+from src.runtime_service import create_test_runtime_v2_application  # noqa: E402
+from src.runtime_settings import RuntimeSettings  # noqa: E402
 from src.runtime_release import (  # noqa: E402
     EvidenceRuntimeReleaseIdentity,
     GenerationRequestLease,
@@ -74,7 +74,7 @@ class TestOnlyConformanceConfigurationError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class VerifiedProviderRuntimeLock:
-    """The exact eight-field lock proven against one production context."""
+    """The exact eight-field lock proven against one provider context."""
 
     contract: str
     schema_version: str
@@ -323,20 +323,20 @@ def _context_file(
         candidate.relative_to(root)
     except ValueError as exc:
         raise TestOnlyConformanceConfigurationError(
-            f"{label} escapes the production context"
+            f"{label} escapes the provider context"
         ) from exc
     return _read_regular_file(candidate, label=label, maximum_bytes=maximum_bytes)
 
 
 def load_verified_provider_runtime_lock(
-    production_context: Path,
+    provider_context: Path,
 ) -> VerifiedProviderRuntimeLock:
     """Verify the lock, context schemas, source manifest, and provider build."""
 
-    root = production_context.resolve()
+    root = provider_context.resolve()
     if not root.is_dir():
         raise TestOnlyConformanceConfigurationError(
-            "production context must be an existing directory"
+            "provider context must be an existing directory"
         )
     lock_raw = _context_file(
         root,
@@ -413,7 +413,7 @@ def load_verified_provider_runtime_lock(
     )
     if lock_payload["provider_build_sha256"] != expected_build["provider_build_sha256"]:
         raise TestOnlyConformanceConfigurationError(
-            "provider build digest does not match production context"
+            "provider build digest does not match provider context"
         )
     return VerifiedProviderRuntimeLock(**{name: str(lock_payload[name]) for name in _LOCK_FIELDS})
 
@@ -520,14 +520,14 @@ def write_identity_json(
     identity: EvidenceRuntimeReleaseIdentity,
     *,
     output: Path,
-    production_context: Path,
+    provider_context: Path,
 ) -> None:
     """Atomically write only the public runtime identity, never credentials."""
 
     destination = output.resolve()
-    if _is_within(destination, production_context):
+    if _is_within(destination, provider_context):
         raise TestOnlyConformanceConfigurationError(
-            "identity output must be outside the immutable production context"
+            "identity output must be outside the immutable provider context"
         )
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.is_symlink():
@@ -577,7 +577,7 @@ def write_identity_json(
 
 def create_test_only_v2_conformance_application(
     *,
-    production_context: Path,
+    provider_context: Path,
     service_token_file: Path,
     identity_output: Path,
     host: str,
@@ -589,15 +589,15 @@ def create_test_only_v2_conformance_application(
         raise TestOnlyConformanceConfigurationError("host must be loopback-only")
     if not 1 <= port <= 65535:
         raise TestOnlyConformanceConfigurationError("port must be from 1 to 65535")
-    provider_lock = load_verified_provider_runtime_lock(production_context)
+    provider_lock = load_verified_provider_runtime_lock(provider_context)
     token = load_bearer_token_file(service_token_file)
     lease = derive_test_only_runtime_lease(provider_lock)
     write_identity_json(
         lease.identity,
         output=identity_output,
-        production_context=production_context,
+        provider_context=provider_context,
     )
-    settings = ProductionSettings(
+    settings = RuntimeSettings(
         _env_file=None,
         service_token=SecretStr(token),
         service_token_file=None,
@@ -660,7 +660,7 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="mandatory acknowledgement that this fixture is not production or RAG QA",
     )
-    parser.add_argument("--production-context", type=Path, required=True)
+    parser.add_argument("--provider-context", type=Path, required=True)
     parser.add_argument("--service-token-file", type=Path, required=True)
     parser.add_argument("--identity-output", type=Path, required=True)
     parser.add_argument("--host", choices=LOOPBACK_HOSTS, required=True)
@@ -671,7 +671,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     application = create_test_only_v2_conformance_application(
-        production_context=args.production_context,
+        provider_context=args.provider_context,
         service_token_file=args.service_token_file,
         identity_output=args.identity_output,
         host=args.host,

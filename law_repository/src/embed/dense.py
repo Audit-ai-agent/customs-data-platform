@@ -30,9 +30,9 @@ def _get_model():
                 model_path = snapshot_download(  # nosec B615
                     repo_id=DENSE_MODEL.model_id,
                     revision=DENSE_MODEL.revision,
-                    # Production images prefetch this immutable revision during
-                    # their build. Runtime lookup must never contact or trust a
-                    # mutable remote model repository.
+                    # Local setup must prefetch this immutable revision. Runtime
+                    # lookup must never contact or trust a mutable remote model
+                    # repository.
                     local_files_only=True,
                 )
                 _model = BGEM3FlagModel(

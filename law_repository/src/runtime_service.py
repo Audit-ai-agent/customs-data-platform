@@ -1,16 +1,10 @@
-"""Hardened production ASGI shell for the versioned Evidence API.
+"""Authenticated ASGI runtime for the versioned Evidence API.
 
 This module intentionally does not expose the team demo routes.  It wraps the
 existing Evidence router with service authentication, transport assertions,
 request framing and JSON limits, bounded admission, deadlines, redacted
-telemetry, and graceful draining.
-
-Run behind a TLS-terminating ingress or service mesh:
-
-    python -m src.production
-
-The entrypoint never generates certificates and never enables a fixture
-backend.  The explicit test factory below exists only for offline shell tests.
+telemetry, and graceful draining.  It is a factory module: approved local UAT
+starts it through an explicit runner, never through a repository entrypoint.
 """
 
 from __future__ import annotations
@@ -21,7 +15,6 @@ import ipaddress
 import json
 import logging
 import re
-import sys
 import threading
 import time
 import uuid
@@ -44,11 +37,11 @@ from src.evidence import ReadinessBackend
 from src.generation_evidence import GenerationEvidenceBackend
 from src.model_runtime import DenseModelSupervisor
 from src.neo4j_runtime import KillableNeo4jQueryExecutor
-from src.production_settings import (
-    ProductionSettings,
+from src.runtime_settings import (
+    RuntimeSettings,
     RuntimeSecrets,
     apply_runtime_data_store_secrets,
-    validate_production_data_store_settings,
+    validate_runtime_data_store_settings,
     validate_runtime_deadline_settings,
 )
 from src.provider_identity import (
@@ -86,7 +79,7 @@ from src.runtime_release_v3 import (
 )
 from src.webapp import _configure_evidence_application
 
-_LOGGER = logging.getLogger("customs_evidence.production")
+_LOGGER = logging.getLogger("customs_evidence.runtime")
 _RETRIEVE_PATH = "/internal/rag/v1/retrieve"
 _LIVENESS_PATH = "/internal/rag/v1/health/live"
 _READINESS_PATH = "/internal/rag/v1/health/ready"
@@ -148,7 +141,7 @@ class _RequestRejected(Exception):
 
 
 class _ResponseTooLarge(RuntimeError):
-    """The route attempted to exceed the production response byte budget."""
+    """The route attempted to exceed the configured response byte budget."""
 
 
 def _safe_error(
@@ -385,8 +378,8 @@ class _AdmissionController:
 
 
 @dataclass
-class _ProductionState:
-    settings: ProductionSettings
+class _RuntimeState:
+    settings: RuntimeSettings
     secrets: RuntimeSecrets
     metrics: _Metrics = field(default_factory=_Metrics)
     background_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
@@ -438,7 +431,7 @@ class _ResponseBuffer:
             await send(message)
 
 
-def _transport_is_authorized(scope: Scope, settings: ProductionSettings) -> bool:
+def _transport_is_authorized(scope: Scope, settings: RuntimeSettings) -> bool:
     if settings.transport_mode == "direct_tls":
         return scope.get("scheme") == "https"
     client = scope.get("client")
@@ -767,7 +760,7 @@ class _RawHeaders(Mapping[str, str]):
         return values[-1]
 
 
-class ProductionBoundaryMiddleware:
+class RuntimeBoundaryMiddleware:
     """Raw ASGI security, resource, and telemetry boundary."""
 
     def __init__(
@@ -775,7 +768,7 @@ class ProductionBoundaryMiddleware:
         app: ASGIApp,
         *,
         provider_app: FastAPI,
-        service_state: _ProductionState,
+        service_state: _RuntimeState,
         routes: _RoutePaths = _V1_ROUTES,
     ) -> None:
         self.app = app
@@ -1162,13 +1155,13 @@ def _install_openapi_security(
 
 def _create_application(
     *,
-    service_settings: ProductionSettings,
+    service_settings: RuntimeSettings,
     backend_factory: Callable[[], ReadinessBackend],
     identity_loader: Callable[[], ProviderBuildIdentity],
     test_only: bool,
 ) -> FastAPI:
     secrets = service_settings.resolve_secrets()
-    state = _ProductionState(settings=service_settings, secrets=secrets)
+    state = _RuntimeState(settings=service_settings, secrets=secrets)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -1198,18 +1191,18 @@ def _create_application(
             )
 
     target = FastAPI(
-        title="Customs Evidence API — Production",
+        title="Customs Evidence API — Runtime",
         version="1.1.0",
         docs_url=None,
         redoc_url=None,
         openapi_url=_OPENAPI_PATH if service_settings.enable_openapi else None,
         lifespan=lifespan,
     )
-    target.state.production_service = state
-    target.state.test_only_production_shell = test_only
+    target.state.runtime_service = state
+    target.state.test_only_runtime_shell = test_only
 
     @target.get(_METRICS_PATH, include_in_schema=False)
-    async def production_metrics() -> PlainTextResponse:
+    async def runtime_metrics() -> PlainTextResponse:
         return PlainTextResponse(
             state.metrics.render(),
             media_type="text/plain; version=0.0.4; charset=utf-8",
@@ -1225,7 +1218,7 @@ def _create_application(
     )
     _install_openapi_security(target)
     target.add_middleware(
-        ProductionBoundaryMiddleware,
+        RuntimeBoundaryMiddleware,
         provider_app=target,
         service_state=state,
         routes=_V1_ROUTES,
@@ -1235,7 +1228,7 @@ def _create_application(
 
 def _create_runtime_v2_application(
     *,
-    service_settings: ProductionSettings,
+    service_settings: RuntimeSettings,
     runtime_release_loader: RuntimeLeaseLoader,
     backend_factory: RuntimeBackendFactory,
     test_only: bool,
@@ -1245,7 +1238,7 @@ def _create_runtime_v2_application(
     """Create the authenticated generation-bound shell without v1 routes."""
 
     secrets = service_settings.resolve_secrets()
-    state = _ProductionState(settings=service_settings, secrets=secrets)
+    state = _RuntimeState(settings=service_settings, secrets=secrets)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -1297,19 +1290,19 @@ def _create_runtime_v2_application(
             )
 
     target = FastAPI(
-        title="Customs Evidence Runtime API — Production",
+        title="Customs Evidence Runtime API",
         version="1.2.0",
         docs_url=None,
         redoc_url=None,
         openapi_url=RUNTIME_OPENAPI_PATH if service_settings.enable_openapi else None,
         lifespan=lifespan,
     )
-    target.state.production_service = state
-    target.state.test_only_production_shell = test_only
+    target.state.runtime_service = state
+    target.state.test_only_runtime_shell = test_only
     target.state.model_supervisor = model_supervisor
 
     @target.get(RUNTIME_METRICS_PATH, include_in_schema=False)
-    async def production_metrics_v2() -> PlainTextResponse:
+    async def runtime_metrics_v2() -> PlainTextResponse:
         return PlainTextResponse(
             state.metrics.render(),
             media_type="text/plain; version=0.0.4; charset=utf-8",
@@ -1324,7 +1317,7 @@ def _create_runtime_v2_application(
     )
     _install_openapi_security(target, _V2_ROUTES)
     target.add_middleware(
-        ProductionBoundaryMiddleware,
+        RuntimeBoundaryMiddleware,
         provider_app=target,
         service_state=state,
         routes=_V2_ROUTES,
@@ -1332,14 +1325,14 @@ def _create_runtime_v2_application(
     return target
 
 
-def create_production_evidence_application(
-    service_settings: ProductionSettings | None = None,
+def create_runtime_v2_application(
+    service_settings: RuntimeSettings | None = None,
 ) -> FastAPI:
-    """Create the sealed-generation v2 service; fixture env switches do not exist."""
+    """Create the sealed-generation v2 runtime; fixture env switches do not exist."""
 
-    selected = service_settings or ProductionSettings()
+    selected = service_settings or RuntimeSettings()
     apply_runtime_data_store_secrets(selected, data_store_settings)
-    validate_production_data_store_settings(selected, data_store_settings)
+    validate_runtime_data_store_settings(selected, data_store_settings)
     validate_runtime_deadline_settings(selected)
     validate_postgres_deadline_runtime()
     neo4j_executor = KillableNeo4jQueryExecutor(
@@ -1371,13 +1364,13 @@ def create_production_evidence_application(
     )
 
 
-def create_test_production_shell_application(
+def create_test_runtime_v1_application(
     *,
-    service_settings: ProductionSettings,
+    service_settings: RuntimeSettings,
     identity: ProviderBuildIdentity,
     backend: ReadinessBackend,
 ) -> FastAPI:
-    """Build the same shell around an explicit offline backend for tests only."""
+    """Build the authenticated v1 shell around an explicit offline backend."""
 
     return _create_application(
         service_settings=service_settings,
@@ -1389,13 +1382,13 @@ def create_test_production_shell_application(
 
 def create_test_runtime_v2_application(
     *,
-    service_settings: ProductionSettings,
+    service_settings: RuntimeSettings,
     runtime_release_loader: RuntimeLeaseLoader,
     backend_factory: RuntimeBackendFactory,
     runtime_closeables: tuple[Any, ...] = (),
     model_supervisor: DenseModelSupervisor | None = None,
 ) -> FastAPI:
-    """Explicit offline v2 conformance shell; production never calls it."""
+    """Explicit offline v2 conformance shell; runtime selection is explicit."""
 
     return _create_runtime_v2_application(
         service_settings=service_settings,
@@ -1409,7 +1402,7 @@ def create_test_runtime_v2_application(
 
 def _create_runtime_v3_application(
     *,
-    service_settings: ProductionSettings,
+    service_settings: RuntimeSettings,
     runtime_release_loader: RuntimeV3LeaseLoaderProtocol,
     backend_factory: RuntimeBackendFactory,
     test_only: bool,
@@ -1419,7 +1412,7 @@ def _create_runtime_v3_application(
     """Create the authenticated generation- and policy-bound v3 shell."""
 
     secrets = service_settings.resolve_secrets()
-    state = _ProductionState(settings=service_settings, secrets=secrets)
+    state = _RuntimeState(settings=service_settings, secrets=secrets)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -1471,19 +1464,19 @@ def _create_runtime_v3_application(
             )
 
     target = FastAPI(
-        title="Customs Evidence Runtime API v3 — Production Candidate",
+        title="Customs Evidence Runtime API v3",
         version="1.3.0",
         docs_url=None,
         redoc_url=None,
         openapi_url=RUNTIME_V3_OPENAPI_PATH if service_settings.enable_openapi else None,
         lifespan=lifespan,
     )
-    target.state.production_service = state
-    target.state.test_only_production_shell = test_only
+    target.state.runtime_service = state
+    target.state.test_only_runtime_shell = test_only
     target.state.model_supervisor = model_supervisor
 
     @target.get(RUNTIME_V3_METRICS_PATH, include_in_schema=False)
-    async def production_metrics_v3() -> PlainTextResponse:
+    async def runtime_metrics_v3() -> PlainTextResponse:
         return PlainTextResponse(
             state.metrics.render(),
             media_type="text/plain; version=0.0.4; charset=utf-8",
@@ -1498,7 +1491,7 @@ def _create_runtime_v3_application(
     )
     _install_openapi_security(target, _V3_ROUTES)
     target.add_middleware(
-        ProductionBoundaryMiddleware,
+        RuntimeBoundaryMiddleware,
         provider_app=target,
         service_state=state,
         routes=_V3_ROUTES,
@@ -1506,14 +1499,14 @@ def _create_runtime_v3_application(
     return target
 
 
-def create_production_evidence_v3_application(
-    service_settings: ProductionSettings | None = None,
+def create_runtime_v3_application(
+    service_settings: RuntimeSettings | None = None,
 ) -> FastAPI:
-    """Create v3; the fixed external policy mount keeps approval out of Git."""
+    """Create v3; the external policy mount keeps approval state out of Git."""
 
-    selected = service_settings or ProductionSettings()
+    selected = service_settings or RuntimeSettings()
     apply_runtime_data_store_secrets(selected, data_store_settings)
-    validate_production_data_store_settings(selected, data_store_settings)
+    validate_runtime_data_store_settings(selected, data_store_settings)
     validate_runtime_deadline_settings(selected)
     validate_postgres_deadline_runtime()
     neo4j_executor = KillableNeo4jQueryExecutor(
@@ -1546,7 +1539,7 @@ def create_production_evidence_v3_application(
 
 def create_test_runtime_v3_application(
     *,
-    service_settings: ProductionSettings,
+    service_settings: RuntimeSettings,
     runtime_release_loader: RuntimeV3LeaseLoaderProtocol,
     backend_factory: RuntimeBackendFactory,
     runtime_closeables: tuple[Any, ...] = (),
@@ -1560,71 +1553,3 @@ def create_test_runtime_v3_application(
         model_supervisor=model_supervisor,
         runtime_closeables=runtime_closeables,
     )
-
-
-def main() -> int:
-    """Run one hardened worker; horizontal concurrency belongs at the orchestrator."""
-
-    try:
-        selected = ProductionSettings()
-        target = create_production_evidence_application(selected)
-    except Exception as exc:
-        print(
-            json.dumps(
-                {
-                    "event": "evidence_service_configuration_failed",
-                    "exception_type": type(exc).__name__,
-                },
-                sort_keys=True,
-            ),
-            file=sys.stderr,
-        )
-        return 78
-
-    return run_production_server(selected, target)
-
-
-def run_production_server(selected: ProductionSettings, target: FastAPI) -> int:
-    """Run a hardened ingress-only ASGI process for any runtime generation."""
-
-    if selected.transport_mode == "direct_tls":
-        print(
-            json.dumps(
-                {
-                    "event": "evidence_service_configuration_failed",
-                    "reason": (
-                        "direct_tls requires an operator-managed TLS ASGI server; "
-                        "the bundled entrypoint is ingress-only"
-                    ),
-                },
-                sort_keys=True,
-            ),
-            file=sys.stderr,
-        )
-        return 78
-
-    logging.basicConfig(
-        level=getattr(logging, selected.log_level.upper()),
-        format="%(message)s",
-    )
-    import uvicorn
-
-    uvicorn.run(
-        target,
-        host=selected.bind_host,
-        port=selected.port,
-        access_log=False,
-        server_header=False,
-        date_header=False,
-        proxy_headers=False,
-        workers=1,
-        limit_concurrency=selected.max_concurrency + 8,
-        timeout_keep_alive=5,
-        timeout_graceful_shutdown=int(selected.shutdown_grace_seconds),
-        log_level=selected.log_level,
-    )
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

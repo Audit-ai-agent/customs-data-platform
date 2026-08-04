@@ -66,8 +66,8 @@ from src.evidence import (  # noqa: E402
 from src.ingest.laws import TARGET_LAWS  # noqa: E402
 from src.model_runtime import DenseModelSupervisor  # noqa: E402
 from src.neo4j_runtime import KillableNeo4jQueryExecutor, Neo4jQueryExecutor  # noqa: E402
-from src.production import create_test_runtime_v2_application  # noqa: E402
-from src.production_settings import ProductionSettings  # noqa: E402
+from src.runtime_service import create_test_runtime_v2_application  # noqa: E402
+from src.runtime_settings import RuntimeSettings  # noqa: E402
 from src.runtime_release import (  # noqa: E402
     EvidenceRuntimeReleaseIdentity,
     GenerationRequestLease,
@@ -1614,7 +1614,7 @@ def create_three_law_diagnostic_application(
         )
         lease = derive_three_law_runtime_lease(provider_lock, initial_observation)
 
-        service_settings = ProductionSettings(
+        service_settings = RuntimeSettings(
             _env_file=None,
             service_token=SecretStr(token),
             service_token_file=None,
@@ -1718,8 +1718,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--provider-context",
-        "--production-context",
-        dest="provider_context",
         type=Path,
         required=True,
     )

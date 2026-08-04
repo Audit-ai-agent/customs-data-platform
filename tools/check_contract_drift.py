@@ -30,9 +30,6 @@ TRUST_STORE_SCHEMA_PATH = (
 TRUST_LOCK_SCHEMA_PATH = (
     ROOT / "contracts" / "evidence" / "v3" / "trusted_reviewer_lock_v1.schema.json"
 )
-RELEASE_PROVENANCE_SCHEMA_PATH = (
-    ROOT / "contracts" / "evidence" / "v3" / "release_provenance_v1.schema.json"
-)
 sys.path.insert(0, str(LAW_REPOSITORY))
 
 from fastapi import FastAPI  # noqa: E402
@@ -45,7 +42,6 @@ from src.requirement_policy_release import (  # noqa: E402
     TrustedReviewerStoreLock,
 )
 from src.runtime_release_v3 import EvidenceRuntimeReadinessV3  # noqa: E402
-from src.release_provenance_v3 import EvidenceV3ReleaseProvenance  # noqa: E402
 from src.webapp import app  # noqa: E402
 
 
@@ -229,7 +225,6 @@ def check_contract_drift() -> list[str]:
         (V3_READINESS_SCHEMA_PATH, EvidenceRuntimeReadinessV3.model_json_schema()),
         (TRUST_STORE_SCHEMA_PATH, TrustedReviewerStore.model_json_schema()),
         (TRUST_LOCK_SCHEMA_PATH, TrustedReviewerStoreLock.model_json_schema()),
-        (RELEASE_PROVENANCE_SCHEMA_PATH, EvidenceV3ReleaseProvenance.model_json_schema()),
     )
     for path, generated in generated_contracts:
         canonical = json.loads(path.read_text(encoding="utf-8"))
@@ -266,7 +261,6 @@ def main() -> int:
         f"{V3_READINESS_SCHEMA_PATH.relative_to(ROOT)}, "
         f"{TRUST_STORE_SCHEMA_PATH.relative_to(ROOT)}, "
         f"{TRUST_LOCK_SCHEMA_PATH.relative_to(ROOT)}"
-        f", {RELEASE_PROVENANCE_SCHEMA_PATH.relative_to(ROOT)}"
     )
     return 0
 

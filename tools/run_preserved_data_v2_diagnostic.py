@@ -32,8 +32,8 @@ from src.db import postgres  # noqa: E402
 from src.deadline import RequestDeadline  # noqa: E402
 from src.generation_runtime import ActiveGenerationLoader  # noqa: E402
 from src.ingest.laws import TARGET_LAWS  # noqa: E402
-from src.production import create_test_runtime_v2_application  # noqa: E402
-from src.production_settings import ProductionSettings  # noqa: E402
+from src.runtime_service import create_test_runtime_v2_application  # noqa: E402
+from src.runtime_settings import RuntimeSettings  # noqa: E402
 from src.provider_identity import load_runtime_provider_build_identity  # noqa: E402
 from src.runtime_release import (  # noqa: E402
     GenerationRequestLease,
@@ -247,7 +247,7 @@ def write_audit_json(
     destination = output.parent.resolve() / output.name
     if any(_is_within(destination, root) for root in forbidden_roots):
         raise PreservedDataDiagnosticError(
-            "audit output must be outside source and production context roots"
+            "audit output must be outside source and provider context roots"
         )
     if destination.exists() or destination.is_symlink():
         raise PreservedDataDiagnosticError("audit output must be a new regular file")
@@ -292,7 +292,7 @@ def write_audit_json(
 
 def create_preserved_data_diagnostic_application(
     *,
-    production_context: Path,
+    provider_context: Path,
     service_token_file: Path,
     audit_output: Path,
     host: str,
@@ -307,7 +307,7 @@ def create_preserved_data_diagnostic_application(
         raise PreservedDataDiagnosticError("host must be loopback-only")
     if not 1 <= port <= 65_535:
         raise PreservedDataDiagnosticError("port must be from 1 to 65535")
-    context = production_context.resolve()
+    context = provider_context.resolve()
     verified_lock = provider_lock_loader(context)
     token = load_bearer_token_file(service_token_file)
     audit = audit_preserved_postgres(
@@ -332,7 +332,7 @@ def create_preserved_data_diagnostic_application(
         ),
     )
     runtime_loader = _FailClosedDiagnosticRuntimeLoader(delegate)
-    settings = ProductionSettings(
+    settings = RuntimeSettings(
         _env_file=None,
         service_token=SecretStr(token),
         service_token_file=None,
@@ -386,7 +386,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         required=True,
     )
-    parser.add_argument("--production-context", type=Path, required=True)
+    parser.add_argument("--provider-context", type=Path, required=True)
     parser.add_argument("--service-token-file", type=Path, required=True)
     parser.add_argument("--audit-output", type=Path, required=True)
     parser.add_argument("--host", choices=LOOPBACK_HOSTS, required=True)
@@ -398,7 +398,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         application = create_preserved_data_diagnostic_application(
-            production_context=args.production_context,
+            provider_context=args.provider_context,
             service_token_file=args.service_token_file,
             audit_output=args.audit_output,
             host=args.host,

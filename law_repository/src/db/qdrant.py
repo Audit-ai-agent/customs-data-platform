@@ -35,7 +35,7 @@ def client(*, timeout_seconds: float | None = None) -> QdrantClient:
     request_bounded = timeout_seconds is not None
     return QdrantClient(
         url=settings.qdrant_url,
-        api_key=settings.qdrant_api_key or None,  # Qdrant Cloud 인증 (로컬은 비움)
+        api_key=settings.qdrant_api_key or None,  # 외부 runtime 인증 (로컬은 비움)
         # Batch/ingestion keeps its existing WAN allowance.  Production
         # request paths always pass the shorter absolute-deadline-derived cap.
         timeout=timeout_seconds if timeout_seconds is not None else 60,

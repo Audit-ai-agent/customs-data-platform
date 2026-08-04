@@ -16,15 +16,15 @@ from pydantic import ValidationError
 from src.config import Settings as DataStoreSettings
 from src.conformance import TestOnlyConformanceEvidenceBackend
 from src.deadline import RequestDeadline
-from src.production import (
-    create_production_evidence_application,
-    create_test_production_shell_application,
+from src.runtime_service import (
+    create_runtime_v2_application,
+    create_test_runtime_v1_application,
 )
-from src.production_settings import (
-    ProductionConfigurationError,
-    ProductionSettings,
+from src.runtime_settings import (
+    RuntimeConfigurationError,
+    RuntimeSettings,
     apply_runtime_data_store_secrets,
-    validate_production_data_store_settings,
+    validate_runtime_data_store_settings,
 )
 from src.provider_identity import (
     HEADER_PROVIDER_REVISION,
@@ -47,7 +47,7 @@ def _identity() -> ProviderBuildIdentity:
     )
 
 
-def _settings(**overrides: Any) -> ProductionSettings:
+def _settings(**overrides: Any) -> RuntimeSettings:
     values: dict[str, Any] = {
         "service_token": _TOKEN,
         "transport_mode": "direct_tls",
@@ -59,7 +59,7 @@ def _settings(**overrides: Any) -> ProductionSettings:
         "shutdown_grace_seconds": 10,
     }
     values.update(overrides)
-    return ProductionSettings(_env_file=None, **values)
+    return RuntimeSettings(_env_file=None, **values)
 
 
 def _request_body(*, request_id: str = "req-production-1") -> dict[str, Any]:
@@ -105,40 +105,40 @@ def _retrieval_headers(
 
 def _app(
     *,
-    settings: ProductionSettings | None = None,
+    settings: RuntimeSettings | None = None,
     backend: TestOnlyConformanceEvidenceBackend | None = None,
 ):
-    return create_test_production_shell_application(
+    return create_test_runtime_v1_application(
         service_settings=settings or _settings(),
         identity=_identity(),
         backend=backend or TestOnlyConformanceEvidenceBackend(),
     )
 
 
-def test_production_settings_require_one_strong_service_secret(tmp_path: Path) -> None:
+def test_runtime_settings_require_one_strong_service_secret(tmp_path: Path) -> None:
     with pytest.raises(ValidationError, match="exactly one"):
-        ProductionSettings(
+        RuntimeSettings(
             _env_file=None,
             transport_mode="direct_tls",
         )
     with pytest.raises(ValidationError, match="exactly one"):
-        ProductionSettings(
+        RuntimeSettings(
             _env_file=None,
             service_token=_TOKEN,
             service_token_file=tmp_path / "token",
             transport_mode="direct_tls",
         )
-    weak = ProductionSettings(
+    weak = RuntimeSettings(
         _env_file=None,
         service_token="short",
         transport_mode="direct_tls",
     )
-    with pytest.raises(ProductionConfigurationError, match="32-512"):
+    with pytest.raises(RuntimeConfigurationError, match="32-512"):
         weak.resolve_secrets()
 
     secret_file = tmp_path / "service-token"
     secret_file.write_text(_TOKEN + "\n", encoding="ascii")
-    from_file = ProductionSettings(
+    from_file = RuntimeSettings(
         _env_file=None,
         service_token_file=secret_file.resolve(),
         transport_mode="direct_tls",
@@ -149,14 +149,14 @@ def test_production_settings_require_one_strong_service_secret(tmp_path: Path) -
 
 def test_loopback_dev_is_explicit_and_cannot_bind_wildcard() -> None:
     with pytest.raises(ValidationError, match="requires"):
-        ProductionSettings(
+        RuntimeSettings(
             _env_file=None,
             service_token=_TOKEN,
             transport_mode="loopback_dev",
             bind_host="127.0.0.1",
         )
     with pytest.raises(ValidationError, match="loopback"):
-        ProductionSettings(
+        RuntimeSettings(
             _env_file=None,
             service_token=_TOKEN,
             transport_mode="loopback_dev",
@@ -167,13 +167,13 @@ def test_loopback_dev_is_explicit_and_cannot_bind_wildcard() -> None:
 
 def test_trusted_proxy_mode_rejects_missing_or_global_networks() -> None:
     with pytest.raises(ValidationError, match="TRUSTED_PROXY_CIDRS"):
-        ProductionSettings(
+        RuntimeSettings(
             _env_file=None,
             service_token=_TOKEN,
             transport_mode="trusted_proxy_tls",
         )
     with pytest.raises(ValidationError, match="entire address space"):
-        ProductionSettings(
+        RuntimeSettings(
             _env_file=None,
             service_token=_TOKEN,
             transport_mode="trusted_proxy_tls",
@@ -184,8 +184,8 @@ def test_trusted_proxy_mode_rejects_missing_or_global_networks() -> None:
 def test_data_store_validation_rejects_weak_or_cleartext_remote_settings() -> None:
     service = _settings()
     weak = DataStoreSettings(_env_file=None)
-    with pytest.raises(ProductionConfigurationError, match="PostgreSQL password"):
-        validate_production_data_store_settings(service, weak)
+    with pytest.raises(RuntimeConfigurationError, match="PostgreSQL password"):
+        validate_runtime_data_store_settings(service, weak)
 
     cleartext = DataStoreSettings(
         _env_file=None,
@@ -196,8 +196,8 @@ def test_data_store_validation_rejects_weak_or_cleartext_remote_settings() -> No
         neo4j_uri="bolt://neo4j.internal:7687",
         neo4j_password="strong-neo4j-secret",
     )
-    with pytest.raises(ProductionConfigurationError, match="PostgreSQL"):
-        validate_production_data_store_settings(service, cleartext)
+    with pytest.raises(RuntimeConfigurationError, match="PostgreSQL"):
+        validate_runtime_data_store_settings(service, cleartext)
 
     encrypted = DataStoreSettings(
         _env_file=None,
@@ -209,7 +209,7 @@ def test_data_store_validation_rejects_weak_or_cleartext_remote_settings() -> No
         neo4j_uri="neo4j+s://neo4j.internal:7687",
         neo4j_password="strong-neo4j-secret",
     )
-    validate_production_data_store_settings(service, encrypted)
+    validate_runtime_data_store_settings(service, encrypted)
 
 
 def test_mounted_data_store_secrets_are_resolved_without_logging(
@@ -242,10 +242,10 @@ def test_mounted_data_store_secrets_are_resolved_without_logging(
     assert "neo4j-file-secret" not in serialized
 
 
-def test_real_production_factory_cannot_enable_fixture_from_environment(
+def test_real_runtime_factory_cannot_enable_fixture_from_environment(
     monkeypatch,
 ) -> None:
-    from src import production
+    from src import runtime_service
     from src.generation_evidence import GenerationEvidenceBackend
 
     safe_values = {
@@ -259,14 +259,14 @@ def test_real_production_factory_cannot_enable_fixture_from_environment(
         "neo4j_password": "runtime-neo4j-credential",
     }
     for name, value in safe_values.items():
-        monkeypatch.setattr(production.data_store_settings, name, value)
+        monkeypatch.setattr(runtime_service.data_store_settings, name, value)
     monkeypatch.setenv("EVIDENCE_BACKEND", "conformance")
     monkeypatch.setenv("EVIDENCE_TEST_FIXTURE", "true")
 
-    app = create_production_evidence_application(_settings())
+    app = create_runtime_v2_application(_settings())
 
     assert app.state.test_only_runtime_conformance is False
-    assert app.state.test_only_production_shell is False
+    assert app.state.test_only_runtime_shell is False
     paths = set(app.openapi()["paths"])
     assert "/internal/rag/v1/retrieve" not in paths
     assert "/internal/rag/v2/retrieve" in paths
@@ -774,7 +774,7 @@ def test_deadline_returns_504_and_keeps_capacity_until_work_finishes() -> None:
 
 
 def test_metrics_openapi_and_logs_do_not_expose_body_or_token(caplog) -> None:
-    caplog.set_level("INFO", logger="customs_evidence.production")
+    caplog.set_level("INFO", logger="customs_evidence.runtime")
     app = _app(settings=_settings(enable_openapi=True))
     with TestClient(app, base_url="https://evidence.internal") as client:
         request = _request_body(request_id="req-safe-observability")

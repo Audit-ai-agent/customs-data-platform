@@ -1,7 +1,7 @@
 """Synthetic Evidence V3 approval material for tests and loopback conformance.
 
 This module is deliberately outside ``law_repository/src`` and outside the
-production image allowlist.  Its deterministic private keys are public test
+provider-context source allowlist.  Its deterministic private keys are public test
 fixtures and MUST NOT be used for a release, deployment, RAG evaluation, or
 automatic-completion decision.
 """

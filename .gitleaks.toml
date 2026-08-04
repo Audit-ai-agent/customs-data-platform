@@ -2,9 +2,3 @@ title = "customs-data-platform secret scanning"
 
 [extend]
 useDefault = true
-
-[[allowlists]]
-description = "The ignored local Python environment contains audited third-party package sources, not repository source."
-targetRules = ["generic-api-key"]
-condition = "AND"
-paths = ['''(?:^|/)\.venv(?:/|$)''']

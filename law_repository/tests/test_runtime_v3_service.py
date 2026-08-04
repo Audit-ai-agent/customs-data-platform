@@ -10,8 +10,8 @@ from fastapi.testclient import TestClient
 
 from src.conformance import TestOnlyConformanceEvidenceBackend
 from src.deadline import RequestDeadline
-from src.production import create_test_runtime_v3_application
-from src.production_settings import ProductionSettings
+from src.runtime_service import create_test_runtime_v3_application
+from src.runtime_settings import RuntimeSettings
 from src.requirement_policy_release import VerifiedRequirementPolicyRelease
 from src.runtime_api_v3 import (
     RUNTIME_V3_LIVENESS_PATH,
@@ -94,8 +94,8 @@ class _ReadyBackend(TestOnlyConformanceEvidenceBackend):
         return None
 
 
-def _settings() -> ProductionSettings:
-    return ProductionSettings(
+def _settings() -> RuntimeSettings:
+    return RuntimeSettings(
         _env_file=None,
         service_token=_TOKEN,
         transport_mode="direct_tls",
