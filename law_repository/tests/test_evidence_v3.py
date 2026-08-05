@@ -1,15 +1,7 @@
 from __future__ import annotations
 
-from datetime import date
-
 from src.conformance import TestOnlyConformanceEvidenceBackend
-from src.evidence_v3 import (
-    MappingRequirementPolicyResolver,
-    RequirementPolicyBinding,
-    RetrieveRequestV3,
-    UNAPPROVED_HUMAN_ONLY_POLICY_SHA256,
-    retrieve_evidence_v3,
-)
+from src.evidence_v3 import RetrieveRequestV3, retrieve_evidence_v3
 
 
 def _request() -> RetrieveRequestV3:
@@ -38,12 +30,8 @@ def _request() -> RetrieveRequestV3:
     )
 
 
-def test_v3_unmapped_requirement_is_explicit_human_only() -> None:
-    response = retrieve_evidence_v3(
-        _request(),
-        TestOnlyConformanceEvidenceBackend(),
-        MappingRequirementPolicyResolver({}),
-    )
+def test_v3_projects_data_evidence_without_a_policy_or_approval_gate() -> None:
+    response = retrieve_evidence_v3(_request(), TestOnlyConformanceEvidenceBackend())
 
     assert response.schema_version == "3.0"
     requirement = next(
@@ -52,41 +40,9 @@ def test_v3_unmapped_requirement_is_explicit_human_only() -> None:
         for evidence in result.evidence
         if evidence.required_document_code
     )
-    assert requirement.requirement_verification is not None
-    assert requirement.requirement_verification.verification_policy == "human_only"
-    assert requirement.requirement_verification.approved is False
-    assert (
-        requirement.requirement_verification.policy_source_sha256
-        == UNAPPROVED_HUMAN_ONLY_POLICY_SHA256
-    )
-    assert response.status == "partial"
-    assert response.results[0].coverage == "partial"
-    assert response.results[0].errors[0].code == "REQUIREMENT_POLICY_UNAVAILABLE"
-
-
-def test_v3_approved_policy_is_projected_without_changing_v1_evidence() -> None:
-    policy = RequirementPolicyBinding(
-        required_document_code="CCCT_DOC_IMPORT_CONFIRMATION",
-        verification_policy="content_match_required",
-        policy_source_sha256="1" * 64,
-        policy_release="requirement-policy-test-v1",
-        approved=True,
-    )
-    response = retrieve_evidence_v3(
-        _request(),
-        TestOnlyConformanceEvidenceBackend(),
-        MappingRequirementPolicyResolver({policy.required_document_code: policy}),
-    )
-    requirement = next(
-        evidence
-        for result in response.results
-        for evidence in result.evidence
-        if evidence.required_document_code == policy.required_document_code
-    )
-
-    assert requirement.requirement_verification == policy
     assert requirement.eligibility == "finding"
     assert requirement.version_hash
+    assert "requirement_verification" not in requirement.model_dump(mode="json")
 
 
 def test_v3_request_rejects_duplicate_item_ids() -> None:

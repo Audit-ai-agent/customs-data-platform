@@ -4,19 +4,21 @@ version = "0.1.0"
 description = "Versioned Korean customs knowledge platform and Evidence API"
 requires-python = ">=3.11,<3.12"
 dependencies = [
-  "cryptography>=50,<51",
   "fastapi>=0.115",
-  "neo4j>=5.24",
-  "psycopg[binary]>=3.2",
-  "pydantic-settings>=2.5",
-  "qdrant-client>=1.15,<1.17",
+  "pydantic>=2.5,<3",
   "uvicorn>=0.30",
 ]
 
 [project.optional-dependencies]
+store = [
+  "neo4j>=5.24",
+  "psycopg[binary]>=3.2",
+  "pydantic-settings>=2.5",
+  "qdrant-client>=1.15,<1.17",
+]
 rag = [
-  "aiohttp>=3.14.3,<4",
   "FlagEmbedding>=1.3",
+  "huggingface-hub>=0.23,<2",
   "numpy>=1.26,<3",
   "torch>=2.0",
 ]
@@ -24,11 +26,11 @@ ingestion = [
   "openpyxl>=3.1",
   "pandas>=2.2",
   "requests>=2.32",
-  "xmltodict>=0.13",
 ]
 
 [dependency-groups]
 dev = [
+  "httpx>=0.27,<1",
   "mypy==1.17.1",
   "pytest>=8.3",
   "ruff>=0.12",
@@ -50,7 +52,17 @@ explicit = true
 [tool.pytest.ini_options]
 addopts = "--strict-markers"
 pythonpath = [".", "law_repository"]
-testpaths = ["law_repository/tests", "evals/tests"]
+testpaths = [
+  "law_repository/tests/test_evidence.py",
+  "law_repository/tests/test_ccct_p0.py",
+  "law_repository/tests/test_evidence_v3.py",
+  "law_repository/tests/test_evidence_v3_contract.py",
+  "law_repository/tests/test_profile_evidence.py",
+  "law_repository/tests/test_local_compose_security.py",
+  "law_repository/tests/test_migration_runner.py",
+  "law_repository/tests/test_model_identity.py",
+  "law_repository/tests/test_github_workflow_security.py",
+]
 markers = [
   "live: requires initialized PostgreSQL, Qdrant, and Neo4j services",
 ]
@@ -66,36 +78,23 @@ select = ["E9", "F63", "F7", "F82"]
 python_version = "3.11"
 mypy_path = ["law_repository"]
 files = [
-  "law_repository/src/deadline.py",
-  "law_repository/src/process_ipc.py",
-  "law_repository/src/process_security.py",
-  "law_repository/src/process_start.py",
-  "law_repository/src/model_runtime.py",
-  "law_repository/src/neo4j_runtime.py",
-  "law_repository/src/runtime_service.py",
-  "law_repository/src/runtime_settings.py",
-  "law_repository/src/runtime_api.py",
-  "law_repository/src/runtime_release.py",
+  "law_repository/scripts/migrate.py",
+  "law_repository/src/config.py",
+  "law_repository/src/conformance.py",
+  "law_repository/src/evidence.py",
   "law_repository/src/evidence_v3.py",
-  "law_repository/src/requirement_policy_release.py",
-  "law_repository/src/runtime_release_v3.py",
-  "law_repository/src/runtime_api_v3.py",
-  "law_repository/src/generation_evidence.py",
-  "law_repository/src/generation_runtime.py",
-  "law_repository/src/generation_stores.py",
+  "law_repository/src/functional_uat.py",
+  "law_repository/src/local_profiles.py",
+  "law_repository/src/profile_evidence.py",
+  "law_repository/src/profile_wire.py",
   "law_repository/src/db/postgres.py",
   "law_repository/src/db/qdrant.py",
   "law_repository/src/db/neo4j.py",
-  "tools/run_evidence_v2_conformance_server.py",
-  "tools/run_evidence_v3_conformance_server.py",
-  "tools/test_only_v3_policy.py",
   "tools/generate_evidence_v3_contracts.py",
-  "tools/run_preserved_data_v2_diagnostic.py",
-  "tools/run_three_law_v3_diagnostic.py",
-  "tools/run_three_law_v3_scenario_eval.py",
-  "tools/scenario_eval_v3_policy.py",
-  "tools/build_provider_context.py",
-  "tools/provider_context.py",
+  "tools/check_contract_drift.py",
+  "tools/dev_store.py",
+  "tools/functional_uat_3law.py",
+  "tools/run_dev_fixture_evidence.py",
 ]
 ignore_missing_imports = true
 follow_imports = "skip"

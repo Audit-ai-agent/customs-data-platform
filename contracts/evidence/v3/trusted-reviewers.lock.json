@@ -1,7 +1,0 @@
-{
-  "contract": "evidence-domain-reviewer-trust-store-lock",
-  "schema_version": "1.0",
-  "release_state": "unreleased",
-  "trust_store_release": "unreleased",
-  "reviewer_trust_store_sha256": null
-}

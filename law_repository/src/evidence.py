@@ -12,19 +12,50 @@ import hashlib
 import re
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Annotated, Literal, Protocol
+from typing import Annotated, Literal, Protocol, cast
 from urllib.parse import quote
 
-from psycopg.rows import dict_row
 from pydantic import AnyUrl, BaseModel, ConfigDict, Field, model_validator
 
 from src import repository
-from src.db.neo4j import driver as make_driver
-from src.db.postgres import connect
 
 SCHEMA_VERSION = "1.0"
 _QDRANT_SCROLL_PAGE_SIZE = 256
 _QDRANT_READINESS_MAX_POINTS = 1_000_000
+_QDRANT_COLLECTION = "customs_law_current"
+
+
+def connect():
+    """Open the optional local PostgreSQL connection only when a store path runs."""
+
+    from src.db.postgres import connect as open_connection
+
+    return open_connection()
+
+
+def make_driver():
+    """Open the optional local Neo4j driver only when a store path runs."""
+
+    from src.db.neo4j import driver as open_driver
+
+    return open_driver()
+
+
+def dict_row(*args: object, **kwargs: object):
+    """Defer the psycopg row-factory import until a real cursor consumes it."""
+
+    from psycopg.rows import dict_row as row_factory
+
+    return row_factory(*args, **kwargs)
+
+
+def qdrant_client():
+    """Open the optional local Qdrant client only when a store path runs."""
+
+    from src.db.qdrant import client as open_client
+
+    return open_client()
+
 
 NonEmpty128 = Annotated[str, Field(min_length=1, max_length=128)]
 NonEmpty500 = Annotated[str, Field(min_length=1, max_length=500)]
@@ -196,7 +227,7 @@ class KnowledgeSnapshotMismatch(RuntimeError):
 
 
 class DatabaseEvidenceBackend:
-    """PostgreSQL 원장 + Neo4j HSK 마스터를 사용하는 운영 backend."""
+    """Optional local-store backend backed by PostgreSQL and the HSK graph."""
 
     def __init__(self) -> None:
         self._law_index_verified = False
@@ -302,9 +333,9 @@ class DatabaseEvidenceBackend:
 
     def _verify_target_law_coverage(self) -> dict[str, int]:
         """Require a complete and byte-attested current target-law corpus."""
-        from src.ingest.laws import TARGET_LAWS
+        from src.functional_uat_spec import FUNCTIONAL_UAT_TARGET_LAWS
 
-        expected_ids = {law["law_id"] for law in TARGET_LAWS}
+        expected_ids = {law["law_id"] for law in FUNCTIONAL_UAT_TARGET_LAWS}
         with connect() as conn, conn.cursor() as cur:
             cur.execute(
                 """
@@ -440,11 +471,9 @@ class DatabaseEvidenceBackend:
                 """
             )
             postgres_graph_ids = {int(row[0]) for row in cur.fetchall()}
-        from src.db.qdrant import COLLECTION, client as qdrant_client
-
         qdrant = qdrant_client()
-        qdrant_count = int(qdrant.count(COLLECTION, exact=True).count)
-        qdrant_point_ids = self._scroll_qdrant_point_ids(qdrant, COLLECTION, qdrant_count)
+        qdrant_count = int(qdrant.count(_QDRANT_COLLECTION, exact=True).count)
+        qdrant_point_ids = self._scroll_qdrant_point_ids(qdrant, _QDRANT_COLLECTION, qdrant_count)
         postgres_qdrant_ids = set(postgres_qdrant_point_ids)
         actual_qdrant_ids = set(qdrant_point_ids)
         postgres_duplicate_ids = len(postgres_qdrant_point_ids) - len(postgres_qdrant_ids)
@@ -590,8 +619,13 @@ class DatabaseEvidenceBackend:
                 "rrf": float(candidate["rrf"]),
                 "lexical_overlap": float(lexical),
             }
-            method_order = tuple(
-                method for method in ("dense", "bm25", "graph") if method in candidate["methods"]
+            method_order = cast(
+                tuple[Literal["dense", "bm25", "graph"], ...],
+                tuple(
+                    method
+                    for method in ("dense", "bm25", "graph")
+                    if method in candidate["methods"]
+                ),
             )
             matches.append(LawArticleMatch(row, method_order, score, raw_scores))
         matches.sort(key=lambda match: (-match.score, match.row["article_pk"]))

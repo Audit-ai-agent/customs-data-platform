@@ -1,9 +1,4 @@
-"""Immutable model identities used by every production index and query path.
-
-Model repository names are not release identities: their default branches can
-move without a Data Platform source change.  A knowledge generation therefore
-records and loads the exact upstream commit used for embedding and reranking.
-"""
+"""Pinned model identities used by local store indexing and retrieval."""
 
 from __future__ import annotations
 
@@ -33,8 +28,8 @@ RERANK_MODEL = ModelIdentity(
 )
 
 
-def release_model_inventory() -> dict[str, dict[str, str]]:
-    """Return a JSON-safe immutable inventory for release manifests."""
+def model_inventory() -> dict[str, dict[str, str]]:
+    """Return the JSON-safe model inventory recorded in local UAT manifests."""
 
     return {
         "dense": DENSE_MODEL.as_dict(),
@@ -46,5 +41,5 @@ __all__ = [
     "DENSE_MODEL",
     "RERANK_MODEL",
     "ModelIdentity",
-    "release_model_inventory",
+    "model_inventory",
 ]

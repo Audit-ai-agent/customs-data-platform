@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import shutil
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,7 @@ from scripts.migrate import (
     LEGACY_BASELINE_CHECKSUMS,
     MIGRATIONS_DIR,
     MigrationError,
+    RETIRED_MIGRATIONS,
     apply_migrations,
     discover_migrations,
 )
@@ -96,10 +98,11 @@ class FakeConnection:
 def test_repository_migrations_are_contiguous_and_checksum_attested() -> None:
     migrations = discover_migrations()
 
-    assert [item.number for item in migrations] == [1, 2, 3, 4]
+    assert [item.number for item in migrations] == [1, 2, 3]
     assert [item.filename for item in migrations[:3]] == list(LEGACY_BASELINE_CHECKSUMS)
     assert {
-        item.filename: item.checksum_sha256 for item in migrations[:3]
+        item.filename: hashlib.sha256(item.sql.replace("\r\n", "\n").encode("utf-8")).hexdigest()
+        for item in migrations[:3]
     } == LEGACY_BASELINE_CHECKSUMS
     assert all(item.byte_size > 0 for item in migrations)
 
@@ -174,33 +177,12 @@ def test_advisory_lock_contention_executes_no_migration() -> None:
     assert connection.locked is False
 
 
-def test_generation_migration_is_additive_and_enforces_state_machine() -> None:
-    migration = next(
-        item for item in discover_migrations() if item.filename == "004_knowledge_generations.sql"
-    )
+def test_retired_generation_migration_is_not_reapplied_or_required() -> None:
+    migrations = discover_migrations()
+    connection = FakeConnection()
+    connection.applied["004_knowledge_generations.sql"] = ("0" * 64, 1)
 
-    assert "ALTER TABLE law_articles" not in migration.sql
-    assert "ALTER TABLE laws" not in migration.sql
-    assert "CREATE TABLE knowledge_generations" in migration.sql
-    assert "knowledge_generation_active_pointer" in migration.sql
-    assert "knowledge_generation_store_attestations" in migration.sql
-    assert "requires completed migrations 001..003" in migration.sql
-    assert "knowledge_generation_datasets" in migration.sql
-    assert "knowledge_generation_dataset_members" in migration.sql
-    assert "projection_sha256" in migration.sql
-    assert "11327" in migration.sql
-    assert "22654" in migration.sql
-    assert "events are append-only" in migration.sql
-    assert "CCCT snapshot linked to a release generation is immutable" in migration.sql
-    assert "validated generation law MST/article snapshots do not match manifest" in migration.sql
-    assert "OLD.generation_id" in migration.sql
-    assert "NEW.generation_id" in migration.sql
-    assert "generation article snapshot does not match PostgreSQL ledger" in migration.sql
-    assert "content         text NOT NULL" in migration.sql
-    assert "pg_advisory" not in migration.sql
-    assert "building" in migration.sql
-    assert "aborted" in migration.sql
-    assert "validated" in migration.sql
-    assert "sealed" in migration.sql
-    assert "active" in migration.sql
-    assert "retired" in migration.sql
+    apply_migrations(connection, migrations, output=lambda _message: None)
+
+    assert "004_knowledge_generations.sql" in RETIRED_MIGRATIONS
+    assert connection.applied["004_knowledge_generations.sql"] == ("0" * 64, 1)

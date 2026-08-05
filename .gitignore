@@ -27,11 +27,18 @@ ci-evidence/
 !**/.env.example
 !**/.env.*.example
 
-# Regenerable/local datasets. Curated fixtures and CCCT progress are tracked.
+# Regenerable/local datasets. The checked-in HSK and CCCT reference snapshot
+# are the bounded inputs used by local functional UAT; raw law responses are
+# always recollected into the workspace _local boundary.
 *.npy
 **/data/raw/
 **/data/ccct_*
 !law_repository/data/ccct_progress.jsonl
+
+# Shared workspace state. These paths are intentionally outside the repository
+# in normal use, but ignoring them here protects an accidental nested checkout.
+_local/
+_artifacts/
 
 # Evaluation and runtime outputs
 evals/results/

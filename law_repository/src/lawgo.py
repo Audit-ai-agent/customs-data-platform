@@ -17,12 +17,9 @@ from __future__ import annotations
 
 import html
 import json
-import os
 import random
 import re
 import time
-from pathlib import Path
-from tempfile import NamedTemporaryFile
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -31,7 +28,6 @@ if TYPE_CHECKING:
 from src.config import settings
 
 BASE = "https://www.law.go.kr/DRF"
-RAW_DIR = Path(__file__).resolve().parents[1] / "data" / "raw"
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 CONNECT_TIMEOUT_SECONDS = 10
 READ_TIMEOUT_SECONDS = 60
@@ -174,58 +170,6 @@ def get(endpoint: str, **params) -> dict:
             if attempt + 1 >= MAX_ATTEMPTS:
                 raise LawApiError("LAW_API_TRANSPORT_FAILURE") from None
     raise LawApiError("LAW_API_TRANSPORT_FAILURE")
-
-
-def _write_cache(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path: Path | None = None
-    try:
-        with NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            newline="\n",
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            dir=path.parent,
-            delete=False,
-        ) as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-            temporary_path = Path(handle.name)
-        os.replace(temporary_path, path)
-    finally:
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
-
-
-def fetch_current_law(law_id: str, use_cache: bool = True) -> dict:
-    """'현행' 법령 본문. target=law + ID(법령ID).
-
-    ⚠️ 실측(2026-07-12): 공포됐지만 미시행인 개정이 있는 법령은 이 endpoint 가
-    **미래 시행 버전**을 반환한다(기본정보 시행일자가 미래). 그 경우 오늘 유효한
-    버전은 fetch_law_by_mst(resolve_effective_version(...)) 로 따로 가져와야 한다
-    — src.ingest.laws 의 backfill 참조.
-    """
-    RAW_DIR.mkdir(parents=True, exist_ok=True)
-    cache = RAW_DIR / f"law_current_{law_id}.json"
-    if use_cache and cache.exists():
-        return json.loads(cache.read_text(encoding="utf-8"))
-    body = get("lawService.do", target="law", ID=law_id)
-    _write_cache(cache, body)
-    return body
-
-
-def fetch_law_by_mst(mst: str, use_cache: bool = True) -> dict:
-    """특정 버전(MST=법령일련번호) 본문. 버전 고정이라 캐시 영구 유효."""
-    RAW_DIR.mkdir(parents=True, exist_ok=True)
-    cache = RAW_DIR / f"law_mst_{mst}.json"
-    if use_cache and cache.exists():
-        return json.loads(cache.read_text(encoding="utf-8"))
-    body = get("lawService.do", target="law", MST=mst)
-    _write_cache(cache, body)
-    return body
 
 
 def jo_code(no: str | int, branch: str | int = 0) -> int:

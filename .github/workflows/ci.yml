@@ -4,20 +4,22 @@ on:
   pull_request:
     paths:
       - ".github/workflows/ci.yml"
+      - ".gitleaks.toml"
+      - ".gitignore"
       - "pyproject.toml"
       - "uv.lock"
       - "contracts/**"
-      - "evals/**"
       - "law_repository/**"
       - "tools/**"
   push:
     branches: [main]
     paths:
       - ".github/workflows/ci.yml"
+      - ".gitleaks.toml"
+      - ".gitignore"
       - "pyproject.toml"
       - "uv.lock"
       - "contracts/**"
-      - "evals/**"
       - "law_repository/**"
       - "tools/**"
 
@@ -43,30 +45,27 @@ jobs:
           enable-cache: true
       - name: Verify lockfile is current
         run: uv lock --check
-      - name: Install runtime, RAG, and development dependencies
-        run: uv sync --locked --extra rag --group dev
-      - name: Check provider contract drift
-        run: uv run --locked --extra rag python tools/check_contract_drift.py
+      - name: Install locked development dependencies
+        run: uv sync --locked --group dev
+      - name: Check Evidence V3 contract drift
+        run: uv run --locked --no-sync --group dev python tools/check_contract_drift.py
       - name: Lint
-        run: uv run --locked --extra rag ruff check law_repository/src law_repository/tests evals tools
+        run: uv run --locked --no-sync --group dev ruff check law_repository/src law_repository/tests tools
       - name: Typecheck
-        run: uv run --locked --extra rag mypy
-      - name: Run representative offline regressions
+        run: uv run --locked --no-sync --group dev mypy
+      - name: Run local profile and contract regressions
+        run: uv run --locked --no-sync --group dev pytest -q
+      - name: Scan tracked source with redacted Gitleaks output
         shell: bash
         run: |
           set -euo pipefail
-          uv run --locked --extra rag pytest -q \
-            evals/tests \
-            law_repository/tests/test_provider_contract.py \
-            law_repository/tests/test_provider_identity.py \
-            law_repository/tests/test_evidence_http_contract.py \
-            law_repository/tests/test_evidence_v3.py \
-            law_repository/tests/test_requirement_policy_release.py \
-            law_repository/tests/test_runtime_v3_service.py \
-            law_repository/tests/test_runtime_v2_service.py \
-            law_repository/tests/test_runtime_service.py \
-            law_repository/tests/test_generate_provider_build.py \
-            law_repository/tests/test_local_preflight.py \
-            law_repository/tests/test_three_law_v3_scenario_eval.py \
-            law_repository/tests/test_model_identity.py \
-            law_repository/tests/test_local_compose_security.py
+          version=8.30.1
+          archive="gitleaks_${version}_linux_x64.tar.gz"
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            -o "$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${version}/$archive"
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $archive" | sha256sum --check --status -
+          tar -xzf "$archive" gitleaks
+          scan_root="$(mktemp -d)"
+          git archive --format=tar HEAD | tar -x -C "$scan_root"
+          ./gitleaks dir "$scan_root" --config .gitleaks.toml --redact --no-banner --exit-code 1

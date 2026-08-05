@@ -67,7 +67,7 @@ def qc():
     try:
         c = client()
         if not c.collection_exists(COLLECTION) or c.count(COLLECTION).count == 0:
-            pytest.skip("Qdrant 현행 인덱스 비어있음 (python -m src.ingest.laws 필요)")
+            pytest.skip("Qdrant 현행 인덱스 비어있음 (functional UAT build 필요)")
     except Exception as e:  # noqa: BLE001
         pytest.skip(f"Qdrant 접속 불가: {e}")
     return c
@@ -87,7 +87,7 @@ def sample_article():
     except Exception as e:  # noqa: BLE001
         pytest.skip(f"Postgres 접속 불가: {e}")
     if not row:
-        pytest.skip("현행 조문 없음 (python -m src.ingest.laws 필요)")
+        pytest.skip("현행 조문 없음 (functional UAT build 필요)")
     return {"law_id": row[0], "article_no": row[1], "paragraph_no": row[2]}
 
 
