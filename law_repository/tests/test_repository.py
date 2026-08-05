@@ -1,4 +1,4 @@
-"""Phase 5 조회 repository — temporal 불변식·arm 규격·HSK traverse 검증.
+"""Live Phase 5 repository checks; pure policy tests are in test_repository_unit.py.
 
 전제: docker compose 기동 + Phase 2(법령→PG/Qdrant)·Phase 4(HSK 요건) 적재.
 미기동/미적재 시 각 fixture 가 skip.
@@ -12,49 +12,6 @@ import pytest
 
 from src import repository as repo
 from src.db.qdrant import BM25_VECTOR, COLLECTION, DENSE_VECTOR
-
-
-# ------------------------------------------------- 단위(DB 불필요)
-
-
-def test_temporal_predicate_current_uses_today():
-    sql, params = repo._temporal_predicate(None)
-    assert params["as_of"] == date.today()
-    assert "valid_from <= %(as_of)s" in sql
-    assert "valid_to > %(as_of)s OR valid_to IS NULL" in sql
-
-
-def test_temporal_predicate_as_of_passthrough():
-    d = date(2024, 3, 1)
-    _, params = repo._temporal_predicate(d)
-    assert params["as_of"] == d
-
-
-def test_normalize_hsk_accepts_only_hs6_or_hsk10_without_padding():
-    assert repo.normalize_hsk("0101 21 0000") == "0101210000"  # 공백 제거
-    assert repo.normalize_hsk("854231") == "854231"  # HS6는 HS6로 유지
-    with pytest.raises(ValueError):
-        repo.normalize_hsk("8542")  # 우측 0 패딩 금지
-    with pytest.raises(ValueError):
-        repo.normalize_hsk("123456789012345")  # 자리 절단 금지
-    assert repo.normalize_hsk("0204100000")[0] == "0"  # 앞자리 0 보존
-
-
-def test_resolve_hsk_candidates_exact_unique_and_ambiguous():
-    leaves = ["7318151000", "7318159000", "0303540000"]
-    assert repo.resolve_hsk_candidates("0303540000", leaves).status == "exact"
-    unique = repo.resolve_hsk_candidates("030354", leaves)
-    assert unique.status == "unique_descendant"
-    assert unique.resolved_hsk10 == "0303540000"
-    ambiguous = repo.resolve_hsk_candidates("731815", leaves)
-    assert ambiguous.status == "ambiguous"
-    assert ambiguous.resolved_hsk10 is None
-    assert list(ambiguous.candidate_hsk10s) == ["7318151000", "7318159000"]
-
-
-def test_search_unknown_arm_raises():
-    with pytest.raises(ValueError):
-        repo.search("아무거나", arm="rerank")
 
 
 # ------------------------------------------------- fixtures

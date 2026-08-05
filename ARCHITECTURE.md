@@ -41,10 +41,17 @@ to an operational `status`; the mode response header is the local-profile
 binding. It carries no release, signature, trust, approval, quality-gate, or
 deployment-admission metadata.
 
-The functional UAT manifest contains only profile, date, law IDs, official
-source hashes/MSTs, source-collection time, model IDs/revisions, store counts,
-image digests, and a build timestamp. Raw source stays under the profile-local
-`_local` path; models are cached once at `_local/cache/huggingface`. The bounded CCCT
-reference input is tracked and loaded locally; no data.go.kr credential or
-bulk refresh path remains. Passwords, bearer tokens, Docker volumes, and
-output artifacts stay outside Git.
+The functional UAT artifact manifest contains only profile, date, law IDs,
+source hashes, model IDs/revisions, store counts, and a build timestamp. Raw
+source paths/MSTs and collection time remain in the ignored active local state,
+where startup can validate the collected bytes without exposing them in the
+artifact. Compose pins local store images; runtime does not inspect Docker
+image metadata. Models are cached once at `_local/cache/huggingface`. The
+bounded CCCT reference input is tracked and loaded locally; no data.go.kr
+credential or bulk refresh path remains. Passwords, bearer tokens, Docker
+volumes, and output artifacts stay outside Git.
+
+`/health/ready` checks only profile state, store connectivity, and bounded
+counts. The full PostgreSQL/Qdrant/Neo4j ID and law-hash comparison is the
+explicit `functional_uat_3law.py verify-store` maintenance command, not a UAT
+or request-time gate.

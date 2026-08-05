@@ -27,6 +27,7 @@ from src.functional_uat import (  # noqa: E402
     discard_active_functional_uat_manifest,
     prefetch_models,
     validate_functional_uat_state,
+    verify_functional_uat_store,
 )
 from src.local_profiles import (  # noqa: E402
     FUNCTIONAL_UAT_PROFILE,
@@ -84,6 +85,10 @@ def build_parser() -> argparse.ArgumentParser:
     serve = subparsers.add_parser("serve", help="run functional Evidence V3 on loopback")
     serve.add_argument("--host", choices=LITERAL_LOOPBACK_HOSTS, default="127.0.0.1")
     serve.add_argument("--port", type=_port, default=18083)
+    subparsers.add_parser(
+        "verify-store",
+        help="compare the complete PostgreSQL/Qdrant/Neo4j three-law store explicitly",
+    )
     return parser
 
 
@@ -137,6 +142,7 @@ def _serve(host: str, port: int) -> int:
         mode=FUNCTIONAL_UAT_MODE,
         service_token=read_service_token(FUNCTIONAL_UAT_PROFILE),
         backend=backend,
+        runtime_state_validator=validate_functional_uat_state,
     )
     print(
         "Data functional UAT ready "
@@ -155,6 +161,14 @@ def _serve(host: str, port: int) -> int:
         date_header=False,
         workers=1,
     )
+    return 0
+
+
+def _verify_store() -> int:
+    """Run deep integrity checks only when a Data maintainer asks for them."""
+
+    verify_functional_uat_store()
+    print("functional UAT three-store integrity verified")
     return 0
 
 
@@ -183,6 +197,8 @@ def main(argv: list[str] | None = None) -> int:
             return _reset()
         if args.command == "serve":
             return _serve(args.host, args.port)
+        if args.command == "verify-store":
+            return _verify_store()
     except FunctionalUatError as exc:
         print(f"BLOCKED: {exc}", file=sys.stderr)
         return 2

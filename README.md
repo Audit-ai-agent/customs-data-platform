@@ -46,6 +46,9 @@ uv run --locked --no-sync --group dev python tools/dev_store.py compose up
 uv sync --locked --group dev --extra store --extra ingestion --python 3.11
 uv run --locked --no-sync --group dev --extra store --extra ingestion python tools/dev_store.py exec -- `
   python -m src.ingest.hsk
+# Optional Data-maintainer check after a complete law/HSK/CCCT store build.
+# This is the only command that compares every current law/index/graph identifier.
+uv run --locked --no-sync --group dev --extra store python tools/dev_store.py verify
 ```
 
 ## Real functional UAT: three customs laws
@@ -62,6 +65,9 @@ uv run --locked --no-sync --group dev --extra store --extra rag --extra ingestio
 # Add only your personal LAW_API_OC to the ignored _local profile config.
 uv run --locked --no-sync --group dev --extra store --extra rag --extra ingestion python tools/functional_uat_3law.py compose up
 uv run --locked --no-sync --group dev --extra store --extra rag --extra ingestion python tools/functional_uat_3law.py build --as-of 2026-08-05
+# Optional after build, Data/schema/retrieval changes, or an unexpected result.
+# It is intentionally not part of each functional UAT run.
+uv run --locked --no-sync --group dev --extra store --extra rag --extra ingestion python tools/functional_uat_3law.py verify-store
 uv run --locked --no-sync --group dev --extra store --extra rag --extra ingestion python tools/functional_uat_3law.py serve `
   --host 127.0.0.1 --port 18083
 ```
@@ -81,10 +87,12 @@ project, legacy state, raw local law sources, or `_artifacts` results.
 The build downloads the pinned BGE models into `_local/cache/huggingface`,
 writes official raw law source only below
 `_local/profiles/functional-uat-3law/data/laws/`, and writes a redacted manifest
-with collection time, hashes, revisions, and counts to
-`_artifacts/functional-uat/<run-id>/manifest.json`. The server checks source
-hashes, model revisions/cache, Docker image digests, and store counts before it
-starts. `LAW_API_OC` is loaded only while `build` collects the three laws; the
+containing only profile, date, law IDs, source hashes, model revisions, store
+counts, and build time to `_artifacts/functional-uat/<run-id>/manifest.json`.
+The server checks local source hashes, model revisions/cache, and lightweight
+three-store counts before it starts. Run `verify-store` only when a Data build
+or retrieval change needs the full PostgreSQL/Qdrant/Neo4j ID and hash comparison.
+`LAW_API_OC` is loaded only while `build` collects the three laws; the
 long-running `serve` process removes it from its environment and settings.
 Its Agent-facing mode is `functional-uat`. The bounded CCCT reference
 input is already versioned in this repository, so no data.go.kr key, bulk
@@ -99,6 +107,8 @@ collection, or external refresh is part of team development or UAT.
   and UAT results remain outside Git.
 - `dev-fixture` is the team default. `dev-store` is Data-only development.
   `functional-uat-3law` is the explicit real-data functional check.
+- A pre-cleanup local volume is not adopted by the current migration runner.
+  Reset/rebuild that profile instead of trying to reuse it.
 
 ## Local checks
 

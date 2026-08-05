@@ -33,6 +33,10 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("init", help="create ignored config with random local DB passwords")
     compose = subparsers.add_parser("compose", help="operate dev-store Docker services")
     compose.add_argument("action", choices=("up", "down", "status"))
+    subparsers.add_parser(
+        "verify",
+        help="run the explicit full Data-store integrity check after ingestion work",
+    )
     execute = subparsers.add_parser("exec", help="run one Data command with profile environment")
     execute.add_argument("command_line", nargs=argparse.REMAINDER)
     return parser
@@ -82,6 +86,29 @@ def _exec(command_line: list[str]) -> int:
         return 2
 
 
+def _verify() -> int:
+    """Run the costly all-ID check only for an initialized Data store."""
+
+    try:
+        apply_data_store_environment(DEV_STORE_PROFILE)
+        from src.store_consistency import verify_complete_store_consistency
+
+        # A Data contributor may intentionally be working with a partial
+        # local corpus.  Verify every loaded store projection without requiring
+        # the checkout's full tracked HSK/CCCT source inputs.
+        verify_complete_store_consistency(verify_source_inputs=False)
+    except LocalProfileError:
+        print("BLOCKED: initialize dev-store first", file=sys.stderr)
+        return 2
+    except Exception:
+        # Database drivers can include credentials/paths in exceptions.  Keep
+        # this local CLI's output classified just like the UAT launcher.
+        print("BLOCKED: dev-store integrity verification failed", file=sys.stderr)
+        return 2
+    print("dev-store full integrity verified")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "init":
@@ -89,6 +116,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "compose":
         return _compose(args.action)
+    if args.command == "verify":
+        return _verify()
     return _exec(args.command_line)
 
 

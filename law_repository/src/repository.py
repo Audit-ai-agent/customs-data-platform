@@ -130,6 +130,9 @@ def search(
     D 시점 버전으로 재확정해 그 시점 본문을 반환한다(설계 §6). D 에 존재하지
     않던 조문은 탈락.
     """
+    if arm not in ARMS:
+        raise ValueError(f"알 수 없는 arm: {arm!r} (dense|bm25)")
+
     from src.db.qdrant import client as qdrant_client
 
     qc = qdrant_client()

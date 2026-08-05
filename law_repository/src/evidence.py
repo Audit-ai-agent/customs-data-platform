@@ -20,9 +20,6 @@ from pydantic import AnyUrl, BaseModel, ConfigDict, Field, model_validator
 from src import repository
 
 SCHEMA_VERSION = "1.0"
-_QDRANT_SCROLL_PAGE_SIZE = 256
-_QDRANT_READINESS_MAX_POINTS = 1_000_000
-_QDRANT_COLLECTION = "customs_law_current"
 
 
 def connect():
@@ -47,14 +44,6 @@ def dict_row(*args: object, **kwargs: object):
     from psycopg.rows import dict_row as row_factory
 
     return row_factory(*args, **kwargs)
-
-
-def qdrant_client():
-    """Open the optional local Qdrant client only when a store path runs."""
-
-    from src.db.qdrant import client as open_client
-
-    return open_client()
 
 
 NonEmpty128 = Annotated[str, Field(min_length=1, max_length=128)]
@@ -229,10 +218,6 @@ class KnowledgeSnapshotMismatch(RuntimeError):
 class DatabaseEvidenceBackend:
     """Optional local-store backend backed by PostgreSQL and the HSK graph."""
 
-    def __init__(self) -> None:
-        self._law_index_verified = False
-        self._law_index_state: dict[str, int] | None = None
-
     def current_snapshot_id(self) -> str | None:
         with connect() as conn, conn.cursor() as cur:
             cur.execute(
@@ -331,209 +316,15 @@ class DatabaseEvidenceBackend:
             )
             return RequirementLookup(True, tuple(dict(row) for row in cur.fetchall()))
 
-    def _verify_target_law_coverage(self) -> dict[str, int]:
-        """Require a complete and byte-attested current target-law corpus."""
-        from src.functional_uat_spec import FUNCTIONAL_UAT_TARGET_LAWS
-
-        expected_ids = {law["law_id"] for law in FUNCTIONAL_UAT_TARGET_LAWS}
-        with connect() as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT l.law_id, a.id, a.content, a.content_hash, a.version_mst,
-                       EXISTS (
-                         SELECT 1
-                         FROM law_versions v
-                         WHERE v.law_id=a.law_id AND v.mst=a.version_mst
-                       ) AS has_law_version
-                FROM laws l
-                LEFT JOIN law_articles a
-                  ON a.law_id=l.law_id AND a.is_current
-                WHERE l.law_id = ANY(%s)
-                ORDER BY l.law_id, a.id
-                """,
-                (sorted(expected_ids),),
-            )
-            rows = tuple(cur.fetchall())
-        loaded_ids = {row[0] for row in rows}
-        article_backed_ids = {row[0] for row in rows if row[1] is not None}
-        invalid_current_articles = 0
-        for _law_id, article_id, content, content_hash, version_mst, has_version in rows:
-            if article_id is None:
-                continue
-            actual_hash = (
-                hashlib.sha256(content.encode("utf-8")).hexdigest()
-                if isinstance(content, str) and content.strip()
-                else None
-            )
-            if (
-                actual_hash is None
-                or content_hash != actual_hash
-                or not isinstance(version_mst, str)
-                or not version_mst.strip()
-                or not has_version
-            ):
-                invalid_current_articles += 1
-        missing = expected_ids - loaded_ids
-        without_articles = loaded_ids - article_backed_ids
-        if missing or without_articles or invalid_current_articles:
-            raise RuntimeError(
-                "law corpus incomplete: "
-                f"expected={len(expected_ids)}, loaded={len(loaded_ids)}, "
-                f"article_backed={len(article_backed_ids)}, "
-                f"missing={len(missing)}, without_current_articles={len(without_articles)}, "
-                f"invalid_current_articles={invalid_current_articles}"
-            )
-        return {
-            "expected": len(expected_ids),
-            "loaded": len(loaded_ids),
-            "article_backed": len(article_backed_ids),
-        }
-
-    @staticmethod
-    def _scroll_qdrant_point_ids(qdrant, collection: str, exact_count: int) -> list[str]:
-        """Read the complete point-id set with finite pagination guards."""
-        if exact_count < 0 or exact_count > _QDRANT_READINESS_MAX_POINTS:
-            raise RuntimeError(
-                "law index unreadable: "
-                f"qdrant_count={exact_count}, "
-                f"readiness_limit={_QDRANT_READINESS_MAX_POINTS}"
-            )
-        point_ids: list[str] = []
-        offset = None
-        seen_offsets: set[str] = set()
-        max_pages = exact_count + 1
-        for _ in range(max_pages):
-            records, next_offset = qdrant.scroll(
-                collection_name=collection,
-                limit=_QDRANT_SCROLL_PAGE_SIZE,
-                offset=offset,
-                with_payload=False,
-                with_vectors=False,
-            )
-            if len(records) > _QDRANT_SCROLL_PAGE_SIZE:
-                raise RuntimeError("law index unreadable: oversized qdrant scroll page")
-            point_ids.extend(str(record.id) for record in records)
-            if len(point_ids) > exact_count:
-                raise RuntimeError("law index incomplete: qdrant scroll exceeded exact count")
-            if next_offset is None:
-                return point_ids
-            offset_marker = str(next_offset)
-            if offset_marker in seen_offsets:
-                raise RuntimeError("law index unreadable: qdrant pagination loop")
-            seen_offsets.add(offset_marker)
-            offset = next_offset
-        raise RuntimeError("law index unreadable: qdrant pagination exceeded exact count")
-
-    def _verify_law_index(self) -> dict[str, int]:
-        """Require complete Qdrant retrieval and Neo4j article projections."""
-        if self._law_index_verified:
-            return dict(self._law_index_state or {})
-        with connect() as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT
-                  count(*) FILTER (
-                    WHERE a.is_current AND NOT EXISTS (
-                      SELECT 1 FROM law_articles c WHERE c.parent_article_pk=a.id
-                    )
-                  ),
-                  count(*) FILTER (
-                    WHERE a.is_current
-                      AND a.qdrant_point_id IS NOT NULL
-                      AND NOT EXISTS (
-                        SELECT 1 FROM law_articles c WHERE c.parent_article_pk=a.id
-                      )
-                  ),
-                  count(*) FILTER (
-                    WHERE a.is_current AND a.paragraph_no IS NULL
-                  )
-                FROM law_articles a
-                """
-            )
-            expected, indexed, graph_articles = cur.fetchone()
-            cur.execute(
-                """
-                SELECT a.qdrant_point_id::text
-                FROM law_articles a
-                WHERE a.is_current
-                  AND a.qdrant_point_id IS NOT NULL
-                  AND NOT EXISTS (
-                    SELECT 1 FROM law_articles c WHERE c.parent_article_pk=a.id
-                  )
-                """
-            )
-            postgres_qdrant_point_ids = [str(row[0]) for row in cur.fetchall()]
-            cur.execute(
-                """
-                SELECT id
-                FROM law_articles
-                WHERE is_current AND paragraph_no IS NULL
-                """
-            )
-            postgres_graph_ids = {int(row[0]) for row in cur.fetchall()}
-        qdrant = qdrant_client()
-        qdrant_count = int(qdrant.count(_QDRANT_COLLECTION, exact=True).count)
-        qdrant_point_ids = self._scroll_qdrant_point_ids(qdrant, _QDRANT_COLLECTION, qdrant_count)
-        postgres_qdrant_ids = set(postgres_qdrant_point_ids)
-        actual_qdrant_ids = set(qdrant_point_ids)
-        postgres_duplicate_ids = len(postgres_qdrant_point_ids) - len(postgres_qdrant_ids)
-        qdrant_duplicate_ids = len(qdrant_point_ids) - len(actual_qdrant_ids)
-        qdrant_missing_ids = postgres_qdrant_ids - actual_qdrant_ids
-        qdrant_orphaned_ids = actual_qdrant_ids - postgres_qdrant_ids
-        drv = make_driver()
-        try:
-            with drv.session() as session:
-                graph_rows = list(
-                    session.run("MATCH (a:Article) RETURN a.article_pk AS article_pk")
-                )
-        finally:
-            drv.close()
-        neo4j_ids = {int(row["article_pk"]) for row in graph_rows if row["article_pk"] is not None}
-        neo4j_count = len(graph_rows)
-        missing_ids = postgres_graph_ids - neo4j_ids
-        orphaned_count = len(neo4j_ids - postgres_graph_ids) + (neo4j_count - len(neo4j_ids))
-        if (
-            expected != indexed
-            or expected != qdrant_count
-            or qdrant_count != len(qdrant_point_ids)
-            or postgres_duplicate_ids
-            or qdrant_duplicate_ids
-            or qdrant_missing_ids
-            or qdrant_orphaned_ids
-        ):
-            raise RuntimeError(
-                "law index incomplete: "
-                f"expected={expected}, postgres_indexed={indexed}, "
-                f"qdrant={qdrant_count}, qdrant_scrolled={len(qdrant_point_ids)}, "
-                f"missing={len(qdrant_missing_ids)}, "
-                f"orphaned={len(qdrant_orphaned_ids)}, "
-                f"postgres_duplicates={postgres_duplicate_ids}, "
-                f"qdrant_duplicates={qdrant_duplicate_ids}"
-            )
-        if (
-            graph_articles != len(postgres_graph_ids)
-            or graph_articles != neo4j_count
-            or missing_ids
-            or orphaned_count
-        ):
-            raise RuntimeError(
-                "law graph incomplete: "
-                f"postgres_graph_articles={graph_articles}, neo4j={neo4j_count}, "
-                f"missing={len(missing_ids)}, orphaned={orphaned_count}"
-            )
-        self._law_index_state = {
-            "expected": int(expected),
-            "postgres_indexed": int(indexed),
-            "qdrant": int(qdrant_count),
-            "postgres_graph_articles": int(graph_articles),
-            "neo4j": int(neo4j_count),
-            "neo4j_missing": 0,
-            "neo4j_orphaned": 0,
-        }
-        self._law_index_verified = True
-        return dict(self._law_index_state)
-
     def readiness(self) -> dict:
+        """Check only live store connectivity and minimal snapshot state.
+
+        This is intentionally safe to call from ``/health/ready``.  Full
+        PostgreSQL/Qdrant/Neo4j article-ID and content comparison is exposed
+        separately through the explicit ``dev_store.py verify`` or
+        ``functional_uat_3law.py verify-store`` maintenance command.
+        """
+
         snapshot_id = self.current_snapshot_id()
         if not snapshot_id:
             raise RuntimeError("current CCCT snapshot is missing")
@@ -541,16 +332,12 @@ class DatabaseEvidenceBackend:
             "status": "ready",
             "knowledge_snapshot_id": snapshot_id,
             "supported_review_as_of": self.snapshot_effective_date(snapshot_id),
-            "law_corpus": self._verify_target_law_coverage(),
-            "law_index": self._verify_law_index(),
         }
 
     def search_law_articles(
         self, query: str, top_k: int, as_of: date
     ) -> tuple[LawArticleMatch, ...]:
         """Dense+BM25 RRF, lexical rerank, then one-hop graph expansion."""
-        self._verify_target_law_coverage()
-        self._verify_law_index()
         recall = min(max(top_k * 2, 8), 40)
         dense_hits = repository.search(query, arm="dense", limit=recall, as_of=as_of)
         bm25_hits = repository.search(query, arm="bm25", limit=recall, as_of=as_of)

@@ -17,8 +17,6 @@ build/
 coverage.xml
 htmlcov/
 *.junit.xml
-ci-evidence/
-.task*-test-evidence/
 
 # Secrets. Example templates are intentionally tracked.
 .env
@@ -39,12 +37,6 @@ ci-evidence/
 # in normal use, but ignoring them here protects an accidental nested checkout.
 _local/
 _artifacts/
-
-# Evaluation and runtime outputs
-evals/results/
-artifacts/
-logs/
-outputs/
 
 # OS and editors
 .DS_Store

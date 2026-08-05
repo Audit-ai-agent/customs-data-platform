@@ -12,7 +12,6 @@ import os
 import re
 import secrets
 import shutil
-import subprocess
 import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
@@ -38,14 +37,7 @@ from src.local_profiles import (
     validate_functional_uat_law_api_credential,
 )
 
-FUNCTIONAL_UAT_MANIFEST_VERSION = "functional-uat/v1"
-FUNCTIONAL_UAT_IMAGE_REFERENCES = {
-    "postgres": "pgvector/pgvector@sha256:a36250871de0833b8757561c72f2477ef1ddd1101afa4e617fb552e0de514c6b",
-    "qdrant": "qdrant/qdrant@sha256:6ac4807063bbecddca0250bfbcff52acf18c22263b904d12919349e6d0a408f1",
-    "neo4j": "neo4j@sha256:362542416de6c09a971484d1893878016cc3b5cdec166e54b1c824a220ecd6b9",
-}
-_OFFICIAL_CURRENT_URI = "https://www.law.go.kr/DRF/lawService.do?target=law&ID={law_id}"
-_OFFICIAL_MST_URI = "https://www.law.go.kr/DRF/lawService.do?target=law&MST={mst}"
+FUNCTIONAL_UAT_LOCAL_STATE_VERSION = "functional-uat-local/v1"
 
 
 class FunctionalUatError(RuntimeError):
@@ -70,6 +62,19 @@ class FunctionalUatEvidenceBackend(DatabaseEvidenceBackend):
     def snapshot_effective_date(self, _snapshot_id: str) -> date:
         return self._review_as_of
 
+    def readiness(self) -> dict[str, object]:
+        """Perform only the bounded runtime checks needed by the UAT service.
+
+        ``create_profile_evidence_application`` runs the functional profile's
+        state validator immediately before this method.  That validator checks
+        the active manifest, raw source hashes, cached model revisions, and
+        one bounded three-store count.  Keep this backend call to the current
+        CCCT snapshot only so the health path does not count all three stores
+        twice.  Full identifier/content comparison remains ``verify-store``.
+        """
+
+        return super().readiness()
+
 
 LawApiGet = Callable[..., dict[str, Any]]
 
@@ -85,7 +90,6 @@ def _official_law_api_get(*args: object, **kwargs: object) -> dict[str, Any]:
 @dataclass(frozen=True, slots=True)
 class FunctionalLawSource:
     law_id: str
-    law_name: str
     current_mst: str
     effective_mst: str
     current_file: str
@@ -94,16 +98,15 @@ class FunctionalLawSource:
     effective_sha256: str
     article_count: int
 
-    def public_manifest(self) -> dict[str, object]:
+    def local_state(self) -> dict[str, object]:
+        """Return source details kept only in the ignored active local state."""
+
         return {
             "law_id": self.law_id,
-            "law_name": self.law_name,
             "current_mst": self.current_mst,
             "effective_mst": self.effective_mst,
             "current_sha256": self.current_sha256,
             "effective_sha256": self.effective_sha256,
-            "current_source_uri": _OFFICIAL_CURRENT_URI.format(law_id=self.law_id),
-            "effective_source_uri": _OFFICIAL_MST_URI.format(mst=self.effective_mst),
             "article_count": self.article_count,
         }
 
@@ -247,7 +250,6 @@ def _collect_one(
     effective_sha = _write_json(output / effective_file, effective_body)
     return FunctionalLawSource(
         law_id=law_id,
-        law_name=law_name,
         current_mst=current_mst,
         effective_mst=effective_mst,
         current_file=current_file,
@@ -288,12 +290,12 @@ def collect_three_law_sources(
         )
         collected_at = datetime.now(timezone.utc).isoformat()
         source_manifest = {
-            "schema_version": FUNCTIONAL_UAT_MANIFEST_VERSION,
+            "local_state_version": FUNCTIONAL_UAT_LOCAL_STATE_VERSION,
             "profile": FUNCTIONAL_UAT_PROFILE,
             "as_of": as_of.isoformat(),
             "collected_at": collected_at,
             "law_ids": [item.law_id for item in sources],
-            "sources": [item.public_manifest() for item in sources],
+            "sources": [item.local_state() for item in sources],
         }
         _write_json(destination / "source-manifest.json", source_manifest)
         return destination, sources, collected_at
@@ -487,33 +489,6 @@ def _verify_cached_models(
     return {name: asdict(identity) for name, identity in inventory.items()}
 
 
-def docker_image_digests() -> dict[str, str]:
-    """Read compose image digests without displaying image metadata or secrets."""
-
-    observed: dict[str, str] = {}
-    for service, reference in FUNCTIONAL_UAT_IMAGE_REFERENCES.items():
-        completed = subprocess.run(
-            ["docker", "image", "inspect", reference, "--format", "{{json .RepoDigests}}"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-        )
-        if completed.returncode != 0:
-            raise FunctionalUatError("FUNCTIONAL_UAT_IMAGE_UNAVAILABLE")
-        try:
-            digests = json.loads(completed.stdout.strip())
-        except json.JSONDecodeError as exc:
-            raise FunctionalUatError("FUNCTIONAL_UAT_IMAGE_DIGEST_UNAVAILABLE") from exc
-        expected_digest = reference.split("@", 1)[1]
-        if not isinstance(digests, list) or not any(
-            str(item).endswith(expected_digest) for item in digests
-        ):
-            raise FunctionalUatError("FUNCTIONAL_UAT_IMAGE_DIGEST_MISMATCH")
-        observed[service] = expected_digest
-    return observed
-
-
 def _new_artifact_manifest_path(*, root: Path | None = None) -> Path:
     target_root = _safe_directory(artifact_root(root) / "functional-uat")
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + secrets.token_hex(3)
@@ -564,6 +539,33 @@ def discard_active_functional_uat_manifest(
     except OSError as exc:
         raise FunctionalUatError("FUNCTIONAL_UAT_MANIFEST_RESET_FAILED") from exc
     return True
+
+
+def _public_uat_manifest(
+    *,
+    as_of: date,
+    source_hashes: Mapping[str, str],
+    models: Mapping[str, Mapping[str, str]],
+    store_counts: Mapping[str, int],
+    data_build_timestamp: str,
+) -> dict[str, object]:
+    """Build the small, shareable functional-UAT run manifest.
+
+    It intentionally excludes local source locations, collection timestamps,
+    image inspection output, credentials, and raw official-law content.  The
+    corresponding private source inventory is retained in the active profile
+    marker so serving can still validate the exact collected bytes.
+    """
+
+    return {
+        "profile": FUNCTIONAL_UAT_PROFILE,
+        "as_of": as_of.isoformat(),
+        "law_ids": [law_id for law_id, _name in FUNCTIONAL_UAT_LAWS],
+        "source_hashes": dict(source_hashes),
+        "model_ids/revisions": {name: dict(identity) for name, identity in models.items()},
+        "store_counts": dict(store_counts),
+        "data_build_timestamp": data_build_timestamp,
+    }
 
 
 def build_functional_uat(
@@ -617,31 +619,31 @@ def build_functional_uat(
         raise FunctionalUatError("LAW_API_CREDENTIAL_UNAVAILABLE") from exc
     _load_sources_into_stores(sources, source_root)
     counts = _store_counts()
-    images = docker_image_digests()
     source_hashes = {source.law_id: source.effective_sha256 for source in sources}
-    manifest: dict[str, object] = {
-        "schema_version": FUNCTIONAL_UAT_MANIFEST_VERSION,
-        "profile": FUNCTIONAL_UAT_PROFILE,
-        "as_of": as_of.isoformat(),
-        "law_ids": [law_id for law_id, _name in FUNCTIONAL_UAT_LAWS],
+    data_build_timestamp = datetime.now(timezone.utc).isoformat()
+    manifest = _public_uat_manifest(
+        as_of=as_of,
+        source_hashes=source_hashes,
+        models=models,
+        store_counts=counts,
+        data_build_timestamp=data_build_timestamp,
+    )
+    active_state: dict[str, object] = {
+        **manifest,
+        "local_state_version": FUNCTIONAL_UAT_LOCAL_STATE_VERSION,
         "source_collected_at": source_collected_at,
-        "source_hashes": source_hashes,
         "source_assets": [
             {
-                **source.public_manifest(),
+                **source.local_state(),
                 "current_file": str((source_root / source.current_file).relative_to(profile)),
                 "effective_file": str((source_root / source.effective_file).relative_to(profile)),
             }
             for source in sources
         ],
-        "model_ids/revisions": models,
-        "store_counts": counts,
-        "image_digests": images,
-        "data_build_timestamp": datetime.now(timezone.utc).isoformat(),
     }
     artifact = _new_artifact_manifest_path(root=artifact_root_override)
     _atomic_bytes(artifact, canonical_json_bytes(manifest))
-    _write_active_manifest(profile, manifest)
+    _write_active_manifest(profile, active_state)
     return artifact
 
 
@@ -657,7 +659,7 @@ def _load_active_manifest(profile_directory: Path) -> tuple[dict[str, object], s
     if not isinstance(manifest, dict):
         raise FunctionalUatError("FUNCTIONAL_UAT_MANIFEST_INVALID")
     required = {
-        "schema_version",
+        "local_state_version",
         "profile",
         "as_of",
         "law_ids",
@@ -666,13 +668,12 @@ def _load_active_manifest(profile_directory: Path) -> tuple[dict[str, object], s
         "source_assets",
         "model_ids/revisions",
         "store_counts",
-        "image_digests",
         "data_build_timestamp",
     }
     if set(manifest) != required:
         raise FunctionalUatError("FUNCTIONAL_UAT_MANIFEST_INVALID")
     if (
-        manifest["schema_version"] != FUNCTIONAL_UAT_MANIFEST_VERSION
+        manifest["local_state_version"] != FUNCTIONAL_UAT_LOCAL_STATE_VERSION
         or manifest["profile"] != FUNCTIONAL_UAT_PROFILE
         or manifest["as_of"] != FUNCTIONAL_UAT_AS_OF.isoformat()
         or manifest["law_ids"] != [law_id for law_id, _name in FUNCTIONAL_UAT_LAWS]
@@ -728,7 +729,7 @@ def validate_functional_uat_state(
     *,
     local_root_override: Path | None = None,
 ) -> tuple[dict[str, object], str]:
-    """Fail closed before serving if local sources/models/images/stores drift."""
+    """Fail closed before serving if local sources, models, or stores drift."""
 
     try:
         profile = ensure_functional_uat_profile(root=local_root_override)
@@ -776,19 +777,132 @@ def validate_functional_uat_state(
     )
     if manifest["model_ids/revisions"] != observed_models:
         raise FunctionalUatError("FUNCTIONAL_UAT_MODEL_CACHE_MISMATCH")
-    if manifest["image_digests"] != docker_image_digests():
-        raise FunctionalUatError("FUNCTIONAL_UAT_IMAGE_DIGEST_MISMATCH")
     if manifest["store_counts"] != _store_counts():
         raise FunctionalUatError("FUNCTIONAL_UAT_STORE_COUNT_MISMATCH")
     return manifest, digest
+
+
+def _functional_source_projection(
+    source_assets: object,
+    *,
+    profile: Path,
+) -> tuple[
+    dict[str, int],
+    dict[tuple[str, int, int | None, int | None], str],
+]:
+    """Derive current PG identities/content hashes from validated raw sources."""
+
+    expected_counts: dict[str, int] = {}
+    expected_hashes: dict[tuple[str, int, int | None, int | None], str] = {}
+    if not isinstance(source_assets, list):
+        raise FunctionalUatError("FUNCTIONAL_UAT_MANIFEST_INVALID")
+    from src.ingest.laws import build_meta, parse_articles
+
+    for asset in source_assets:
+        if not isinstance(asset, dict):
+            raise FunctionalUatError("FUNCTIONAL_UAT_MANIFEST_INVALID")
+        law_id = asset.get("law_id")
+        article_count = asset.get("article_count")
+        effective_mst = asset.get("effective_mst")
+        effective_file = asset.get("effective_file")
+        if (
+            not isinstance(law_id, str)
+            or law_id in expected_counts
+            or type(article_count) is not int
+            or article_count < 1
+            or not isinstance(effective_mst, str)
+            or not effective_mst
+            or not isinstance(effective_file, str)
+        ):
+            raise FunctionalUatError("FUNCTIONAL_UAT_MANIFEST_INVALID")
+        expected_counts[law_id] = article_count
+        try:
+            source_body = json.loads(
+                _profile_local_file(profile, effective_file).read_text("utf-8")
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise FunctionalUatError("FUNCTIONAL_UAT_SOURCE_INVALID") from exc
+        if not isinstance(source_body, dict):
+            raise FunctionalUatError("FUNCTIONAL_UAT_SOURCE_INVALID")
+        try:
+            metadata = build_meta(source_body, effective_mst)
+            rows = parse_articles(source_body, metadata)
+        except Exception as exc:
+            raise FunctionalUatError("FUNCTIONAL_UAT_SOURCE_INVALID") from exc
+        if metadata.get("law_id") != law_id:
+            raise FunctionalUatError("FUNCTIONAL_UAT_SOURCE_ID_MISMATCH")
+        source_row_count = 0
+        for row in rows:
+            children = row.get("children")
+            if not isinstance(children, list):
+                raise FunctionalUatError("FUNCTIONAL_UAT_SOURCE_INVALID")
+            for source_row in (row, *children):
+                if not isinstance(source_row, dict):
+                    raise FunctionalUatError("FUNCTIONAL_UAT_SOURCE_INVALID")
+                article_no = source_row.get("article_no")
+                paragraph_no = source_row.get("paragraph_no")
+                content = source_row.get("content")
+                if (
+                    type(article_no) is not int
+                    or paragraph_no is not None
+                    and type(paragraph_no) is not int
+                    or not isinstance(content, str)
+                    or not content.strip()
+                ):
+                    raise FunctionalUatError("FUNCTIONAL_UAT_SOURCE_INVALID")
+                identity = (law_id, article_no, paragraph_no, None)
+                if identity in expected_hashes:
+                    raise FunctionalUatError("FUNCTIONAL_UAT_SOURCE_INVALID")
+                expected_hashes[identity] = sha256_bytes(content.encode("utf-8"))
+                source_row_count += 1
+        if source_row_count != article_count:
+            raise FunctionalUatError("FUNCTIONAL_UAT_SOURCE_ARTICLE_MISMATCH")
+    if set(expected_counts) != set(FUNCTIONAL_UAT_LAW_IDS):
+        raise FunctionalUatError("FUNCTIONAL_UAT_MANIFEST_INVALID")
+    return expected_counts, expected_hashes
+
+
+def verify_functional_uat_store(
+    *,
+    local_root_override: Path | None = None,
+) -> dict[str, int]:
+    """Run the opt-in, full three-store integrity verification.
+
+    This deliberately validates the active local manifest first, then compares
+    all PostgreSQL, Qdrant, and Neo4j identifiers/content through the generic
+    Data verifier.  The active source inventory binds the bounded three-law
+    input to PostgreSQL's current article counts and content hashes.  It is a
+    maintenance check, not an HTTP readiness gate.
+    """
+
+    manifest, _digest = validate_functional_uat_state(local_root_override=local_root_override)
+    try:
+        profile = ensure_functional_uat_profile(root=local_root_override)
+    except LocalProfileError as exc:
+        raise FunctionalUatError("FUNCTIONAL_UAT_PROFILE_UNAVAILABLE") from exc
+    expected_counts, expected_hashes = _functional_source_projection(
+        manifest["source_assets"],
+        profile=profile,
+    )
+    try:
+        from src.store_consistency import verify_complete_store_consistency
+
+        return verify_complete_store_consistency(
+            expected_law_ids=FUNCTIONAL_UAT_LAW_IDS,
+            expected_current_article_counts=expected_counts,
+            expected_current_article_hashes=expected_hashes,
+        )
+    except FunctionalUatError:
+        raise
+    except Exception as exc:
+        raise FunctionalUatError("FUNCTIONAL_UAT_STORE_INTEGRITY_FAILED") from exc
 
 
 __all__ = [
     "FUNCTIONAL_UAT_AS_OF",
     "FUNCTIONAL_UAT_LAW_IDS",
     "FUNCTIONAL_UAT_LAWS",
-    "FUNCTIONAL_UAT_IMAGE_REFERENCES",
-    "FUNCTIONAL_UAT_MANIFEST_VERSION",
+    "FUNCTIONAL_UAT_LOCAL_STATE_VERSION",
     "FunctionalLawSource",
     "FunctionalUatEvidenceBackend",
     "FunctionalUatError",
@@ -796,8 +910,8 @@ __all__ = [
     "canonical_json_bytes",
     "collect_three_law_sources",
     "discard_active_functional_uat_manifest",
-    "docker_image_digests",
     "prefetch_models",
     "sha256_bytes",
     "validate_functional_uat_state",
+    "verify_functional_uat_store",
 ]
