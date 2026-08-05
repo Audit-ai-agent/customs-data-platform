@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hmac
 import re
+from collections.abc import Callable
 from datetime import date
 from typing import Literal
 
@@ -61,12 +62,15 @@ def create_profile_evidence_application(
     mode: Literal["local-development", "functional-uat"],
     service_token: str,
     backend: ReadinessBackend,
+    runtime_state_validator: Callable[[], object] | None = None,
 ) -> FastAPI:
     """Create one local, authenticated V3 application.
 
     The profile launcher validates the bind host; the app's own service mode
     check additionally prevents an Agent configured for one profile from
-    accepting a different profile on the same workstation.
+    accepting a different profile on the same workstation.  A functional
+    profile may supply a small local-state validator for each authenticated
+    readiness probe.  It deliberately does not run a full cross-store scan.
     """
 
     if _TOKEN_PATTERN.fullmatch(service_token) is None:
@@ -101,6 +105,8 @@ def create_profile_evidence_application(
     def ready(request: Request) -> EvidenceRuntimeReadinessV3:
         _authenticate_and_check_mode(request, token=service_token, mode=mode)
         try:
+            if runtime_state_validator is not None:
+                runtime_state_validator()
             # The backend performs the substantive local-store check. The
             # response intentionally carries no release, provenance, policy,
             # or approval assertion; mode is conveyed in the response header.

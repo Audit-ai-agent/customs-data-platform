@@ -23,12 +23,11 @@ from __future__ import annotations
 
 from datetime import date
 
-from psycopg.rows import dict_row
-
 from src import repository as repo
-from src.db.postgres import connect
-from src.db.qdrant import BM25_VECTOR, DENSE_VECTOR
 from src.embed import rerank
+
+BM25_VECTOR = repo.BM25_VECTOR
+DENSE_VECTOR = repo.DENSE_VECTOR
 
 RRF_K = 60  # RRF 상수 (관행값)
 RECALL = 20  # arm 당 후보 회수량
@@ -83,6 +82,10 @@ def _article_meta(pks: list[int]) -> dict[int, dict]:
     as_of 검색이 돌려준 과거 버전 pk 도 그대로 조회된다."""
     if not pks:
         return {}
+    from psycopg.rows import dict_row
+
+    from src.db.postgres import connect
+
     with connect() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """

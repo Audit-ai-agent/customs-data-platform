@@ -62,6 +62,12 @@ testpaths = [
   "law_repository/tests/test_migration_runner.py",
   "law_repository/tests/test_model_identity.py",
   "law_repository/tests/test_github_workflow_security.py",
+  "law_repository/tests/test_bm25.py",
+  "law_repository/tests/test_graph_unit.py",
+  "law_repository/tests/test_hybrid_unit.py",
+  "law_repository/tests/test_lawgo_security.py",
+  "law_repository/tests/test_repository_unit.py",
+  "law_repository/tests/test_store_consistency.py",
 ]
 markers = [
   "live: requires initialized PostgreSQL, Qdrant, and Neo4j services",
@@ -87,6 +93,7 @@ files = [
   "law_repository/src/local_profiles.py",
   "law_repository/src/profile_evidence.py",
   "law_repository/src/profile_wire.py",
+  "law_repository/src/store_consistency.py",
   "law_repository/src/db/postgres.py",
   "law_repository/src/db/qdrant.py",
   "law_repository/src/db/neo4j.py",

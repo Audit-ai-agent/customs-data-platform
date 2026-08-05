@@ -1,4 +1,4 @@
-"""Apply immutable, checksum-attested PostgreSQL migrations in filename order.
+"""Apply current-profile PostgreSQL migrations in filename order.
 
 The runner owns one PostgreSQL advisory lock for the complete migration
 sequence.  Previously applied files are byte-hashed on every run; editing,
@@ -23,42 +23,14 @@ MIGRATION_LOCK_KEY = 5571026467717076307
 _MIGRATION_NAME = re.compile(r"^(?P<number>[0-9]{3})_[a-z0-9_]+\.sql$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
-# These hashes adopt the pre-checksum 001..003 rows without silently trusting
-# whatever bytes happen to be present on the first hardened run.  They are
-# computed from the Git text form (LF); a Windows checkout may expose the same
-# tracked text as CRLF, so legacy adoption compares that normalized form and
-# then records the exact local bytes it executed.
-LEGACY_BASELINE_CHECKSUMS = {
-    "001_init.sql": "a082242873b48234b149dcb2407e436e797a658f9e3ad843109250360f846ca1",
-    "002_parent_article_pk.sql": (
-        "c70daf0ddf2e7bc637f16b1f4ee19bd5c4f95702e8678fc58a86219377e93947"
-    ),
-    "003_ccct_requirements.sql": (
-        "af34b01bb04694da56e8846103b3f1d541b7a11b987cfa8900eeb3c61d2170cc"
-    ),
-}
-
-# Existing local Docker volumes may already record this removed migration.
-# Leaving that state untouched is safe because no supported profile reads the
-# retired tables; new profile stores intentionally never create them.
-RETIRED_MIGRATIONS = frozenset({"004_knowledge_generations.sql"})
-
 _TRACK_TABLE = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
   filename        text PRIMARY KEY,
-  checksum_sha256 text,
-  byte_size       bigint,
+  checksum_sha256 text NOT NULL,
+  byte_size       bigint NOT NULL,
   applied_at      timestamptz NOT NULL DEFAULT now()
 )
 """
-_TRACK_COLUMNS = (
-    "ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS checksum_sha256 text",
-    "ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS byte_size bigint",
-)
-_TRACK_HARDEN = (
-    "ALTER TABLE schema_migrations ALTER COLUMN checksum_sha256 SET NOT NULL",
-    "ALTER TABLE schema_migrations ALTER COLUMN byte_size SET NOT NULL",
-)
 
 
 class MigrationError(RuntimeError):
@@ -73,13 +45,6 @@ class MigrationFile:
     checksum_sha256: str
     byte_size: int
     sql: str
-
-
-def _legacy_baseline_matches(migration: MigrationFile, expected_checksum: str) -> bool:
-    """Match a known pre-checksum migration across Git line-ending checkout modes."""
-
-    normalized = migration.sql.replace("\r\n", "\n").encode("utf-8")
-    return hashlib.sha256(normalized).hexdigest() == expected_checksum
 
 
 def discover_migrations(directory: Path = MIGRATIONS_DIR) -> tuple[MigrationFile, ...]:
@@ -129,27 +94,31 @@ def _unlock_migration_writer(connection: Any) -> None:
         row = cur.fetchone()
     connection.commit()
     if row is None or row[0] is not True:
-        raise MigrationError("migration advisory lock was not owned at release")
+        raise MigrationError("migration advisory lock was not owned at cleanup")
 
 
 def _prepare_tracking_table(connection: Any) -> None:
     with connection.cursor() as cur:
         cur.execute(_TRACK_TABLE)
-        for statement in _TRACK_COLUMNS:
-            cur.execute(statement)
     connection.commit()
 
 
 def _load_applied(connection: Any) -> dict[str, tuple[str | None, int | None]]:
-    with connection.cursor() as cur:
-        cur.execute(
-            """
-            SELECT filename, checksum_sha256, byte_size
-            FROM schema_migrations
-            ORDER BY filename
-            """
-        )
-        rows = cur.fetchall()
+    try:
+        with connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT filename, checksum_sha256, byte_size
+                FROM schema_migrations
+                ORDER BY filename
+                """
+            )
+            rows = cur.fetchall()
+    except Exception as exc:
+        raise MigrationError(
+            "local migration history is from an unsupported prior profile; "
+            "reset/rebuild this profile"
+        ) from exc
     applied: dict[str, tuple[str | None, int | None]] = {}
     for filename, checksum, byte_size in rows:
         if filename in applied:
@@ -161,52 +130,35 @@ def _load_applied(connection: Any) -> dict[str, tuple[str | None, int | None]]:
     return applied
 
 
-def _verify_and_adopt_history(
+def _verify_current_history(
     connection: Any,
     migrations: Sequence[MigrationFile],
 ) -> set[str]:
     available = {item.filename: item for item in migrations}
     applied = _load_applied(connection)
-    missing_files = sorted(set(applied) - set(available) - RETIRED_MIGRATIONS)
-    if missing_files:
-        raise MigrationError("applied migration files are missing: " + ", ".join(missing_files))
+    unsupported = sorted(set(applied) - set(available))
+    if unsupported:
+        raise MigrationError(
+            "local migration history contains unsupported entries "
+            f"({', '.join(unsupported)}); reset/rebuild this profile"
+        )
 
-    with connection.cursor() as cur:
-        for filename, (stored_checksum, stored_size) in applied.items():
-            if filename in RETIRED_MIGRATIONS and filename not in available:
-                continue
-            migration = available[filename]
-            if stored_checksum is None or stored_size is None:
-                expected_legacy = LEGACY_BASELINE_CHECKSUMS.get(filename)
-                if expected_legacy is None or not _legacy_baseline_matches(
-                    migration, expected_legacy
-                ):
-                    raise MigrationError(f"cannot safely adopt checksum-less migration: {filename}")
-                cur.execute(
-                    """
-                    UPDATE schema_migrations
-                    SET checksum_sha256=%s, byte_size=%s
-                    WHERE filename=%s
-                      AND (checksum_sha256 IS NULL OR byte_size IS NULL)
-                    """,
-                    (
-                        migration.checksum_sha256,
-                        migration.byte_size,
-                        filename,
-                    ),
-                )
-                stored_checksum = migration.checksum_sha256
-                stored_size = migration.byte_size
-            if (
-                not isinstance(stored_checksum, str)
-                or _SHA256.fullmatch(stored_checksum) is None
-                or stored_checksum != migration.checksum_sha256
-                or stored_size != migration.byte_size
-            ):
-                raise MigrationError(f"applied migration was modified: {filename}")
-        for statement in _TRACK_HARDEN:
-            cur.execute(statement)
-    connection.commit()
+    for filename, (stored_checksum, stored_size) in applied.items():
+        migration = available[filename]
+        if stored_checksum is None or stored_size is None:
+            raise MigrationError(
+                "local migration history is from an unsupported prior profile; "
+                "reset/rebuild this profile"
+            )
+        if (
+            not isinstance(stored_checksum, str)
+            or _SHA256.fullmatch(stored_checksum) is None
+            or stored_checksum != migration.checksum_sha256
+            or stored_size != migration.byte_size
+        ):
+            raise MigrationError(
+                f"applied migration is not current: {filename}; reset/rebuild this profile"
+            )
     return set(applied)
 
 
@@ -223,7 +175,7 @@ def apply_migrations(
         _acquire_lock(connection)
         locked = True
         _prepare_tracking_table(connection)
-        applied = _verify_and_adopt_history(connection, migrations)
+        applied = _verify_current_history(connection, migrations)
         for migration in migrations:
             if migration.filename in applied:
                 output(f"skip  {migration.filename} (checksum verified)")

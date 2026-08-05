@@ -8,10 +8,8 @@ from typing import Any
 import pytest
 
 from scripts.migrate import (
-    LEGACY_BASELINE_CHECKSUMS,
     MIGRATIONS_DIR,
     MigrationError,
-    RETIRED_MIGRATIONS,
     apply_migrations,
     discover_migrations,
 )
@@ -99,11 +97,15 @@ def test_repository_migrations_are_contiguous_and_checksum_attested() -> None:
     migrations = discover_migrations()
 
     assert [item.number for item in migrations] == [1, 2, 3]
-    assert [item.filename for item in migrations[:3]] == list(LEGACY_BASELINE_CHECKSUMS)
-    assert {
-        item.filename: hashlib.sha256(item.sql.replace("\r\n", "\n").encode("utf-8")).hexdigest()
-        for item in migrations[:3]
-    } == LEGACY_BASELINE_CHECKSUMS
+    assert [item.filename for item in migrations] == [
+        "001_init.sql",
+        "002_parent_article_pk.sql",
+        "003_ccct_requirements.sql",
+    ]
+    assert all(
+        hashlib.sha256(item.path.read_bytes()).hexdigest() == item.checksum_sha256
+        for item in migrations
+    )
     assert all(item.byte_size > 0 for item in migrations)
 
 
@@ -119,32 +121,39 @@ def test_discovery_rejects_gap_and_non_utf8(tmp_path: Path) -> None:
         discover_migrations(tmp_path)
 
 
-def test_apply_adopts_only_known_legacy_hashes_and_is_idempotent() -> None:
+def test_apply_current_profile_history_is_idempotent() -> None:
     migrations = discover_migrations()
     connection = FakeConnection()
-    connection.applied[migrations[0].filename] = (None, None)
     messages: list[str] = []
 
     apply_migrations(connection, migrations, output=messages.append)
     first_sql_count = len(connection.applied_sql)
     apply_migrations(connection, migrations, output=messages.append)
 
-    assert connection.applied[migrations[0].filename] == (
-        migrations[0].checksum_sha256,
-        migrations[0].byte_size,
-    )
     assert set(connection.applied) == {item.filename for item in migrations}
     assert len(connection.applied_sql) == first_sql_count
     assert connection.locked is False
     assert any("checksum verified" in message for message in messages)
 
 
-def test_applied_migration_tamper_fails_before_new_sql() -> None:
+def test_checksumless_legacy_history_requires_profile_reset() -> None:
+    migrations = discover_migrations()
+    connection = FakeConnection()
+    connection.applied[migrations[0].filename] = (None, None)
+
+    with pytest.raises(MigrationError, match="unsupported prior profile; reset/rebuild"):
+        apply_migrations(connection, migrations, output=lambda _message: None)
+
+    assert connection.applied_sql == []
+    assert connection.locked is False
+
+
+def test_applied_migration_tamper_requires_profile_reset_before_new_sql() -> None:
     migrations = discover_migrations()
     connection = FakeConnection()
     connection.applied[migrations[0].filename] = ("0" * 64, migrations[0].byte_size)
 
-    with pytest.raises(MigrationError, match="was modified"):
+    with pytest.raises(MigrationError, match="not current.*reset/rebuild"):
         apply_migrations(connection, migrations, output=lambda _message: None)
 
     assert connection.applied_sql == []
@@ -157,8 +166,8 @@ def test_removed_applied_migration_fails_closed(tmp_path: Path) -> None:
             shutil.copy2(source, tmp_path / source.name)
     connection = FakeConnection()
     connection.applied["001_init.sql"] = (
-        LEGACY_BASELINE_CHECKSUMS["001_init.sql"],
-        3133,
+        discover_migrations()[0].checksum_sha256,
+        discover_migrations()[0].byte_size,
     )
 
     # Discovery itself rejects the numbering gap before database access.
@@ -177,12 +186,12 @@ def test_advisory_lock_contention_executes_no_migration() -> None:
     assert connection.locked is False
 
 
-def test_retired_generation_migration_is_not_reapplied_or_required() -> None:
+def test_retired_generation_migration_requires_profile_reset() -> None:
     migrations = discover_migrations()
     connection = FakeConnection()
     connection.applied["004_knowledge_generations.sql"] = ("0" * 64, 1)
 
-    apply_migrations(connection, migrations, output=lambda _message: None)
+    with pytest.raises(MigrationError, match="unsupported entries.*reset/rebuild"):
+        apply_migrations(connection, migrations, output=lambda _message: None)
 
-    assert "004_knowledge_generations.sql" in RETIRED_MIGRATIONS
-    assert connection.applied["004_knowledge_generations.sql"] == ("0" * 64, 1)
+    assert connection.applied_sql == []

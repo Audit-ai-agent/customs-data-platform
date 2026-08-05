@@ -4,7 +4,7 @@
 
 ## 검증
 
-- [ ] `uv run --locked --extra rag python tools/check_contract_drift.py`를 실행했다.
+- [ ] `uv run --locked --no-sync --group dev python tools/check_contract_drift.py`를 실행했다.
 - [ ] 변경 범위의 Ruff, Mypy, 관련 offline test를 실행했다.
 - [ ] 비밀·원본 데이터·로컬 실행 결과를 포함하지 않았다.
 - [ ] 필요한 경우 공용 Harness snapshot 갱신 PR을 연결했다.

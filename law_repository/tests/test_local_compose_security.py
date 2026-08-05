@@ -1,7 +1,5 @@
 from pathlib import Path
 
-from src.functional_uat import FUNCTIONAL_UAT_IMAGE_REFERENCES
-
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -28,9 +26,8 @@ def test_compose_uses_project_scoped_containers_digest_pins_and_no_default_passw
     assert "@sha256:" in compose
     assert "change_me" not in compose
     assert "com.customs.data.profile" in compose
-    assert all(
-        f"image: {reference}" in compose for reference in FUNCTIONAL_UAT_IMAGE_REFERENCES.values()
-    )
+    assert compose.count("image:") == 3
+    assert all("@sha256:" in line for line in compose.splitlines() if "image:" in line)
     for service in ("postgres", "qdrant", "neo4j"):
         marker = f"  {service}:"
         section = compose.split(marker, 1)[1]

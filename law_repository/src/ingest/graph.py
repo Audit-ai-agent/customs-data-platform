@@ -35,14 +35,28 @@ from __future__ import annotations
 import re
 import sys
 
-from src.db.neo4j import driver as make_driver
-from src.db.postgres import connect
 from src.lawgo import jo_code
 
 # 위계 rank (작을수록 상위). DELEGATES 는 상위→하위.
 HIER_RANK = {"법률": 1, "시행령": 2, "시행규칙": 3}
 
 _FAMILY_SUFFIX = re.compile(r"\s*시행(령|규칙)$")
+
+
+def connect():
+    """Import the optional PostgreSQL driver only for store work."""
+
+    from src.db.postgres import connect as open_connection
+
+    return open_connection()
+
+
+def make_driver():
+    """Import the optional Neo4j driver only for store work."""
+
+    from src.db.neo4j import driver as open_driver
+
+    return open_driver()
 
 
 class LawRegistry:

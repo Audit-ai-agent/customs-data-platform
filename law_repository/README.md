@@ -19,11 +19,18 @@ profile commands generate random local database passwords outside Git:
 # Optional real-store Data development
 uv run --locked --no-sync --group dev python tools/dev_store.py init
 uv run --locked --no-sync --group dev python tools/dev_store.py compose up
+# After a complete law/HSK/CCCT build only: full current-law/index/graph comparison.
+uv run --locked --no-sync --group dev --extra store python tools/dev_store.py verify
 
 # Real three-law functional UAT
 uv sync --locked --group dev --extra store --extra rag --extra ingestion --python 3.11
 uv run --locked --no-sync --group dev --extra store --extra rag --extra ingestion python tools/functional_uat_3law.py init
+# Add only your personal LAW_API_OC to the ignored _local profile config.
 uv run --locked --no-sync --group dev --extra store --extra rag --extra ingestion python tools/functional_uat_3law.py compose up
+# Build the bounded three-law stores before requesting a full comparison.
+uv run --locked --no-sync --group dev --extra store --extra rag --extra ingestion python tools/functional_uat_3law.py build --as-of 2026-08-05
+# Optional after build or a Data/schema/retrieval change; not a normal UAT step.
+uv run --locked --no-sync --group dev --extra store --extra rag --extra ingestion python tools/functional_uat_3law.py verify-store
 ```
 
 If a completed three-law run must be rebuilt, use the explicit scoped reset:
@@ -46,9 +53,12 @@ clients or model packages.
 The functional UAT builder uses the official Law API only for the bounded
 three-law source collection. It requires a personal `LAW_API_OC` placed in its
 ignored profile config, stores raw official responses below that profile and
-models at `_local/cache/huggingface`, and records only collection time,
-hashes/counts/revisions in a UAT manifest. The CCCT reference input is already tracked, so no second
-API credential or bulk collection command is required. It does not represent a
-Production deployment or approval. The `serve` command deliberately removes
-the collection key from its process environment and settings before accepting
-any Evidence request.
+models at `_local/cache/huggingface`, and records only profile, date, law IDs,
+source hashes, model revisions, store counts, and build time in the shareable
+UAT manifest. The full source inventory remains in ignored local state.
+`verify-store` is the explicit full ID/hash comparison for Data maintenance;
+the regular UAT server uses lightweight source/cache/count checks. The CCCT
+reference input is already tracked, so no second API credential or bulk
+collection command is required. It does not represent a Production deployment
+or approval. The `serve` command deliberately removes the collection key from
+its process environment and settings before accepting any Evidence request.

@@ -4,7 +4,6 @@ import json
 from typing import Iterable
 
 import pytest
-import requests
 
 from src import lawgo
 
@@ -30,20 +29,33 @@ class _Response:
         self.closed = True
 
 
-@pytest.fixture
-def initialized_session(monkeypatch: pytest.MonkeyPatch) -> requests.Session:
-    """Preserve the client's lazy session construction in every test."""
+class _Transport:
+    class ConnectionError(Exception):
+        pass
 
-    session = requests.Session()
-    monkeypatch.setattr(lawgo, "_session", session)
+    class Timeout(Exception):
+        pass
+
+
+class _Session:
+    def get(self, *_args: object, **_kwargs: object) -> _Response:
+        raise AssertionError("test must replace the HTTP call")
+
+
+@pytest.fixture
+def initialized_session(monkeypatch: pytest.MonkeyPatch) -> _Session:
+    """Inject the lazy transport without importing the optional HTTP package."""
+
+    session = _Session()
+    monkeypatch.setattr(lawgo, "_request_runtime", lambda: (_Transport, session))
     return session
 
 
 def test_get_requires_real_credential_before_network(
     monkeypatch: pytest.MonkeyPatch,
-    initialized_session: requests.Session,
+    initialized_session: _Session,
 ) -> None:
-    monkeypatch.setattr(lawgo.settings, "law_api_oc", "")
+    monkeypatch.setattr(lawgo, "_law_api_credential", lambda: "")
     monkeypatch.setattr(
         initialized_session,
         "get",
@@ -64,11 +76,11 @@ def test_official_client_has_no_checkout_raw_cache_writer() -> None:
 
 def test_get_rejects_redirect_without_leaking_credential(
     monkeypatch: pytest.MonkeyPatch,
-    initialized_session: requests.Session,
+    initialized_session: _Session,
 ) -> None:
     secret = "secret-credential-for-test"
     response = _Response(status=302)
-    monkeypatch.setattr(lawgo.settings, "law_api_oc", secret)
+    monkeypatch.setattr(lawgo, "_law_api_credential", lambda: secret)
     monkeypatch.setattr(initialized_session, "get", lambda *_args, **_kwargs: response)
 
     with pytest.raises(lawgo.LawApiError) as captured:
@@ -81,13 +93,13 @@ def test_get_rejects_redirect_without_leaking_credential(
 
 def test_get_uses_bounded_stream_and_returns_normalized_json(
     monkeypatch: pytest.MonkeyPatch,
-    initialized_session: requests.Session,
+    initialized_session: _Session,
 ) -> None:
     response = _Response(
         chunks=(json.dumps({"법 령": {"값": 1}}, ensure_ascii=False).encode("utf-8"),)
     )
     observed: dict[str, object] = {}
-    monkeypatch.setattr(lawgo.settings, "law_api_oc", "approved-test-credential")
+    monkeypatch.setattr(lawgo, "_law_api_credential", lambda: "approved-test-credential")
 
     def fake_get(_url, **kwargs):
         observed.update(kwargs)
@@ -103,10 +115,10 @@ def test_get_uses_bounded_stream_and_returns_normalized_json(
 
 def test_get_stops_when_stream_exceeds_bound(
     monkeypatch: pytest.MonkeyPatch,
-    initialized_session: requests.Session,
+    initialized_session: _Session,
 ) -> None:
     response = _Response(chunks=(b"x" * (lawgo.MAX_RESPONSE_BYTES + 1),))
-    monkeypatch.setattr(lawgo.settings, "law_api_oc", "approved-test-credential")
+    monkeypatch.setattr(lawgo, "_law_api_credential", lambda: "approved-test-credential")
     monkeypatch.setattr(initialized_session, "get", lambda *_args, **_kwargs: response)
 
     with pytest.raises(lawgo.LawApiError, match="LAW_API_RESPONSE_TOO_LARGE"):
@@ -117,18 +129,18 @@ def test_get_stops_when_stream_exceeds_bound(
 
 def test_transport_failure_is_retried_but_error_is_content_free(
     monkeypatch: pytest.MonkeyPatch,
-    initialized_session: requests.Session,
+    initialized_session: _Session,
 ) -> None:
     calls = 0
     secret = "approved-test-credential"
-    monkeypatch.setattr(lawgo.settings, "law_api_oc", secret)
+    monkeypatch.setattr(lawgo, "_law_api_credential", lambda: secret)
     monkeypatch.setattr(lawgo, "MAX_ATTEMPTS", 2)
     monkeypatch.setattr(lawgo.time, "sleep", lambda _seconds: None)
 
     def fail(*_args, **_kwargs):
         nonlocal calls
         calls += 1
-        raise requests.ConnectionError(f"url?OC={secret}")
+        raise _Transport.ConnectionError(f"url?OC={secret}")
 
     monkeypatch.setattr(initialized_session, "get", fail)
 

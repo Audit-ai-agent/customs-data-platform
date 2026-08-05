@@ -25,8 +25,6 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     import requests
 
-from src.config import settings
-
 BASE = "https://www.law.go.kr/DRF"
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 CONNECT_TIMEOUT_SECONDS = 10
@@ -55,6 +53,14 @@ def _request_runtime() -> tuple[Any, Any]:
         _session.headers.update({"User-Agent": "trade-doc-auditor/law-repository"})
         _session.trust_env = False
     return requests, _session
+
+
+def _law_api_credential() -> str:
+    """Read the optional collection credential only when ``get`` is called."""
+
+    from src.config import settings
+
+    return str(settings.law_api_oc)
 
 
 def _clean_keys(obj):
@@ -128,12 +134,13 @@ def _retry_delay(attempt: int) -> float:
 
 
 def get(endpoint: str, **params) -> dict:
-    requests, session = _request_runtime()
-    api_credential = settings.law_api_oc.strip()
+    api_credential = _law_api_credential().strip()
     if not api_credential or api_credential.casefold() in {"test", "change_me"}:
         raise LawApiError("LAW_API_CREDENTIAL_UNAVAILABLE")
     if endpoint not in {"lawService.do", "lawSearch.do"}:
         raise LawApiError("LAW_API_ENDPOINT_NOT_ALLOWED")
+
+    requests, session = _request_runtime()
 
     params.setdefault("OC", api_credential)
     params.setdefault("type", "JSON")
