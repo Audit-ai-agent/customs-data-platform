@@ -32,3 +32,12 @@ def test_compose_uses_project_scoped_containers_digest_pins_and_no_default_passw
         marker = f"  {service}:"
         section = compose.split(marker, 1)[1]
         assert "healthcheck:" in section.split("\n  ", 1)[0] or "healthcheck:" in section
+
+
+def test_qdrant_healthcheck_uses_a_command_available_in_the_pinned_image() -> None:
+    compose = (ROOT / "law_repository" / "docker-compose.yml").read_text(encoding="utf-8")
+    qdrant = compose.split("  qdrant:\n", 1)[1].split("\n  neo4j:", 1)[0]
+
+    assert "wget" not in qdrant
+    assert "bash -ec" in qdrant
+    assert "/healthz" in qdrant
