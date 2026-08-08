@@ -19,10 +19,19 @@ ROOT = Path(__file__).resolve().parents[1]
 LAW_REPOSITORY = ROOT / "law_repository"
 V3_RETRIEVAL_SCHEMA_PATH = ROOT / "contracts" / "evidence" / "v3" / "rag_retrieval_v3.schema.json"
 V3_READINESS_SCHEMA_PATH = ROOT / "contracts" / "evidence" / "v3" / "readiness_v3.schema.json"
+V3_GUIDANCE_SCHEMA_PATH = ROOT / "contracts" / "evidence" / "v3" / "guidance_query_v3.schema.json"
+V3_GUIDANCE_REGISTRY_MANIFEST_PATH = (
+    ROOT / "contracts" / "evidence" / "v3" / "guidance_registry_v1.manifest.json"
+)
 
 sys.path.insert(0, str(LAW_REPOSITORY))
 
 from src.evidence_v3 import RetrieveRequestV3, RetrieveResponseV3  # noqa: E402
+from src.guidance_v3 import (  # noqa: E402
+    GeneralGuidanceQueryRequestV3,
+    GeneralGuidanceQueryResponseV3,
+)
+from src.guidance_registry import registry_manifest  # noqa: E402
 from src.profile_wire import EvidenceRuntimeReadinessV3  # noqa: E402
 
 
@@ -55,6 +64,9 @@ def check_contract_drift() -> list[str]:
     generated = {
         V3_RETRIEVAL_SCHEMA_PATH: TypeAdapter(RetrieveRequestV3 | RetrieveResponseV3).json_schema(),
         V3_READINESS_SCHEMA_PATH: EvidenceRuntimeReadinessV3.model_json_schema(),
+        V3_GUIDANCE_SCHEMA_PATH: TypeAdapter(
+            GeneralGuidanceQueryRequestV3 | GeneralGuidanceQueryResponseV3
+        ).json_schema(),
     }
     errors: list[str] = []
     for path, actual in generated.items():
@@ -62,6 +74,16 @@ def check_contract_drift() -> list[str]:
         normalized_actual = _without_document_metadata(actual)
         if expected != normalized_actual:
             errors.append(_diff(expected=expected, actual=normalized_actual, path=path))
+    manifest_expected = json.loads(V3_GUIDANCE_REGISTRY_MANIFEST_PATH.read_text(encoding="utf-8"))
+    manifest_actual = registry_manifest()
+    if manifest_expected != manifest_actual:
+        errors.append(
+            _diff(
+                expected=manifest_expected,
+                actual=manifest_actual,
+                path=V3_GUIDANCE_REGISTRY_MANIFEST_PATH,
+            )
+        )
     return errors
 
 
@@ -73,7 +95,9 @@ def main() -> int:
     print(
         "Evidence V3 contracts match: "
         f"{V3_RETRIEVAL_SCHEMA_PATH.relative_to(ROOT)}, "
-        f"{V3_READINESS_SCHEMA_PATH.relative_to(ROOT)}"
+        f"{V3_READINESS_SCHEMA_PATH.relative_to(ROOT)}, "
+        f"{V3_GUIDANCE_SCHEMA_PATH.relative_to(ROOT)}, "
+        f"{V3_GUIDANCE_REGISTRY_MANIFEST_PATH.relative_to(ROOT)}"
     )
     return 0
 

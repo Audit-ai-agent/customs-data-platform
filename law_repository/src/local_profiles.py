@@ -22,6 +22,7 @@ PROFILE_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,63}$")
 DEV_FIXTURE_PROFILE = "dev-fixture"
 DEV_STORE_PROFILE = "dev-store"
 FUNCTIONAL_UAT_PROFILE = "functional-uat-3law"
+FUNCTIONAL_UAT_KR_TRADE_PROFILE = "functional-uat-kr-trade"
 SERVICE_TOKEN_FILENAME = "evidence-service-token"
 CONFIG_FILENAME = "config.env"
 
@@ -219,6 +220,24 @@ def ensure_functional_uat_profile(*, root: Path | None = None) -> Path:
     return directory
 
 
+def ensure_functional_uat_kr_trade_profile(*, root: Path | None = None) -> Path:
+    """Create an isolated future official-trade guidance profile.
+
+    This intentionally does not adopt, reset, or otherwise alter the legacy
+    ``functional-uat-3law`` profile.  A registry declaration alone is not a
+    built knowledge snapshot, so callers must still fail closed until the
+    explicit source-build path has produced validated local state.
+    """
+
+    directory = _ensure_data_store_profile(
+        FUNCTIONAL_UAT_KR_TRADE_PROFILE,
+        ports=(55462, 6353, 6354, 7494, 7707),
+        root=root,
+    )
+    ensure_service_token(FUNCTIONAL_UAT_KR_TRADE_PROFILE, root=root)
+    return directory
+
+
 def load_config(path: Path) -> dict[str, str]:
     """Read a deliberately tiny dotenv format without shell evaluation."""
 
@@ -389,6 +408,7 @@ __all__ = [
     "CONFIG_FILENAME",
     "DEV_FIXTURE_PROFILE",
     "DEV_STORE_PROFILE",
+    "FUNCTIONAL_UAT_KR_TRADE_PROFILE",
     "FUNCTIONAL_UAT_PROFILE",
     "LocalProfileError",
     "SERVICE_TOKEN_FILENAME",
@@ -397,6 +417,7 @@ __all__ = [
     "apply_data_store_environment",
     "artifact_root",
     "ensure_functional_uat_profile",
+    "ensure_functional_uat_kr_trade_profile",
     "ensure_dev_store_profile",
     "ensure_service_token",
     "functional_uat_law_collection_environment",

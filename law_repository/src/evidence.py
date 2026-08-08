@@ -87,6 +87,10 @@ class RetrieveRequest(ContractModel):
         default_factory=list,
         json_schema_extra={"default": [], "uniqueItems": True},
     )
+    # The retained import default is a V3 wire-compatibility detail.  Runtime
+    # semantics normalize that untouched legacy value from ``trade_type`` so
+    # an export request means ``required_export_documents`` rather than an
+    # import request with a misleading label.
     query_intent: str = Field(default="required_import_documents", min_length=1, max_length=2000)
 
     @model_validator(mode="after")
@@ -552,6 +556,70 @@ def _law_query(request: RetrieveRequest, _item: RetrieveItem, _hsk10: str) -> st
     )
 
 
+def _effective_query_intent(request: RetrieveRequest) -> str:
+    """Normalize only the old direction-specific default without changing V3 wire.
+
+    Existing import clients keep their exact input and behavior.  Older
+    callers that rely on the historical default for an export request are
+    interpreted as asking for Korean export documents.  This does not extend
+    Data coverage to a foreign destination country's import requirements.
+    """
+
+    if request.trade_type == "export":
+        if request.query_intent == "required_import_documents":
+            return "required_export_documents"
+        if request.query_intent == "required_import_documents_and_law_support":
+            return "required_export_documents_and_law_support"
+    if request.trade_type == "import":
+        if request.query_intent == "required_export_documents":
+            return "required_import_documents"
+        if request.query_intent == "required_export_documents_and_law_support":
+            return "required_import_documents_and_law_support"
+    return request.query_intent
+
+
+def _destination_coverage(
+    request: RetrieveRequest,
+    item: RetrieveItem,
+) -> tuple[EvidenceError | None, bool]:
+    """Return a fixed limitation and whether Korean-side lookup may continue.
+
+    The current jurisdiction is Korea.  A Korean import must therefore have
+    ``destination_country=KR``.  A Korean export can return Korean export
+    process evidence for a foreign destination, but the same CCCT snapshot
+    cannot establish that destination country's import restrictions.
+    """
+
+    if request.trade_type == "import":
+        if item.destination_country != "KR":
+            return (
+                _error(
+                    "IMPORT_DESTINATION_COUNTRY_UNSUPPORTED",
+                    "현재 Data 범위는 대한민국으로 수입되는 건의 요건만 확인할 수 있습니다.",
+                    retryable=False,
+                ),
+                False,
+            )
+        return None, True
+    if item.destination_country == "KR":
+        return (
+            _error(
+                "EXPORT_DESTINATION_COUNTRY_INVALID",
+                "수출 심사는 목적국 코드가 필요하며 KR은 수출 목적국으로 사용할 수 없습니다.",
+                retryable=False,
+            ),
+            False,
+        )
+    return (
+        _error(
+            "FOREIGN_DESTINATION_REQUIREMENTS_UNAVAILABLE",
+            "현재 Data 스냅샷은 대한민국 수출 절차 근거만 제공하며 목적국 수입요건은 포함하지 않습니다.",
+            retryable=False,
+        ),
+        True,
+    )
+
+
 def _unavailable_results(
     request: RetrieveRequest, error: EvidenceError
 ) -> list[ItemEvidenceResult]:
@@ -665,6 +733,7 @@ def retrieve_evidence(
             errors=[err],
         )
 
+    query_intent = _effective_query_intent(request)
     results: list[ItemEvidenceResult] = []
     partial = False
     for item in request.items:
@@ -709,6 +778,24 @@ def retrieve_evidence(
                     requirements_found=False,
                     evidence=[],
                     errors=[_error(code, message)],
+                )
+            )
+            continue
+
+        destination_error, may_lookup_korean_requirements = _destination_coverage(request, item)
+        if not may_lookup_korean_requirements:
+            partial = True
+            assert destination_error is not None
+            results.append(
+                ItemEvidenceResult(
+                    item_id=item.item_id,
+                    hs_resolution=resolution.status,
+                    resolved_hsk10=resolution.resolved_hsk10,
+                    candidate_hsk10s=list(resolution.candidate_hsk10s),
+                    coverage="partial",
+                    requirements_found=False,
+                    evidence=[],
+                    errors=[destination_error],
                 )
             )
             continue
@@ -759,7 +846,15 @@ def retrieve_evidence(
         law_evidence: list[Evidence] = []
         item_errors: list[EvidenceError] = []
         item_coverage: Literal["complete", "partial"] = "complete"
-        if "law_support" in request.query_intent:
+        if destination_error is not None:
+            # A foreign destination is valid for Korean export processing, but
+            # no Korean-only local dataset can certify the destination's own
+            # import restrictions.  Preserve Korean evidence and make the
+            # boundary explicit instead of silently treating it as complete.
+            partial = True
+            item_coverage = "partial"
+            item_errors.append(destination_error)
+        if "law_support" in query_intent:
             try:
                 matches = backend.search_law_articles(
                     _law_query(request, item, resolution.resolved_hsk10),

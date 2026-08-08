@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 
 from tools.check_contract_drift import (
+    V3_GUIDANCE_REGISTRY_MANIFEST_PATH,
+    V3_GUIDANCE_SCHEMA_PATH,
     V3_READINESS_SCHEMA_PATH,
     V3_RETRIEVAL_SCHEMA_PATH,
     check_contract_drift,
@@ -18,11 +20,26 @@ def test_active_contracts_are_provider_owned_v3_schemas() -> None:
     repository_root = Path(__file__).resolve().parents[2]
     assert V3_RETRIEVAL_SCHEMA_PATH.is_relative_to(repository_root)
     assert V3_READINESS_SCHEMA_PATH.is_relative_to(repository_root)
+    assert V3_GUIDANCE_SCHEMA_PATH.is_relative_to(repository_root)
+    assert V3_GUIDANCE_REGISTRY_MANIFEST_PATH.is_relative_to(repository_root)
 
     retrieval = json.loads(V3_RETRIEVAL_SCHEMA_PATH.read_text(encoding="utf-8"))
     readiness = json.loads(V3_READINESS_SCHEMA_PATH.read_text(encoding="utf-8"))
+    guidance = json.loads(V3_GUIDANCE_SCHEMA_PATH.read_text(encoding="utf-8"))
+    registry = json.loads(V3_GUIDANCE_REGISTRY_MANIFEST_PATH.read_text(encoding="utf-8"))
     assert retrieval["$defs"]["RetrieveRequestV3"]["properties"]["schema_version"]["const"] == "3.0"
     assert readiness["properties"] == {
         "status": {"const": "ready", "title": "Status", "type": "string"},
     }
     assert "$defs" not in readiness
+    assert (
+        guidance["$defs"]["GeneralGuidanceQueryRequestV3"]["properties"]["schema_version"]["const"]
+        == "3.0"
+    )
+    response_properties = guidance["$defs"]["GeneralGuidanceQueryResponseV3"]["properties"]
+    source_properties = guidance["$defs"]["GuidanceSourceV3"]["properties"]
+    assert response_properties["registry_sha256"]["pattern"] == "^[a-f0-9]{64}$"
+    assert source_properties["registry_source_id"]["pattern"] == "^[a-z][a-z0-9_]{2,63}$"
+    assert registry["schema_version"] == "1.0"
+    assert registry["jurisdiction"] == "KR"
+    assert registry["topics"]

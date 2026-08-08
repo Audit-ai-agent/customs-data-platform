@@ -67,7 +67,34 @@ class TestOnlyConformanceEvidenceBackend:
     ) -> RequirementLookup:
         if snapshot_id != "test-only-conformance-snapshot":
             raise ValueError("test-only conformance snapshot mismatch")
-        if hsk10 != "0303540000" or trade_type != "import" or as_of != self.effective_date:
+        if hsk10 != "0303540000" or as_of != self.effective_date:
+            return RequirementLookup(False, ())
+        if trade_type == "export":
+            return RequirementLookup(
+                True,
+                (
+                    {
+                        "requirement_id": "test_only_ccct_export_req_0303540000",
+                        "requirement_version_hash": "b" * 64,
+                        "hsk10": "0303540000",
+                        "trade_type": "export",
+                        "law_code": "000",
+                        "law_name": "수출 절차 확인용 합성 기준",
+                        "agency_code": "000",
+                        "agency_name": "개발용 합성 기관",
+                        "document_code": "CCCT_DOC_EXPORT_DECLARATION",
+                        "document_name": "수출신고 관련 확인서",
+                        "valid_from": date(2020, 4, 6),
+                        "valid_to": None,
+                        "source_record_id": "test_only_ccct_export_src_0303540000",
+                        "source_uri": (
+                            "https://customs.local.invalid/dev-fixture/"
+                            "requirements/export/0303540000"
+                        ),
+                    },
+                ),
+            )
+        if trade_type != "import":
             return RequirementLookup(False, ())
         return RequirementLookup(
             True,

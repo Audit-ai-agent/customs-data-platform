@@ -13,6 +13,7 @@ from src.evidence import (
     LawArticleMatch,
     RequirementLookup,
     RetrieveRequest,
+    _effective_query_intent,
     retrieve_evidence,
 )
 from src.repository import HskResolution
@@ -117,6 +118,107 @@ def test_no_requirement_is_complete_only_when_query_was_covered():
     assert result.coverage == "complete"
     assert result.requirements_found is False
     assert result.errors == []
+
+
+def test_export_uses_export_document_intent_and_keeps_foreign_destination_limit_explicit():
+    class ExportBackend(FakeBackend):
+        def lookup_requirements(self, snapshot_id, hsk10, trade_type, as_of):
+            assert snapshot_id == self.snapshot
+            assert hsk10 == "0303540000"
+            assert trade_type == "export"
+            assert as_of == self.effective_date
+            row = _row() | {
+                "trade_type": "export",
+                "law_name": "수출 절차 확인용 합성 기준",
+                "document_code": "CCCT_DOC_EXPORT_DECLARATION",
+                "document_name": "수출신고 관련 확인서",
+                "source_record_id": "ccct_export_src_1",
+            }
+            return RequirementLookup(True, (row,))
+
+    request = _request(
+        trade_type="export",
+        query_intent="required_export_documents",
+        items=[
+            {
+                "item_id": "invoice:1",
+                "description": "Frozen mackerel",
+                "hs_code": "0303540000",
+                "origin_country": "KR",
+                "destination_country": "US",
+            }
+        ],
+    )
+    response = retrieve_evidence(request, ExportBackend())
+
+    assert response.status == "partial"
+    result = response.results[0]
+    assert result.requirements_found is True
+    assert result.coverage == "partial"
+    assert result.evidence[0].trade_type == "export"
+    assert [error.code for error in result.errors] == [
+        "FOREIGN_DESTINATION_REQUIREMENTS_UNAVAILABLE"
+    ]
+    assert _effective_query_intent(request) == "required_export_documents"
+
+
+def test_legacy_import_intent_is_normalized_for_export_without_foreign_coverage_claim():
+    request = _request(
+        trade_type="export",
+        items=[
+            {
+                "item_id": "invoice:1",
+                "description": "Frozen mackerel",
+                "hs_code": "0303540000",
+                "origin_country": "KR",
+                "destination_country": "US",
+            }
+        ],
+    )
+    assert request.query_intent == "required_import_documents"
+    assert _effective_query_intent(request) == "required_export_documents"
+
+
+def test_export_with_kr_destination_is_partial_and_skips_requirement_lookup():
+    class NoLookupBackend(FakeBackend):
+        def lookup_requirements(self, *_args):
+            raise AssertionError("invalid export destination must not query Korean requirements")
+
+    response = retrieve_evidence(
+        _request(trade_type="export", query_intent="required_export_documents"),
+        NoLookupBackend(),
+    )
+
+    assert response.status == "partial"
+    result = response.results[0]
+    assert result.coverage == "partial"
+    assert result.requirements_found is False
+    assert result.evidence == []
+    assert result.errors[0].code == "EXPORT_DESTINATION_COUNTRY_INVALID"
+
+
+def test_import_outside_korean_destination_is_partial_and_keeps_existing_kr_path_unchanged():
+    class NoLookupBackend(FakeBackend):
+        def lookup_requirements(self, *_args):
+            raise AssertionError("foreign import destination must not query KR-only requirements")
+
+    response = retrieve_evidence(
+        _request(
+            items=[
+                {
+                    "item_id": "invoice:1",
+                    "description": "Frozen mackerel",
+                    "hs_code": "0303540000",
+                    "origin_country": "NO",
+                    "destination_country": "US",
+                }
+            ]
+        ),
+        NoLookupBackend(),
+    )
+
+    assert response.status == "partial"
+    assert response.results[0].errors[0].code == "IMPORT_DESTINATION_COUNTRY_UNSUPPORTED"
 
 
 def test_missing_coverage_is_partial_not_no_requirement():

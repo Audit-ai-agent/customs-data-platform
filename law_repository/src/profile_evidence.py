@@ -23,6 +23,11 @@ from src.evidence_v3 import (
     RetrieveResponseV3,
     retrieve_evidence_v3,
 )
+from src.guidance_v3 import (
+    GeneralGuidanceQueryRequestV3,
+    GeneralGuidanceQueryResponseV3,
+    query_general_guidance_v3,
+)
 from src.profile_wire import EvidenceRuntimeReadinessV3
 
 LOCAL_DEVELOPMENT_MODE: Literal["local-development"] = "local-development"
@@ -63,6 +68,7 @@ def create_profile_evidence_application(
     service_token: str,
     backend: ReadinessBackend,
     runtime_state_validator: Callable[[], object] | None = None,
+    guidance_state_validator: Callable[[], frozenset[str]] | None = None,
 ) -> FastAPI:
     """Create one local, authenticated V3 application.
 
@@ -70,7 +76,10 @@ def create_profile_evidence_application(
     check additionally prevents an Agent configured for one profile from
     accepting a different profile on the same workstation.  A functional
     profile may supply a small local-state validator for each authenticated
-    readiness probe.  It deliberately does not run a full cross-store scan.
+    readiness probe.  A functional profile may additionally supply a narrow
+    guidance-state validator.  It runs only after authentication and keeps a
+    direct general-guidance request from bypassing the active local snapshot
+    marker.  Neither path runs a full cross-store scan.
     """
 
     if _TOKEN_PATTERN.fullmatch(service_token) is None:
@@ -133,6 +142,116 @@ def create_profile_evidence_application(
         response.headers["X-Request-ID"] = payload.request_id
         return result
 
+    @app.post("/internal/rag/v3/guidance/query", response_model=GeneralGuidanceQueryResponseV3)
+    def guidance_query(
+        payload: GeneralGuidanceQueryRequestV3,
+        request: Request,
+        response: Response,
+    ) -> GeneralGuidanceQueryResponseV3:
+        """Return bounded general guidance without changing HS requirement retrieval.
+
+        The provider-owned registry maps a question to one allowed topic and
+        uses only its fixed search terms. It is not an open law-search API.
+        """
+
+        _authenticate_and_check_mode(request, token=service_token, mode=mode)
+        try:
+            active_source_ids = (
+                guidance_state_validator() if guidance_state_validator is not None else None
+            )
+            # Backward-compatible applications that provide only the existing
+            # runtime validator still receive a fail-closed preflight.  The
+            # legacy 3-law launcher supplies the narrower source validator.
+            if active_source_ids is None and runtime_state_validator is not None:
+                runtime_state_validator()
+            result = query_general_guidance_v3(
+                payload,
+                backend,
+                profile_mode=mode,
+                active_source_ids=active_source_ids,
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise ProfileEvidenceError(type(exc).__name__) from None
+        response.headers["X-Request-ID"] = payload.request_id
+        return result
+
+    return app
+
+
+def create_guidance_snapshot_application(
+    *,
+    mode: Literal["local-development", "functional-uat"],
+    service_token: str,
+    runtime_state_validator: Callable[[], object],
+    guidance_query_handler: Callable[
+        [GeneralGuidanceQueryRequestV3], GeneralGuidanceQueryResponseV3
+    ],
+) -> FastAPI:
+    """Serve only a verified local guidance snapshot.
+
+    This deliberately does not expose ``/retrieve``.  A guidance-source build
+    is not a substitute for the PostgreSQL/Qdrant/Neo4j Evidence store used by
+    document review.  Keeping this narrow endpoint separate prevents a raw
+    source receipt from being mistaken for a complete functional-UAT Data
+    runtime.
+    """
+
+    if _TOKEN_PATTERN.fullmatch(service_token) is None:
+        raise ProfileEvidenceError("service token has an invalid format")
+    app = FastAPI(
+        title=f"Customs Guidance Snapshot API ({mode})",
+        version="3.0",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
+    app.state.profile_mode = mode
+    app.state.automatic_completion_eligible = False
+
+    @app.middleware("http")
+    async def mode_response_header(request: Request, call_next):
+        response = await call_next(request)
+        response.headers[SERVICE_MODE_HEADER] = mode
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.exception_handler(ProfileEvidenceError)
+    async def profile_error(_request: Request, _error: ProfileEvidenceError) -> JSONResponse:
+        return JSONResponse({"detail": "local guidance snapshot is unavailable"}, status_code=503)
+
+    @app.get("/internal/rag/v3/health/live")
+    def live() -> dict[str, str]:
+        return {"status": "alive"}
+
+    @app.get("/internal/rag/v3/health/ready", response_model=EvidenceRuntimeReadinessV3)
+    def ready(request: Request) -> EvidenceRuntimeReadinessV3:
+        _authenticate_and_check_mode(request, token=service_token, mode=mode)
+        try:
+            runtime_state_validator()
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise ProfileEvidenceError(type(exc).__name__) from None
+        return EvidenceRuntimeReadinessV3(status="ready")
+
+    @app.post("/internal/rag/v3/guidance/query", response_model=GeneralGuidanceQueryResponseV3)
+    def guidance_query(
+        payload: GeneralGuidanceQueryRequestV3,
+        request: Request,
+        response: Response,
+    ) -> GeneralGuidanceQueryResponseV3:
+        _authenticate_and_check_mode(request, token=service_token, mode=mode)
+        try:
+            result = guidance_query_handler(payload)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise ProfileEvidenceError(type(exc).__name__) from None
+        response.headers["X-Request-ID"] = payload.request_id
+        return result
+
     return app
 
 
@@ -153,6 +272,7 @@ __all__ = [
     "LOCAL_DEVELOPMENT_MODE",
     "ProfileEvidenceError",
     "SERVICE_MODE_HEADER",
+    "create_guidance_snapshot_application",
     "create_dev_fixture_application",
     "create_profile_evidence_application",
 ]

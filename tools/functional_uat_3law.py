@@ -27,6 +27,7 @@ from src.functional_uat import (  # noqa: E402
     discard_active_functional_uat_manifest,
     prefetch_models,
     validate_functional_uat_state,
+    validate_functional_uat_guidance_state,
     verify_functional_uat_store,
 )
 from src.local_profiles import (  # noqa: E402
@@ -143,6 +144,7 @@ def _serve(host: str, port: int) -> int:
         service_token=read_service_token(FUNCTIONAL_UAT_PROFILE),
         backend=backend,
         runtime_state_validator=validate_functional_uat_state,
+        guidance_state_validator=validate_functional_uat_guidance_state,
     )
     print(
         "Data functional UAT ready "

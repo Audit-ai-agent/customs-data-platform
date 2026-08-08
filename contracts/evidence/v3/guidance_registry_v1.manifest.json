@@ -1,0 +1,360 @@
+{
+  "coverage_profiles": {
+    "functional-uat-3law": {
+      "source_ids": [
+        "law_001556",
+        "law_002421",
+        "law_006392"
+      ],
+      "status": "limited"
+    },
+    "functional-uat-kr-trade": {
+      "source_ids": [
+        "ccct_public_requirements",
+        "fta_portal_guidance",
+        "kcs_customs_guidance",
+        "kotra_trade_guidance",
+        "law_kr_trade_fta_scope"
+      ],
+      "status": "source_build_required"
+    }
+  },
+  "jurisdiction": "KR",
+  "registry_sha256": "6fed779ee0ec1cd2358972925fe1b2788838a197d4f33e62e461fcfed2bb7d6c",
+  "schema_version": "1.0",
+  "sources": [
+    {
+      "authority": "국가법령정보센터",
+      "availability": "available_in_legacy_3law",
+      "directions": [
+        "import",
+        "export"
+      ],
+      "jurisdiction": "KR",
+      "law_id": "001556",
+      "official_uri": "https://www.law.go.kr/법령/관세법",
+      "source_id": "law_001556",
+      "source_kind": "official_law",
+      "title": "관세법",
+      "topics": [
+        "customs_clearance",
+        "customs_declaration",
+        "customs_duty",
+        "hs_classification",
+        "origin_verification",
+        "trade_documents",
+        "import_requirements"
+      ]
+    },
+    {
+      "authority": "국가법령정보센터",
+      "availability": "available_in_legacy_3law",
+      "directions": [
+        "import",
+        "export"
+      ],
+      "jurisdiction": "KR",
+      "law_id": "002421",
+      "official_uri": "https://www.law.go.kr/법령/관세법시행령",
+      "source_id": "law_002421",
+      "source_kind": "official_law",
+      "title": "관세법 시행령",
+      "topics": [
+        "customs_clearance",
+        "customs_declaration",
+        "customs_duty",
+        "hs_classification",
+        "origin_verification",
+        "trade_documents",
+        "import_requirements"
+      ]
+    },
+    {
+      "authority": "국가법령정보센터",
+      "availability": "available_in_legacy_3law",
+      "directions": [
+        "import",
+        "export"
+      ],
+      "jurisdiction": "KR",
+      "law_id": "006392",
+      "official_uri": "https://www.law.go.kr/법령/관세법시행규칙",
+      "source_id": "law_006392",
+      "source_kind": "official_law",
+      "title": "관세법 시행규칙",
+      "topics": [
+        "customs_clearance",
+        "customs_declaration",
+        "customs_duty",
+        "hs_classification",
+        "origin_verification",
+        "trade_documents",
+        "import_requirements"
+      ]
+    },
+    {
+      "authority": "국가법령정보센터",
+      "availability": "requires_kr_trade_snapshot",
+      "directions": [
+        "import",
+        "export"
+      ],
+      "jurisdiction": "KR",
+      "official_uri": "https://www.law.go.kr/LSW/lsInfoP.do?ancYnChk=0&chrClsCd=010202&efYd=20260102&lsiSeq=276491&urlMode=lsInfoP",
+      "source_id": "law_kr_trade_fta_scope",
+      "source_kind": "official_law_catalog",
+      "title": "대외무역·FTA 특례 관련 법령",
+      "topics": [
+        "customs_clearance",
+        "customs_declaration",
+        "customs_duty",
+        "origin_verification",
+        "trade_documents",
+        "export_requirements",
+        "fta_procedure"
+      ]
+    },
+    {
+      "authority": "관세청",
+      "availability": "requires_kr_trade_snapshot",
+      "directions": [
+        "import",
+        "export"
+      ],
+      "jurisdiction": "KR",
+      "official_uri": "https://www.customs.go.kr/kcs/cm/cntnts/cntntsView.do?cntntsId=817&mi=2819",
+      "source_id": "kcs_customs_guidance",
+      "source_kind": "official_agency_guidance",
+      "title": "관세청 수출입 통관 공개 안내",
+      "topics": [
+        "customs_clearance",
+        "customs_declaration",
+        "hs_classification",
+        "origin_verification",
+        "trade_documents",
+        "import_requirements",
+        "export_requirements",
+        "transport_documents"
+      ]
+    },
+    {
+      "authority": "관세청 FTA 포털",
+      "availability": "requires_kr_trade_snapshot",
+      "directions": [
+        "import",
+        "export"
+      ],
+      "jurisdiction": "KR",
+      "official_uri": "https://www.customs.go.kr/ftaportalkor/cm/cntnts/cntntsView.do?cntntsId=1061&mi=3401",
+      "source_id": "fta_portal_guidance",
+      "source_kind": "official_agency_guidance",
+      "title": "FTA 포털 공개 안내",
+      "topics": [
+        "customs_declaration",
+        "origin_verification",
+        "trade_documents",
+        "fta_procedure"
+      ]
+    },
+    {
+      "authority": "관세청 및 관계기관",
+      "availability": "requires_kr_trade_snapshot",
+      "directions": [
+        "import",
+        "export"
+      ],
+      "jurisdiction": "KR",
+      "official_uri": "https://www.customs.go.kr/cvnci/cm/cntnts/cntntsView.do?cntntsId=5046&mi=3221",
+      "source_id": "ccct_public_requirements",
+      "source_kind": "official_requirement_reference",
+      "title": "세관장확인 수출입요건 공개 자료",
+      "topics": [
+        "customs_declaration",
+        "import_requirements",
+        "export_requirements",
+        "trade_documents"
+      ]
+    },
+    {
+      "authority": "대한무역투자진흥공사",
+      "availability": "requires_kr_trade_snapshot",
+      "directions": [
+        "import",
+        "export"
+      ],
+      "jurisdiction": "KR",
+      "official_uri": "https://dream.kotra.or.kr/dream/cms/com/index.do?MENU_ID=4070",
+      "source_id": "kotra_trade_guidance",
+      "source_kind": "official_public_guidance",
+      "title": "KOTRA 공개 무역 실무 안내",
+      "topics": [
+        "customs_clearance",
+        "customs_declaration",
+        "trade_documents",
+        "origin_verification",
+        "transport_documents",
+        "trade_terms"
+      ]
+    }
+  ],
+  "topics": [
+    {
+      "directions": [
+        "import",
+        "export"
+      ],
+      "source_ids": [
+        "law_001556",
+        "law_002421",
+        "law_006392",
+        "law_kr_trade_fta_scope",
+        "kcs_customs_guidance",
+        "kotra_trade_guidance"
+      ],
+      "title": "통관 절차의 기본 안내",
+      "topic": "customs_clearance"
+    },
+    {
+      "directions": [
+        "import",
+        "export"
+      ],
+      "source_ids": [
+        "law_001556",
+        "law_002421",
+        "law_006392",
+        "law_kr_trade_fta_scope",
+        "kcs_customs_guidance",
+        "fta_portal_guidance",
+        "ccct_public_requirements",
+        "kotra_trade_guidance"
+      ],
+      "title": "수출입 신고의 기본 안내",
+      "topic": "customs_declaration"
+    },
+    {
+      "directions": [
+        "import",
+        "export"
+      ],
+      "source_ids": [
+        "law_001556",
+        "law_002421",
+        "law_006392",
+        "law_kr_trade_fta_scope"
+      ],
+      "title": "관세와 과세가격의 기본 안내",
+      "topic": "customs_duty"
+    },
+    {
+      "directions": [
+        "import",
+        "export"
+      ],
+      "source_ids": [
+        "law_001556",
+        "law_002421",
+        "law_006392",
+        "kcs_customs_guidance"
+      ],
+      "title": "HS 품목분류의 기본 안내",
+      "topic": "hs_classification"
+    },
+    {
+      "directions": [
+        "import",
+        "export"
+      ],
+      "source_ids": [
+        "law_001556",
+        "law_002421",
+        "law_006392",
+        "law_kr_trade_fta_scope",
+        "kcs_customs_guidance",
+        "fta_portal_guidance",
+        "kotra_trade_guidance"
+      ],
+      "title": "원산지 확인의 기본 안내",
+      "topic": "origin_verification"
+    },
+    {
+      "directions": [
+        "import",
+        "export"
+      ],
+      "source_ids": [
+        "law_001556",
+        "law_002421",
+        "law_006392",
+        "law_kr_trade_fta_scope",
+        "kcs_customs_guidance",
+        "fta_portal_guidance",
+        "ccct_public_requirements",
+        "kotra_trade_guidance"
+      ],
+      "title": "무역 서류의 역할 안내",
+      "topic": "trade_documents"
+    },
+    {
+      "directions": [
+        "import"
+      ],
+      "source_ids": [
+        "law_001556",
+        "law_002421",
+        "law_006392",
+        "kcs_customs_guidance",
+        "ccct_public_requirements"
+      ],
+      "title": "수입 요건 확인의 기본 안내",
+      "topic": "import_requirements"
+    },
+    {
+      "directions": [
+        "export"
+      ],
+      "source_ids": [
+        "law_kr_trade_fta_scope",
+        "kcs_customs_guidance",
+        "ccct_public_requirements"
+      ],
+      "title": "수출 요건 확인의 기본 안내",
+      "topic": "export_requirements"
+    },
+    {
+      "directions": [
+        "import",
+        "export"
+      ],
+      "source_ids": [
+        "kcs_customs_guidance",
+        "kotra_trade_guidance"
+      ],
+      "title": "운송·항공운송 서류의 기본 안내",
+      "topic": "transport_documents"
+    },
+    {
+      "directions": [
+        "import",
+        "export"
+      ],
+      "source_ids": [
+        "law_kr_trade_fta_scope",
+        "fta_portal_guidance"
+      ],
+      "title": "FTA 절차의 기본 안내",
+      "topic": "fta_procedure"
+    },
+    {
+      "directions": [
+        "import",
+        "export"
+      ],
+      "source_ids": [
+        "kotra_trade_guidance"
+      ],
+      "title": "무역 거래조건의 기본 안내",
+      "topic": "trade_terms"
+    }
+  ]
+}

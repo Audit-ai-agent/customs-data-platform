@@ -98,6 +98,93 @@ Its Agent-facing mode is `functional-uat`. The bounded CCCT reference
 input is already versioned in this repository, so no data.go.kr key, bulk
 collection, or external refresh is part of team development or UAT.
 
+## Official trade-guidance snapshot boundary
+
+`functional-uat-kr-trade` is a separate ignored local profile for a broader
+Korean trade **guidance-only** snapshot. It has different local store ports,
+passwords, token, and state directory from `functional-uat-3law`; creating,
+building, or inspecting it never adopts, resets, or deletes the existing
+three-law UAT state.
+
+```powershell
+uv run --locked --no-sync --group dev python tools/functional_uat_kr_trade.py init
+uv run --locked --no-sync --group dev python tools/functional_uat_kr_trade.py status
+```
+
+This profile does **not** collect external material automatically. An approved
+operator first stages bytes already obtained from a registry-approved official
+source family below the ignored profile, then explicitly builds a bounded
+local projection. The input is UTF-8 source text plus the hash-bound metadata
+below; it does not contain credentials and it is never committed to Git.
+
+```powershell
+@'
+{
+  "schema_version": "functional-uat-kr-trade-source-build-input/v1",
+  "snapshot_id": "krtrade-20260805-example",
+  "as_of": "2026-08-05",
+  "source_receipts": [
+    {
+      "source_id": "kcs_customs_guidance",
+      "source_uri": "https://www.customs.go.kr/kcs/cm/cntnts/cntntsView.do?cntntsId=817&mi=2819",
+      "relative_path": "data/guidance-sources/20260805-example/official-source.txt",
+      "sha256": "<64-char-sha256>",
+      "collected_at": "2026-08-05T00:00:00+00:00",
+      "topics": ["customs_clearance"],
+      "directions": ["import"]
+    }
+  ],
+  "guidance_records": [
+    {
+      "source_id": "kcs_customs_guidance",
+      "topic": "customs_clearance",
+      "direction": "import",
+      "excerpt": "<the exact short excerpt present in official-source.txt>",
+      "locator": "<optional local document location>"
+    }
+  ]
+}
+'@ | Set-Content -Encoding utf8 `
+  ..\_local\profiles\functional-uat-kr-trade\data\guidance-sources\20260805-example\source-build.json
+
+uv run --locked --no-sync --group dev python tools/functional_uat_kr_trade.py build `
+  --source-manifest data/guidance-sources/20260805-example/source-build.json
+uv run --locked --no-sync --group dev python tools/functional_uat_kr_trade.py verify
+uv run --locked --no-sync --group dev python tools/functional_uat_kr_trade.py serve-guidance
+```
+
+`build` accepts only registry source IDs marked
+`requires_kr_trade_snapshot`, the **exact** corresponding registry
+`official_uri` as the operator's `source_uri` attestation, profile-relative
+local paths, matching SHA-256 values, declared registry topic/direction, and
+excerpts that occur in the hash-verified source text. It writes an immutable
+local manifest containing the source URI, collection time, `as_of`, hash,
+topic/direction coverage, and derived record IDs. `verify` repeats these
+checks before every readiness/query request. It does not download, parse
+arbitrary URLs, start Docker, reset a volume, or copy raw material into Git.
+
+`source_uri` records which registry-approved official page the operator used;
+the build never infers a URL from raw HTML. `as_of` is the selected **knowledge
+snapshot reference date**, not a certification that an agency guide had legal
+effect on that date. Consumers must present it as a snapshot reference date,
+retain the local collection timestamp for audit, and avoid presenting either
+value as a legal-effectivity determination.
+
+The guidance-query response additionally returns the checked-in registry hash
+as `registry_sha256`, and each result returns its stable
+`registry_source_id`. Those two fields let an Agent bind a derived record ID
+and its displayed URI back to the safe registry manifest without receiving raw
+source bytes or local receipt paths.
+
+`status=source_build_required` means no build exists. The old
+receipt-only command remains compatible and yields
+`registered_not_indexed`, which cannot serve. Only `status=ready` may start
+`serve-guidance`, which exposes `/internal/rag/v3/guidance/query` and nothing
+else. In particular, this is **not** a PostgreSQL/Qdrant/Neo4j Evidence
+runtime: document review `/retrieve`, model retrieval, and a complete broader
+Functional-UAT remain unavailable until a separately implemented Data-store
+build succeeds.
+
 ## Boundaries
 
 - Agent consumers use versioned Evidence HTTP schemas in `contracts/evidence/`;
@@ -107,6 +194,9 @@ collection, or external refresh is part of team development or UAT.
   and UAT results remain outside Git.
 - `dev-fixture` is the team default. `dev-store` is Data-only development.
   `functional-uat-3law` is the explicit real-data functional check.
+- `functional-uat-kr-trade` can serve only a hash-verified, explicitly built
+  local guidance snapshot. It is not a replacement for the three-store
+  Evidence profile or a claim of complete Korean trade-law coverage.
 - A pre-cleanup local volume is not adopted by the current migration runner.
   Reset/rebuild that profile instead of trying to reuse it.
 

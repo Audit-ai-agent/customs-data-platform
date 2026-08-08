@@ -26,6 +26,7 @@ from src.functional_uat_spec import (
     FUNCTIONAL_UAT_LAW_IDS,
     FUNCTIONAL_UAT_LAWS,
 )
+from src.guidance_registry import legacy_3law_source_ids
 from src.local_profiles import (
     FUNCTIONAL_UAT_PROFILE,
     LocalProfileError,
@@ -782,6 +783,65 @@ def validate_functional_uat_state(
     return manifest, digest
 
 
+def validate_functional_uat_guidance_state(
+    *,
+    local_root_override: Path | None = None,
+) -> frozenset[str]:
+    """Check the small legacy source scope before a guidance request.
+
+    The server performs the expensive raw-source/model/store validation once
+    at startup and before explicit readiness.  General guidance needs a
+    narrower per-request guard so a direct authenticated call cannot bypass a
+    missing or malformed active UAT marker.  It deliberately does not run the
+    three-store full comparison or rehash model files.
+    """
+
+    try:
+        profile = ensure_functional_uat_profile(root=local_root_override)
+    except LocalProfileError as exc:
+        raise FunctionalUatError("FUNCTIONAL_UAT_PROFILE_UNAVAILABLE") from exc
+    manifest, _digest = _load_active_manifest(profile)
+    source_hashes = manifest.get("source_hashes")
+    source_assets = manifest.get("source_assets")
+    expected_law_ids = {law_id for law_id, _name in FUNCTIONAL_UAT_LAWS}
+    if (
+        not isinstance(source_hashes, dict)
+        or set(source_hashes) != expected_law_ids
+        or any(
+            not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None
+            for value in source_hashes.values()
+        )
+        or not isinstance(source_assets, list)
+        or len(source_assets) != len(expected_law_ids)
+    ):
+        raise FunctionalUatError("FUNCTIONAL_UAT_GUIDANCE_STATE_INVALID")
+    seen_law_ids: set[str] = set()
+    for asset in source_assets:
+        if not isinstance(asset, dict):
+            raise FunctionalUatError("FUNCTIONAL_UAT_GUIDANCE_STATE_INVALID")
+        law_id = asset.get("law_id")
+        effective_file = asset.get("effective_file")
+        effective_sha256 = asset.get("effective_sha256")
+        if (
+            not isinstance(law_id, str)
+            or law_id not in expected_law_ids
+            or law_id in seen_law_ids
+            or not isinstance(effective_file, str)
+            or not isinstance(effective_sha256, str)
+            or source_hashes[law_id] != effective_sha256
+        ):
+            raise FunctionalUatError("FUNCTIONAL_UAT_GUIDANCE_STATE_INVALID")
+        _verify_source_file(
+            profile=profile,
+            relative=effective_file,
+            expected_sha256=effective_sha256,
+        )
+        seen_law_ids.add(law_id)
+    if seen_law_ids != expected_law_ids:
+        raise FunctionalUatError("FUNCTIONAL_UAT_GUIDANCE_STATE_INVALID")
+    return legacy_3law_source_ids()
+
+
 def _functional_source_projection(
     source_assets: object,
     *,
@@ -913,5 +973,6 @@ __all__ = [
     "prefetch_models",
     "sha256_bytes",
     "validate_functional_uat_state",
+    "validate_functional_uat_guidance_state",
     "verify_functional_uat_store",
 ]

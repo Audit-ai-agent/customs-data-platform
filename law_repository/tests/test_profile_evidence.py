@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
 import types
 from hashlib import sha256
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -21,15 +22,28 @@ from src.functional_uat import (
     _verify_source_file,
     discard_active_functional_uat_manifest,
     prefetch_models,
+    validate_functional_uat_guidance_state,
     verify_functional_uat_store,
 )
+from src.functional_uat_kr_trade import (
+    FunctionalUatKrTradeError,
+    build_kr_trade_guidance_snapshot,
+    inspect_kr_trade_snapshot,
+    query_kr_trade_guidance_v3,
+    register_kr_trade_source_receipts,
+    require_kr_trade_retrieval_snapshot,
+)
+from src.guidance_v3 import GeneralGuidanceQueryRequestV3
+from src.guidance_registry import REGISTRY_SHA256, legacy_3law_source_ids
 from src.local_profiles import (
     DEV_FIXTURE_PROFILE,
+    FUNCTIONAL_UAT_KR_TRADE_PROFILE,
     FUNCTIONAL_UAT_PROFILE,
     LocalProfileError,
     _apply_profile_values,
     _clear_law_api_credential,
     ensure_functional_uat_profile,
+    ensure_functional_uat_kr_trade_profile,
     ensure_service_token,
     load_config,
     read_service_token,
@@ -39,6 +53,7 @@ from src.profile_evidence import (
     FUNCTIONAL_UAT_MODE,
     LOCAL_DEVELOPMENT_MODE,
     SERVICE_MODE_HEADER,
+    create_guidance_snapshot_application,
     create_profile_evidence_application,
     create_dev_fixture_application,
 )
@@ -155,6 +170,251 @@ def test_functional_profile_config_is_local_and_never_uses_default_passwords(
     assert config["POSTGRES_PASSWORD"] != "change_me"
     assert config["NEO4J_PASSWORD"] != "change_me"
     assert (profile / "evidence-service-token").is_file()
+
+
+def test_kr_trade_profile_is_separate_from_legacy_three_law_profile(tmp_path: Path) -> None:
+    legacy = ensure_functional_uat_profile(root=tmp_path)
+    trade = ensure_functional_uat_kr_trade_profile(root=tmp_path)
+
+    assert legacy == tmp_path / "profiles" / FUNCTIONAL_UAT_PROFILE
+    assert trade == tmp_path / "profiles" / FUNCTIONAL_UAT_KR_TRADE_PROFILE
+    assert load_config(legacy / "config.env")["POSTGRES_PORT"] == "55452"
+    assert load_config(trade / "config.env")["POSTGRES_PORT"] == "55462"
+    assert (legacy / "evidence-service-token").is_file()
+    assert (trade / "evidence-service-token").is_file()
+
+
+def test_kr_trade_profile_fails_closed_until_explicit_source_build(tmp_path: Path) -> None:
+    status = inspect_kr_trade_snapshot(local_root_override=tmp_path)
+
+    assert status.profile == FUNCTIONAL_UAT_KR_TRADE_PROFILE
+    assert status.status == "source_build_required"
+    assert status.source_count == 0
+    assert status.as_of is None
+    with pytest.raises(FunctionalUatKrTradeError, match="KR_TRADE_SOURCE_BUILD_REQUIRED"):
+        require_kr_trade_retrieval_snapshot(local_root_override=tmp_path)
+
+
+def test_kr_trade_registered_source_receipt_is_hash_checked_but_not_treated_as_retrieval_ready(
+    tmp_path: Path,
+) -> None:
+    profile = ensure_functional_uat_kr_trade_profile(root=tmp_path)
+    raw = profile / "data" / "guidance-sources" / "test-run" / "kcs-guide.txt"
+    raw.parent.mkdir(parents=True)
+    raw.write_text("공개 안내 테스트 자료", encoding="utf-8")
+    receipt = {
+        "source_id": "kcs_customs_guidance",
+        "source_uri": "https://www.customs.go.kr/kcs/cm/cntnts/cntntsView.do?cntntsId=817&mi=2819",
+        "relative_path": "data/guidance-sources/test-run/kcs-guide.txt",
+        "sha256": sha256(raw.read_bytes()).hexdigest(),
+        "collected_at": datetime(2026, 8, 5, tzinfo=timezone.utc).isoformat(),
+    }
+    staged_manifest = raw.parent / "source-manifest.json"
+    staged_manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": "functional-uat-kr-trade-source-input/v1",
+                "as_of": "2026-08-05",
+                "source_receipts": [receipt],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    registered = register_kr_trade_source_receipts(
+        staged_manifest_relative="data/guidance-sources/test-run/source-manifest.json",
+        local_root_override=tmp_path,
+    )
+    assert registered.status == "registered_not_indexed"
+    status = inspect_kr_trade_snapshot(local_root_override=tmp_path)
+    assert status.status == "registered_not_indexed"
+    assert status.source_count == 1
+    assert status.as_of == date(2026, 8, 5)
+    with pytest.raises(FunctionalUatKrTradeError, match="KR_TRADE_RETRIEVAL_PROJECTION_REQUIRED"):
+        require_kr_trade_retrieval_snapshot(local_root_override=tmp_path)
+
+    raw.write_text("변조", encoding="utf-8")
+    with pytest.raises(FunctionalUatKrTradeError, match="KR_TRADE_SOURCE_HASH_MISMATCH"):
+        inspect_kr_trade_snapshot(local_root_override=tmp_path)
+
+
+def _kr_trade_build_manifest(profile: Path) -> str:
+    """Stage one small official-source fixture exactly as an operator would."""
+
+    raw = profile / "data" / "guidance-sources" / "test-build" / "kcs-guide.txt"
+    raw.parent.mkdir(parents=True)
+    excerpt = "수입 통관 신고는 거래 서류와 물품 정보를 확인하여 진행합니다."
+    raw.write_text(f"관세청 공개 안내\n{excerpt}\n추가 안내", encoding="utf-8")
+    receipt = {
+        "source_id": "kcs_customs_guidance",
+        "source_uri": "https://www.customs.go.kr/kcs/cm/cntnts/cntntsView.do?cntntsId=817&mi=2819",
+        "relative_path": "data/guidance-sources/test-build/kcs-guide.txt",
+        "sha256": sha256(raw.read_bytes()).hexdigest(),
+        "collected_at": datetime(2026, 8, 5, tzinfo=timezone.utc).isoformat(),
+        "topics": ["customs_clearance"],
+        "directions": ["import"],
+    }
+    manifest = {
+        "schema_version": "functional-uat-kr-trade-source-build-input/v1",
+        "snapshot_id": "krtrade-20260805-test",
+        "as_of": "2026-08-05",
+        "source_receipts": [receipt],
+        "guidance_records": [
+            {
+                "source_id": "kcs_customs_guidance",
+                "topic": "customs_clearance",
+                "direction": "import",
+                "excerpt": excerpt,
+                "locator": "통관 절차 안내",
+            }
+        ],
+    }
+    staged = raw.parent / "source-build.json"
+    staged.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    return "data/guidance-sources/test-build/source-build.json"
+
+
+def test_kr_trade_explicit_build_creates_hash_verified_query_snapshot(tmp_path: Path) -> None:
+    profile = ensure_functional_uat_kr_trade_profile(root=tmp_path)
+    staged_relative = _kr_trade_build_manifest(profile)
+
+    status = build_kr_trade_guidance_snapshot(
+        staged_manifest_relative=staged_relative,
+        local_root_override=tmp_path,
+    )
+
+    assert status.status == "ready"
+    assert status.snapshot_id == "krtrade-20260805-test"
+    assert status.as_of == date(2026, 8, 5)
+    assert status.source_count == 1
+    assert status.record_count == 1
+    assert status.coverage_count == 1
+    snapshot = require_kr_trade_retrieval_snapshot(local_root_override=tmp_path)
+    assert snapshot.snapshot_id == status.snapshot_id
+    assert snapshot.records[0].source_id == "kcs_customs_guidance"
+    assert (
+        profile / "state" / "guidance-snapshots" / "krtrade-20260805-test" / "manifest.json"
+    ).is_file()
+
+    raw = profile / "data" / "guidance-sources" / "test-build" / "kcs-guide.txt"
+    raw.write_text("변조됨", encoding="utf-8")
+    with pytest.raises(FunctionalUatKrTradeError, match="KR_TRADE_SOURCE_HASH_MISMATCH"):
+        require_kr_trade_retrieval_snapshot(local_root_override=tmp_path)
+
+
+def test_kr_trade_guidance_only_endpoint_requires_built_snapshot_and_preserves_direction(
+    tmp_path: Path,
+) -> None:
+    profile = ensure_functional_uat_kr_trade_profile(root=tmp_path)
+    build_kr_trade_guidance_snapshot(
+        staged_manifest_relative=_kr_trade_build_manifest(profile),
+        local_root_override=tmp_path,
+    )
+    token = read_service_token(FUNCTIONAL_UAT_KR_TRADE_PROFILE, root=tmp_path)
+    app = create_guidance_snapshot_application(
+        mode=FUNCTIONAL_UAT_MODE,
+        service_token=token,
+        runtime_state_validator=lambda: require_kr_trade_retrieval_snapshot(
+            local_root_override=tmp_path
+        ),
+        guidance_query_handler=lambda request: query_kr_trade_guidance_v3(
+            request, local_root_override=tmp_path
+        ),
+    )
+    client = TestClient(app)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        SERVICE_MODE_HEADER: FUNCTIONAL_UAT_MODE,
+    }
+    request = GeneralGuidanceQueryRequestV3.model_validate(
+        {
+            "schema_version": "3.0",
+            "request_id": "kr-trade-guidance-1",
+            "query": "분류와 무관한 표현",
+            "topic_hint": "customs_clearance",
+            "trade_direction": "both",
+            "as_of": "2026-08-05",
+            "top_k": 3,
+        }
+    )
+
+    response = client.post(
+        "/internal/rag/v3/guidance/query", json=request.model_dump(mode="json"), headers=headers
+    )
+
+    assert response.status_code == 200
+    assert response.headers[SERVICE_MODE_HEADER] == FUNCTIONAL_UAT_MODE
+    body = response.json()
+    assert body["status"] == "partial"
+    assert body["coverage"] == "partial"
+    assert body["registry_sha256"] == REGISTRY_SHA256
+    assert body["topic"] == "customs_clearance"
+    assert body["results"][0]["source_kind"] == "official_agency_guidance"
+    assert body["results"][0]["registry_source_id"] == "kcs_customs_guidance"
+    assert body["results"][0]["direction"] == "import"
+    assert (
+        body["results"][0]["excerpt"]
+        == "수입 통관 신고는 거래 서류와 물품 정보를 확인하여 진행합니다."
+    )
+    assert body["errors"][0]["code"] == "GUIDANCE_SNAPSHOT_PARTIAL_COVERAGE"
+    assert (
+        client.post("/internal/rag/v3/retrieve", json=_request(), headers=headers).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            "/internal/rag/v3/guidance/query", json=request.model_dump(mode="json")
+        ).status_code
+        == 401
+    )
+    raw = profile / "data" / "guidance-sources" / "test-build" / "kcs-guide.txt"
+    raw.write_text("변조됨", encoding="utf-8")
+    blocked = client.get("/internal/rag/v3/health/ready", headers=headers)
+    assert blocked.status_code == 503
+    assert blocked.json() == {"detail": "local guidance snapshot is unavailable"}
+
+
+def test_kr_trade_build_rejects_untraceable_excerpt_and_legacy_source(tmp_path: Path) -> None:
+    profile = ensure_functional_uat_kr_trade_profile(root=tmp_path)
+    staged_relative = _kr_trade_build_manifest(profile)
+    staged = profile / staged_relative
+    payload = json.loads(staged.read_text(encoding="utf-8"))
+    payload["guidance_records"][0]["excerpt"] = "원문에 존재하지 않는 충분히 긴 주장 문장입니다."
+    staged.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    with pytest.raises(FunctionalUatKrTradeError, match="KR_TRADE_EXCERPT_NOT_IN_SOURCE"):
+        build_kr_trade_guidance_snapshot(
+            staged_manifest_relative=staged_relative,
+            local_root_override=tmp_path,
+        )
+
+    payload["guidance_records"][0]["excerpt"] = (
+        "수입 통관 신고는 거래 서류와 물품 정보를 확인하여 진행합니다."
+    )
+    payload["source_receipts"][0]["source_id"] = "law_001556"
+    payload["guidance_records"][0]["source_id"] = "law_001556"
+    staged.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    with pytest.raises(FunctionalUatKrTradeError, match="KR_TRADE_SNAPSHOT_INVALID"):
+        build_kr_trade_guidance_snapshot(
+            staged_manifest_relative=staged_relative,
+            local_root_override=tmp_path,
+        )
+
+
+def test_kr_trade_build_requires_exact_registry_source_uri(tmp_path: Path) -> None:
+    profile = ensure_functional_uat_kr_trade_profile(root=tmp_path)
+    staged_relative = _kr_trade_build_manifest(profile)
+    staged = profile / staged_relative
+    payload = json.loads(staged.read_text(encoding="utf-8"))
+    payload["source_receipts"][0]["source_uri"] = "https://example.invalid/not-the-registry-source"
+    staged.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    with pytest.raises(FunctionalUatKrTradeError, match="KR_TRADE_SNAPSHOT_INVALID"):
+        build_kr_trade_guidance_snapshot(
+            staged_manifest_relative=staged_relative,
+            local_root_override=tmp_path,
+        )
 
 
 def test_functional_credential_preflight_does_not_export_the_key(
@@ -332,6 +592,88 @@ def test_functional_ready_revalidates_local_state_after_authentication_without_d
     assert response.json() == {"detail": "local Evidence profile is unavailable"}
     assert "secret" not in response.text
     assert calls == ["state"]
+
+
+def test_functional_guidance_revalidates_narrow_source_scope_after_authentication() -> None:
+    token = "a" * 32
+    calls: list[str] = []
+
+    def guidance_state_validator() -> frozenset[str]:
+        calls.append("guidance")
+        raise RuntimeError("postgresql://trade:secret@127.0.0.1:55452/trade_doc")
+
+    from src.conformance import TestOnlyConformanceEvidenceBackend
+
+    app = create_profile_evidence_application(
+        mode=FUNCTIONAL_UAT_MODE,
+        service_token=token,
+        backend=TestOnlyConformanceEvidenceBackend(effective_date=FUNCTIONAL_UAT_AS_OF),
+        guidance_state_validator=guidance_state_validator,
+    )
+    client = TestClient(app)
+    payload = {
+        "schema_version": "3.0",
+        "request_id": "guidance-state-test",
+        "query": "수입 통관 절차를 알려 주세요.",
+        "trade_direction": "import",
+        "as_of": "2026-08-05",
+        "top_k": 1,
+    }
+
+    unauthenticated = client.post("/internal/rag/v3/guidance/query", json=payload)
+    assert unauthenticated.status_code == 401
+    assert calls == []
+    response = client.post(
+        "/internal/rag/v3/guidance/query",
+        json=payload,
+        headers={
+            "Authorization": f"Bearer {token}",
+            SERVICE_MODE_HEADER: FUNCTIONAL_UAT_MODE,
+        },
+    )
+    assert response.status_code == 503
+    assert response.json() == {"detail": "local Evidence profile is unavailable"}
+    assert "secret" not in response.text
+    assert calls == ["guidance"]
+
+
+def test_legacy_guidance_state_validator_checks_only_active_source_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    assets: list[dict[str, str]] = []
+    source_hashes: dict[str, str] = {}
+    for law_id, _name in FUNCTIONAL_UAT_LAWS:
+        relative = f"data/laws/guidance/{law_id}.json"
+        raw = tmp_path / relative
+        raw.parent.mkdir(parents=True, exist_ok=True)
+        raw.write_text(f'{{"law_id":"{law_id}"}}', encoding="utf-8")
+        digest = sha256(raw.read_bytes()).hexdigest()
+        source_hashes[law_id] = digest
+        assets.append(
+            {
+                "law_id": law_id,
+                "current_file": relative,
+                "effective_file": relative,
+                "effective_sha256": digest,
+            }
+        )
+    manifest = {
+        "source_hashes": source_hashes,
+        "source_assets": assets,
+    }
+    monkeypatch.setattr(
+        "src.functional_uat.ensure_functional_uat_profile", lambda **_kwargs: tmp_path
+    )
+    monkeypatch.setattr(
+        "src.functional_uat._load_active_manifest",
+        lambda _profile: (manifest, "digest"),
+    )
+
+    assert validate_functional_uat_guidance_state() == legacy_3law_source_ids()
+    (tmp_path / assets[0]["effective_file"]).write_text("drift", encoding="utf-8")
+    with pytest.raises(FunctionalUatError, match="SOURCE_HASH_MISMATCH"):
+        validate_functional_uat_guidance_state()
 
 
 def test_public_functional_uat_manifest_excludes_private_source_and_image_metadata() -> None:
