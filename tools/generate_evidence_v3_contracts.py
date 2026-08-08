@@ -17,6 +17,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "law_repository"))
 
 from src.evidence_v3 import RetrieveRequestV3, RetrieveResponseV3  # noqa: E402
+from src.guidance_v3 import (  # noqa: E402
+    GeneralGuidanceQueryRequestV3,
+    GeneralGuidanceQueryResponseV3,
+)
+from src.guidance_registry import registry_manifest  # noqa: E402
 from src.profile_wire import EvidenceRuntimeReadinessV3  # noqa: E402
 
 
@@ -30,6 +35,14 @@ def _write(path: Path, schema: dict, *, schema_id: str, title: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
+def _write_manifest(path: Path, manifest: dict[str, object]) -> None:
+    path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
         newline="\n",
     )
@@ -55,6 +68,16 @@ def main() -> int:
         ),
         title="Evidence Runtime Readiness v3",
     )
+    _write(
+        output / "guidance_query_v3.schema.json",
+        TypeAdapter(GeneralGuidanceQueryRequestV3 | GeneralGuidanceQueryResponseV3).json_schema(),
+        schema_id=(
+            "https://customs-data-platform.invalid/contracts/evidence/v3/"
+            "guidance_query_v3.schema.json"
+        ),
+        title="Customs General Guidance Query v3",
+    )
+    _write_manifest(output / "guidance_registry_v1.manifest.json", registry_manifest())
     return 0
 
 

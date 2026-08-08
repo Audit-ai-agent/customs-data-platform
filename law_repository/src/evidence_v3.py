@@ -46,6 +46,8 @@ class RetrieveRequestV3(ContractModel):
         default_factory=list,
         json_schema_extra={"default": [], "uniqueItems": True},
     )
+    # Keep the historical V3 default byte-for-byte compatible.  Data derives
+    # the effective import/export document intent from ``trade_type``.
     query_intent: str = Field(default="required_import_documents", min_length=1, max_length=2000)
 
     @model_validator(mode="after")

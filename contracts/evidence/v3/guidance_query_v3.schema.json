@@ -1,0 +1,424 @@
+{
+  "$defs": {
+    "EvidenceError": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        },
+        "retryable": {
+          "title": "Retryable",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "title": "EvidenceError",
+      "type": "object"
+    },
+    "GeneralGuidanceQueryRequestV3": {
+      "additionalProperties": false,
+      "properties": {
+        "as_of": {
+          "format": "date",
+          "title": "As Of",
+          "type": "string"
+        },
+        "query": {
+          "maxLength": 1200,
+          "minLength": 1,
+          "title": "Query",
+          "type": "string"
+        },
+        "request_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Request Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "3.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "top_k": {
+          "default": 3,
+          "maximum": 3,
+          "minimum": 1,
+          "title": "Top K",
+          "type": "integer"
+        },
+        "topic_hint": {
+          "anyOf": [
+            {
+              "enum": [
+                "customs_clearance",
+                "customs_declaration",
+                "customs_duty",
+                "hs_classification",
+                "origin_verification",
+                "trade_documents",
+                "import_requirements",
+                "export_requirements",
+                "transport_documents",
+                "fta_procedure",
+                "trade_terms"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Topic Hint"
+        },
+        "trade_direction": {
+          "enum": [
+            "import",
+            "export",
+            "both"
+          ],
+          "title": "Trade Direction",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "request_id",
+        "query",
+        "trade_direction",
+        "as_of"
+      ],
+      "title": "GeneralGuidanceQueryRequestV3",
+      "type": "object"
+    },
+    "GeneralGuidanceQueryResponseV3": {
+      "additionalProperties": false,
+      "properties": {
+        "as_of": {
+          "format": "date",
+          "title": "As Of",
+          "type": "string"
+        },
+        "coverage": {
+          "enum": [
+            "covered",
+            "no_coverage",
+            "partial",
+            "unavailable"
+          ],
+          "title": "Coverage",
+          "type": "string"
+        },
+        "errors": {
+          "items": {
+            "$ref": "#/$defs/EvidenceError"
+          },
+          "maxItems": 4,
+          "title": "Errors",
+          "type": "array"
+        },
+        "registry_sha256": {
+          "default": "6fed779ee0ec1cd2358972925fe1b2788838a197d4f33e62e461fcfed2bb7d6c",
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Registry Sha256",
+          "type": "string"
+        },
+        "registry_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Registry Version",
+          "type": "string"
+        },
+        "request_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Request Id",
+          "type": "string"
+        },
+        "results": {
+          "items": {
+            "$ref": "#/$defs/GuidanceSourceV3"
+          },
+          "maxItems": 3,
+          "title": "Results",
+          "type": "array"
+        },
+        "schema_version": {
+          "const": "3.0",
+          "default": "3.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "snapshot_id": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Snapshot Id"
+        },
+        "status": {
+          "enum": [
+            "covered",
+            "no_coverage",
+            "partial",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "topic": {
+          "anyOf": [
+            {
+              "enum": [
+                "customs_clearance",
+                "customs_declaration",
+                "customs_duty",
+                "hs_classification",
+                "origin_verification",
+                "trade_documents",
+                "import_requirements",
+                "export_requirements",
+                "transport_documents",
+                "fta_procedure",
+                "trade_terms"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Topic"
+        }
+      },
+      "required": [
+        "request_id",
+        "status",
+        "as_of",
+        "coverage"
+      ],
+      "title": "GeneralGuidanceQueryResponseV3",
+      "type": "object"
+    },
+    "GuidanceSourceV3": {
+      "additionalProperties": false,
+      "properties": {
+        "article_no": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Article No"
+        },
+        "direction": {
+          "enum": [
+            "import",
+            "export",
+            "both"
+          ],
+          "title": "Direction",
+          "type": "string"
+        },
+        "excerpt": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Excerpt",
+          "type": "string"
+        },
+        "law_id": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Law Id"
+        },
+        "law_name": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Law Name"
+        },
+        "registry_source_id": {
+          "pattern": "^[a-z][a-z0-9_]{2,63}$",
+          "title": "Registry Source Id",
+          "type": "string"
+        },
+        "retrieval_methods": {
+          "items": {
+            "enum": [
+              "registry",
+              "dense",
+              "bm25",
+              "graph"
+            ],
+            "type": "string"
+          },
+          "maxItems": 4,
+          "minItems": 1,
+          "title": "Retrieval Methods",
+          "type": "array"
+        },
+        "score": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Score"
+        },
+        "source_id": {
+          "pattern": "^guide_[a-f0-9]{64}$",
+          "title": "Source Id",
+          "type": "string"
+        },
+        "source_kind": {
+          "enum": [
+            "official_law",
+            "official_law_catalog",
+            "official_agency_guidance",
+            "official_requirement_reference",
+            "official_public_guidance",
+            "development_fixture"
+          ],
+          "title": "Source Kind",
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "topic": {
+          "enum": [
+            "customs_clearance",
+            "customs_declaration",
+            "customs_duty",
+            "hs_classification",
+            "origin_verification",
+            "trade_documents",
+            "import_requirements",
+            "export_requirements",
+            "transport_documents",
+            "fta_procedure",
+            "trade_terms"
+          ],
+          "title": "Topic",
+          "type": "string"
+        },
+        "uri": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Uri",
+          "type": "string"
+        },
+        "valid_from": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Valid From"
+        },
+        "valid_to": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Valid To"
+        },
+        "version_hash": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Version Hash",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "registry_source_id",
+        "source_kind",
+        "title",
+        "uri",
+        "topic",
+        "direction",
+        "excerpt",
+        "version_hash",
+        "retrieval_methods"
+      ],
+      "title": "GuidanceSourceV3",
+      "type": "object"
+    }
+  },
+  "$id": "https://customs-data-platform.invalid/contracts/evidence/v3/guidance_query_v3.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/GeneralGuidanceQueryRequestV3"
+    },
+    {
+      "$ref": "#/$defs/GeneralGuidanceQueryResponseV3"
+    }
+  ],
+  "title": "Customs General Guidance Query v3"
+}
