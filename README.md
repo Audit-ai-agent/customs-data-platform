@@ -185,6 +185,54 @@ runtime: document review `/retrieve`, model retrieval, and a complete broader
 Functional-UAT remain unavailable until a separately implemented Data-store
 build succeeds.
 
+### V2 page-level Korean trade coverage
+
+V2 is additive: V1/r3 and the `functional-uat-3law` profile are not migrated,
+rewritten, or deleted. Its checked-in registry is
+`law_repository/src/guidance_registry_v2.json`; the Git-safe consumer copy is
+`contracts/evidence/v3/guidance_registry_v2.manifest.json`. V2 declares 11
+topics, 18 closed sub-scopes, and 28 applicable `(topic, scope, direction)`
+bundles. A declaration is not coverage: a bundle is `covered` only when every
+listed page-level official source has a hash-verified receipt and at least one
+matching excerpt record.
+
+```powershell
+# This never fetches: an operator explicitly stages exact allowlisted sources
+# under the ignored profile first.
+uv run --locked --no-sync --group dev python tools/functional_uat_kr_trade.py build-v2 `
+  --source-manifest data/guidance-sources/<staging>/source-build-v2.json
+uv run --locked --no-sync --group dev python tools/functional_uat_kr_trade.py verify-v2
+uv run --locked --no-sync --group dev python tools/functional_uat_kr_trade.py serve-guidance-v2 `
+  --host 127.0.0.1 --port 18094
+```
+
+V2 build input binds one `topic` plus `scope` on every source receipt and
+guidance record. It rejects an unregistered URL, a changed byte hash, a record
+outside its page's direction/scope, and an excerpt absent from the verified
+source text. An official law is represented by its exact current-status page
+and its exact body page: the status page must prove the effective date at
+`as_of`; the body page inherits that date only through the explicit registry
+link. Thus the service does not pretend that a title/status page is an article
+excerpt. A PDF source retains the raw-PDF hash and also requires a separately
+hash-bound local text projection for its quoted excerpt; neither raw file nor
+projection is committed to Git.
+
+The V2 server exposes only loopback
+`POST /internal/rag/v3/guidance/query` at port `18094`, using the local token
+in `_local/profiles/functional-uat-kr-trade/evidence-service-token` and
+`X-Customs-Service-Mode: functional-uat`. Its authenticated readiness endpoint
+is `GET /internal/rag/v3/health/ready`. It fails closed with `503` when the V2
+active pointer, source bytes, hashes, statute-effectivity proof, or derived
+coverage no longer validates. Consumers must additionally compare every query
+response's `registry_version`, `registry_sha256`, `snapshot_id`, and `as_of`
+to their expected V2 contract before using any citation.
+
+`scope_hint` and response `guidance_scope` are V3 additive fields. V2 accepts
+one preselected scope only; it never turns arbitrary question text into an
+open web or store search. `covered` means the defined source bundle was
+present, not that all legal exceptions, foreign-country rules, a final HS,
+tax, approval, or real-time agency status has been determined.
+
 ## Boundaries
 
 - Agent consumers use versioned Evidence HTTP schemas in `contracts/evidence/`;

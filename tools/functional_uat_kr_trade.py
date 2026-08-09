@@ -26,6 +26,12 @@ from src.functional_uat_kr_trade import (  # noqa: E402
     register_kr_trade_source_receipts,
     require_kr_trade_retrieval_snapshot,
 )
+from src.functional_uat_kr_trade_v2 import (  # noqa: E402
+    build_kr_trade_v2_guidance_snapshot,
+    inspect_kr_trade_v2_snapshot,
+    query_kr_trade_v2_guidance_v3,
+    require_kr_trade_v2_retrieval_snapshot,
+)
 from src.local_profiles import (  # noqa: E402
     FUNCTIONAL_UAT_KR_TRADE_PROFILE,
     ensure_functional_uat_kr_trade_profile,
@@ -71,13 +77,32 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="relative v1 build manifest below data/guidance-sources in the ignored profile",
     )
+    build_v2 = subparsers.add_parser(
+        "build-v2",
+        help="hash-check page-level V2 sources and create an immutable V2 guidance projection",
+    )
+    build_v2.add_argument(
+        "--source-manifest",
+        required=True,
+        help="relative V2 build manifest below data/guidance-sources in the ignored profile",
+    )
     subparsers.add_parser("verify", help="revalidate active source hashes and local projection")
+    subparsers.add_parser("status-v2", help="show safe V2 snapshot readiness metadata")
+    subparsers.add_parser(
+        "verify-v2", help="revalidate active V2 page-level source hashes and projection"
+    )
     serve = subparsers.add_parser(
         "serve-guidance",
         help="serve only /guidance/query from a verified snapshot; it is not an Evidence store",
     )
     serve.add_argument("--host", choices=LITERAL_LOOPBACK_HOSTS, default="127.0.0.1")
     serve.add_argument("--port", type=_port, default=18093)
+    serve_v2 = subparsers.add_parser(
+        "serve-guidance-v2",
+        help="serve only /guidance/query from the verified V2 page-level snapshot",
+    )
+    serve_v2.add_argument("--host", choices=LITERAL_LOOPBACK_HOSTS, default="127.0.0.1")
+    serve_v2.add_argument("--port", type=_port, default=18094)
     return parser
 
 
@@ -91,6 +116,34 @@ def _serve_guidance(host: str, port: int) -> int:
     )
     print(
         "functional-uat-kr-trade guidance snapshot ready "
+        f"at http://{host}:{port} (mode=functional-uat, guidance-only, human-review-only)"
+    )
+    import uvicorn
+
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level="warning",
+        access_log=False,
+        proxy_headers=False,
+        server_header=False,
+        date_header=False,
+        workers=1,
+    )
+    return 0
+
+
+def _serve_guidance_v2(host: str, port: int) -> int:
+    require_kr_trade_v2_retrieval_snapshot()
+    app = create_guidance_snapshot_application(
+        mode=FUNCTIONAL_UAT_MODE,
+        service_token=read_service_token(FUNCTIONAL_UAT_KR_TRADE_PROFILE),
+        runtime_state_validator=require_kr_trade_v2_retrieval_snapshot,
+        guidance_query_handler=query_kr_trade_v2_guidance_v3,
+    )
+    print(
+        "functional-uat-kr-trade V2 guidance snapshot ready "
         f"at http://{host}:{port} (mode=functional-uat, guidance-only, human-review-only)"
     )
     import uvicorn
@@ -139,6 +192,17 @@ def main(argv: list[str] | None = None) -> int:
                 f"coverage={status.coverage_count}; guidance-only snapshot verified"
             )
             return 0
+        if args.command == "build-v2":
+            v2_status = build_kr_trade_v2_guidance_snapshot(
+                staged_manifest_relative=args.source_manifest,
+            )
+            print(
+                f"profile={FUNCTIONAL_UAT_KR_TRADE_PROFILE} registry=2.0 status={v2_status.status} "
+                f"sources={v2_status.source_count} records={v2_status.record_count} "
+                f"covered_bundles={v2_status.covered_bundle_count}/{v2_status.coverage_count}; "
+                "V2 guidance-only snapshot verified"
+            )
+            return 0
         if args.command == "verify":
             status = inspect_kr_trade_snapshot()
             if status.status != "ready":
@@ -151,6 +215,28 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "serve-guidance":
             return _serve_guidance(args.host, args.port)
+        if args.command == "verify-v2":
+            v2_status = inspect_kr_trade_v2_snapshot()
+            if v2_status.status != "ready":
+                raise FunctionalUatKrTradeError("KR_TRADE_V2_RETRIEVAL_PROJECTION_REQUIRED")
+            print(
+                f"profile={FUNCTIONAL_UAT_KR_TRADE_PROFILE} registry=2.0 status=ready "
+                f"sources={v2_status.source_count} records={v2_status.record_count} "
+                f"covered_bundles={v2_status.covered_bundle_count}/{v2_status.coverage_count}; "
+                "local source hashes verified"
+            )
+            return 0
+        if args.command == "serve-guidance-v2":
+            return _serve_guidance_v2(args.host, args.port)
+        if args.command == "status-v2":
+            v2_status = inspect_kr_trade_v2_snapshot()
+            print(
+                f"profile={FUNCTIONAL_UAT_KR_TRADE_PROFILE} registry=2.0 "
+                f"status={v2_status.status} sources={v2_status.source_count} records={v2_status.record_count} "
+                f"covered_bundles={v2_status.covered_bundle_count}/{v2_status.coverage_count} "
+                f"registry={v2_status.registry_sha256[:12]}"
+            )
+            return 0
         status = inspect_kr_trade_snapshot()
         print(
             f"profile={FUNCTIONAL_UAT_KR_TRADE_PROFILE} "

@@ -22,6 +22,7 @@ from src.guidance_v3 import (  # noqa: E402
     GeneralGuidanceQueryResponseV3,
 )
 from src.guidance_registry import registry_manifest  # noqa: E402
+from src.guidance_registry_v2 import registry_manifest_v2  # noqa: E402
 from src.profile_wire import EvidenceRuntimeReadinessV3  # noqa: E402
 
 
@@ -78,6 +79,7 @@ def main() -> int:
         title="Customs General Guidance Query v3",
     )
     _write_manifest(output / "guidance_registry_v1.manifest.json", registry_manifest())
+    _write_manifest(output / "guidance_registry_v2.manifest.json", registry_manifest_v2())
     return 0
 
 

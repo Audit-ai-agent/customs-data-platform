@@ -23,6 +23,9 @@ V3_GUIDANCE_SCHEMA_PATH = ROOT / "contracts" / "evidence" / "v3" / "guidance_que
 V3_GUIDANCE_REGISTRY_MANIFEST_PATH = (
     ROOT / "contracts" / "evidence" / "v3" / "guidance_registry_v1.manifest.json"
 )
+V3_GUIDANCE_REGISTRY_V2_MANIFEST_PATH = (
+    ROOT / "contracts" / "evidence" / "v3" / "guidance_registry_v2.manifest.json"
+)
 
 sys.path.insert(0, str(LAW_REPOSITORY))
 
@@ -32,6 +35,7 @@ from src.guidance_v3 import (  # noqa: E402
     GeneralGuidanceQueryResponseV3,
 )
 from src.guidance_registry import registry_manifest  # noqa: E402
+from src.guidance_registry_v2 import registry_manifest_v2  # noqa: E402
 from src.profile_wire import EvidenceRuntimeReadinessV3  # noqa: E402
 
 
@@ -84,6 +88,18 @@ def check_contract_drift() -> list[str]:
                 path=V3_GUIDANCE_REGISTRY_MANIFEST_PATH,
             )
         )
+    manifest_v2_expected = json.loads(
+        V3_GUIDANCE_REGISTRY_V2_MANIFEST_PATH.read_text(encoding="utf-8")
+    )
+    manifest_v2_actual = registry_manifest_v2()
+    if manifest_v2_expected != manifest_v2_actual:
+        errors.append(
+            _diff(
+                expected=manifest_v2_expected,
+                actual=manifest_v2_actual,
+                path=V3_GUIDANCE_REGISTRY_V2_MANIFEST_PATH,
+            )
+        )
     return errors
 
 
@@ -98,6 +114,7 @@ def main() -> int:
         f"{V3_READINESS_SCHEMA_PATH.relative_to(ROOT)}, "
         f"{V3_GUIDANCE_SCHEMA_PATH.relative_to(ROOT)}, "
         f"{V3_GUIDANCE_REGISTRY_MANIFEST_PATH.relative_to(ROOT)}"
+        f", {V3_GUIDANCE_REGISTRY_V2_MANIFEST_PATH.relative_to(ROOT)}"
     )
     return 0
 

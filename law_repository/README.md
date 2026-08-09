@@ -109,3 +109,36 @@ This endpoint is not a Data-store build: it deliberately does not expose
 document-review `/retrieve`, PostgreSQL/Qdrant/Neo4j retrieval, or a claim of
 complete Korean trade-law coverage. Those require a separate verified
 three-store build; this source-build path does not reset, start, or reuse one.
+
+### V2 page-level registry and runtime
+
+V2 is a separate additive snapshot. It preserves the V1/r3 registry and all
+three-law state, and declares 11 topics, 18 closed scopes, and 28 applicable
+direction bundles in `src/guidance_registry_v2.json`. The safe consumer copy
+is `../contracts/evidence/v3/guidance_registry_v2.manifest.json`; it contains
+official URLs and scope metadata only, never raw source text, local paths, or
+source hashes.
+
+```powershell
+uv run --locked --no-sync --group dev python tools/functional_uat_kr_trade.py build-v2 `
+  --source-manifest data/guidance-sources/<staging>/source-build-v2.json
+uv run --locked --no-sync --group dev python tools/functional_uat_kr_trade.py verify-v2
+uv run --locked --no-sync --group dev python tools/functional_uat_kr_trade.py serve-guidance-v2 `
+  --host 127.0.0.1 --port 18094
+```
+
+V2 never fetches from those URLs. The explicit build verifies each exact URL,
+byte hash, collection time, scope/direction binding, and quoted excerpt. A
+bundle is `covered` only after all its required page records are present. Law
+current-status pages must prove their effective date at `as_of`; linked body
+pages inherit it only from that verified source. PDF citations require both
+the raw-PDF hash and a hash-bound local text projection. All of those receipts
+remain below ignored `_local` state.
+
+The V2 server is loopback-only at
+`http://127.0.0.1:18094/internal/rag/v3/guidance/query`; it uses the profile's
+local bearer token and `X-Customs-Service-Mode: functional-uat`. The
+authenticated readiness endpoint is `/internal/rag/v3/health/ready`; it and
+the query fail closed when V2 state cannot revalidate. Consumers must compare
+the V2 query response's `registry_version`, `registry_sha256`, `snapshot_id`,
+and `as_of` before displaying any official URI.

@@ -53,6 +53,37 @@
           "title": "Schema Version",
           "type": "string"
         },
+        "scope_hint": {
+          "anyOf": [
+            {
+              "enum": [
+                "import_clearance_flow",
+                "export_clearance_flow",
+                "import_declaration",
+                "export_declaration",
+                "customs_value_basics",
+                "duty_payment_basics",
+                "classification_principles",
+                "advance_ruling_or_confirmation",
+                "origin_evidence",
+                "origin_verification",
+                "commercial_and_declaration_documents",
+                "agency_confirmation_and_supporting_documents",
+                "bill_of_lading",
+                "air_waybill",
+                "origin_certificate",
+                "preference_procedure",
+                "cost_risk_delivery_terms"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scope Hint"
+        },
         "top_k": {
           "default": 3,
           "maximum": 3,
@@ -131,6 +162,37 @@
           "title": "Errors",
           "type": "array"
         },
+        "guidance_scope": {
+          "anyOf": [
+            {
+              "enum": [
+                "import_clearance_flow",
+                "export_clearance_flow",
+                "import_declaration",
+                "export_declaration",
+                "customs_value_basics",
+                "duty_payment_basics",
+                "classification_principles",
+                "advance_ruling_or_confirmation",
+                "origin_evidence",
+                "origin_verification",
+                "commercial_and_declaration_documents",
+                "agency_confirmation_and_supporting_documents",
+                "bill_of_lading",
+                "air_waybill",
+                "origin_certificate",
+                "preference_procedure",
+                "cost_risk_delivery_terms"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Guidance Scope"
+        },
         "registry_sha256": {
           "default": "6fed779ee0ec1cd2358972925fe1b2788838a197d4f33e62e461fcfed2bb7d6c",
           "pattern": "^[a-f0-9]{64}$",
@@ -138,8 +200,11 @@
           "type": "string"
         },
         "registry_version": {
-          "const": "1.0",
           "default": "1.0",
+          "enum": [
+            "1.0",
+            "2.0"
+          ],
           "title": "Registry Version",
           "type": "string"
         },
