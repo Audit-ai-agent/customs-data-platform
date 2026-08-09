@@ -28,6 +28,12 @@ from src.guidance_registry import (
     resolve_guidance_topic,
     source_for_law_id,
 )
+from src.guidance_registry_v2 import (
+    GuidanceScope,
+    REGISTRY_V2_SHA256,
+    REGISTRY_V2_SOURCES_BY_ID,
+    guidance_scope_by_hint,
+)
 
 
 NonEmpty128 = Annotated[str, Field(min_length=1, max_length=128)]
@@ -52,6 +58,10 @@ class GeneralGuidanceQueryRequestV3(ContractModel):
     # classifier has considered context.  A hint never accepts a free-form
     # topic and prevents this Data layer from reclassifying the raw wording.
     topic_hint: GuidanceTopic | None = None
+    # V2 callers bind one closed topic scope before this provider is called.
+    # V1 remains compatible: a V1 runtime simply cannot claim V2 scope
+    # coverage and returns no coverage rather than silently broadening it.
+    scope_hint: GuidanceScope | None = None
     top_k: int = Field(default=3, ge=1, le=3)
 
 
@@ -90,24 +100,50 @@ class GuidanceSourceV3(ContractModel):
     def _unique_retrieval_methods(self) -> "GuidanceSourceV3":
         if len(self.retrieval_methods) != len(set(self.retrieval_methods)):
             raise ValueError("retrieval_methods must be unique")
-        registry_source = REGISTRY_SOURCES_BY_ID.get(self.registry_source_id)
-        if registry_source is None:
+        registry_source_v1 = REGISTRY_SOURCES_BY_ID.get(self.registry_source_id)
+        registry_source_v2 = REGISTRY_V2_SOURCES_BY_ID.get(self.registry_source_id)
+        if registry_source_v2 is not None:
+            in_scope = any(
+                binding.topic == self.topic and binding.supports(self.direction)
+                for binding in registry_source_v2.bindings
+            )
+            expected_source_kind = registry_source_v2.source_kind
+        elif registry_source_v1 is not None:
+            in_scope = registry_source_v1.supports(topic=self.topic, direction=self.direction)
+            expected_source_kind = registry_source_v1.source_kind
+        else:
             raise ValueError("guidance source has an unknown registry family")
-        if not registry_source.supports(topic=self.topic, direction=self.direction):
+        if not in_scope:
             raise ValueError("guidance source is outside its registry scope")
         # The deterministic development fixture deliberately does not claim
         # that a registry source was collected.  Its registry family is only
         # the stable topic/direction scope used to construct the fixture.
-        if self.source_kind != "development_fixture" and (
-            self.source_kind != registry_source.source_kind
-        ):
+        if self.source_kind != "development_fixture" and (self.source_kind != expected_source_kind):
             raise ValueError("guidance source kind does not match its registry family")
-        if self.source_kind == "official_law" and (
-            self.law_id is None or self.law_name is None or self.article_no is None
+        if (
+            self.source_kind == "official_law"
+            and registry_source_v2 is None
+            and (self.law_id is None or self.law_name is None or self.article_no is None)
         ):
             raise ValueError("official guidance source requires law provenance")
-        if self.source_kind == "official_law" and registry_source.law_id != self.law_id:
+        if (
+            self.source_kind == "official_law"
+            and registry_source_v2 is None
+            and getattr(registry_source_v1, "law_id", None) != self.law_id
+        ):
             raise ValueError("official law guidance must match its registry law")
+        # V2 statute receipts cite a whole, exact official statute page.  They
+        # deliberately do not fabricate article-level provenance.  A caller
+        # may therefore supply no law fields, or all three only when a future
+        # V2 page-level record genuinely identifies one article.
+        if self.source_kind == "official_law" and registry_source_v2 is not None:
+            present_law_fields = [self.law_id, self.law_name, self.article_no]
+            if any(value is not None for value in present_law_fields) and not all(
+                value is not None for value in present_law_fields
+            ):
+                raise ValueError(
+                    "V2 official law guidance must not claim partial article provenance"
+                )
         if self.source_kind != "official_law" and any(
             value is not None for value in (self.law_id, self.law_name, self.article_no)
         ):
@@ -122,19 +158,28 @@ class GeneralGuidanceQueryResponseV3(ContractModel):
     snapshot_id: str | None = Field(default=None, min_length=1, max_length=512)
     as_of: date
     coverage: Literal["covered", "no_coverage", "partial", "unavailable"]
-    registry_version: Literal["1.0"] = "1.0"
+    registry_version: Literal["1.0", "2.0"] = "1.0"
     # The matching provider-owned manifest is checked into the Evidence V3
     # contract bundle.  Consumers can reject a response from another registry
     # revision before turning its URI into a user-facing official citation.
     registry_sha256: VersionHash = REGISTRY_SHA256
     topic: GuidanceTopic | None = None
+    guidance_scope: GuidanceScope | None = None
     results: list[GuidanceSourceV3] = Field(default_factory=list, max_length=3)
     errors: list[EvidenceError] = Field(default_factory=list, max_length=4)
 
     @model_validator(mode="after")
     def _status_matches_content(self) -> "GeneralGuidanceQueryResponseV3":
-        if self.registry_sha256 != REGISTRY_SHA256:
+        expected_registry_hash = {
+            "1.0": REGISTRY_SHA256,
+            "2.0": REGISTRY_V2_SHA256,
+        }[self.registry_version]
+        if self.registry_sha256 != expected_registry_hash:
             raise ValueError("guidance response registry hash does not match this provider")
+        if self.registry_version == "1.0" and self.guidance_scope is not None:
+            raise ValueError("V1 guidance response must not claim a V2 scope")
+        if self.guidance_scope is not None and self.topic is None:
+            raise ValueError("guidance scope requires a topic")
         if self.status == "covered":
             if self.coverage != "covered" or not self.results or self.errors:
                 raise ValueError("covered guidance response must contain only sources")
@@ -151,6 +196,24 @@ class GeneralGuidanceQueryResponseV3(ContractModel):
             raise ValueError("guidance sources require a topic")
         if self.topic is not None and any(source.topic != self.topic for source in self.results):
             raise ValueError("guidance source topics must match the response topic")
+        if self.registry_version == "1.0" and any(
+            source.registry_source_id in REGISTRY_V2_SOURCES_BY_ID for source in self.results
+        ):
+            raise ValueError("V1 guidance response cannot contain V2 sources")
+        if self.registry_version == "2.0" and any(
+            source.registry_source_id not in REGISTRY_V2_SOURCES_BY_ID for source in self.results
+        ):
+            raise ValueError("V2 guidance response requires V2 sources")
+        if self.registry_version == "2.0" and self.guidance_scope is not None:
+            if self.topic is None or any(
+                not REGISTRY_V2_SOURCES_BY_ID[source.registry_source_id].supports(
+                    topic=self.topic,
+                    scope=self.guidance_scope,
+                    direction=source.direction,
+                )
+                for source in self.results
+            ):
+                raise ValueError("V2 guidance sources must match the response scope")
         return self
 
 
@@ -252,6 +315,32 @@ def _fixture_source(entry: GuidanceRegistryEntry, *, direction: TradeDirection) 
     )
 
 
+def _v2_fixture_source(
+    *,
+    topic: GuidanceTopic,
+    scope: GuidanceScope,
+    direction: TradeDirection,
+) -> GuidanceSourceV3:
+    entry = guidance_scope_by_hint(topic, scope, direction=direction)
+    if entry is None:  # pragma: no cover - guarded by the fixture caller
+        raise ValueError("development fixture has no V2 scope")
+    registry_source = REGISTRY_V2_SOURCES_BY_ID[entry.required_source_ids[0]]
+    return GuidanceSourceV3(
+        source_id=_source_id(
+            "development_fixture", "2.0", topic, scope, direction, REGISTRY_V2_SHA256
+        ),
+        registry_source_id=registry_source.source_id,
+        source_kind="development_fixture",
+        title=entry.title,
+        uri=f"https://customs.local.invalid/dev-fixture/guidance/{topic}/{scope}",
+        topic=topic,
+        direction=direction,
+        excerpt=entry.development_excerpt,
+        version_hash=REGISTRY_V2_SHA256,
+        retrieval_methods=["registry"],
+    )
+
+
 def _article_label(row: dict[str, object]) -> str:
     raw_article_no = row["article_no"]
     if not isinstance(raw_article_no, int | str):
@@ -338,6 +427,42 @@ def query_general_guidance_v3(
     snapshot_id, failure = _validated_snapshot(request, backend)
     if failure is not None:
         return failure
+    if request.scope_hint is not None:
+        if profile_mode == "local-development" and request.topic_hint is not None:
+            v2_entry = guidance_scope_by_hint(
+                request.topic_hint,
+                request.scope_hint,
+                direction=request.trade_direction,
+            )
+            if v2_entry is not None:
+                return GeneralGuidanceQueryResponseV3(
+                    request_id=request.request_id,
+                    status="covered",
+                    snapshot_id=snapshot_id,
+                    as_of=request.as_of,
+                    coverage="covered",
+                    registry_version="2.0",
+                    registry_sha256=REGISTRY_V2_SHA256,
+                    topic=v2_entry.topic,
+                    guidance_scope=v2_entry.scope,
+                    results=[
+                        _v2_fixture_source(
+                            topic=v2_entry.topic,
+                            scope=v2_entry.scope,
+                            direction=request.trade_direction,
+                        )
+                    ],
+                )
+        # V1 has no closed scope vocabulary. A V2-selected scope must never be
+        # widened to a V1 topic just because this endpoint happens to be older.
+        return GeneralGuidanceQueryResponseV3(
+            request_id=request.request_id,
+            status="no_coverage",
+            snapshot_id=snapshot_id,
+            as_of=request.as_of,
+            coverage="no_coverage",
+            topic=request.topic_hint,
+        )
     entry = (
         guidance_topic_by_hint(request.topic_hint, direction=request.trade_direction)
         if request.topic_hint is not None

@@ -1,0 +1,351 @@
+{
+  "registry_version": "2.0",
+  "jurisdiction": "KR",
+  "sources": [
+    {
+      "source_id": "v2_law_customs_act",
+      "source_kind": "official_law",
+      "title": "관세법",
+      "official_uri": "https://www.law.go.kr/LSW/lsInfoP.do?ancYnChk=0&chrClsCd=010202&efYd=20260701&lsiSeq=280363&urlMode=lsInfoP",
+      "authority": "국가법령정보센터",
+      "jurisdiction": "KR",
+      "directions": ["import", "export"],
+      "bindings": [
+        {"topic": "customs_clearance", "scope": "import_clearance_flow", "directions": ["import"]},
+        {"topic": "customs_clearance", "scope": "export_clearance_flow", "directions": ["export"]},
+        {"topic": "customs_declaration", "scope": "import_declaration", "directions": ["import"]},
+        {"topic": "customs_declaration", "scope": "export_declaration", "directions": ["export"]},
+        {"topic": "customs_duty", "scope": "customs_value_basics", "directions": ["import"]},
+        {"topic": "customs_duty", "scope": "duty_payment_basics", "directions": ["import"]},
+        {"topic": "hs_classification", "scope": "classification_principles", "directions": ["import", "export"]},
+        {"topic": "hs_classification", "scope": "advance_ruling_or_confirmation", "directions": ["import", "export"]},
+        {"topic": "trade_documents", "scope": "commercial_and_declaration_documents", "directions": ["import", "export"]},
+        {"topic": "import_requirements", "scope": "agency_confirmation_and_supporting_documents", "directions": ["import"]},
+        {"topic": "export_requirements", "scope": "agency_confirmation_and_supporting_documents", "directions": ["export"]}
+      ],
+      "availability": "requires_kr_trade_snapshot"
+    },
+    {
+      "source_id": "v2_law_customs_act_body",
+      "source_kind": "official_law",
+      "title": "관세법 본문 조문",
+      "official_uri": "https://www.law.go.kr/LSW/joListRInc.do?lsiSeq=280363&mode=1&chapNo=1&nwYn=Y&nwJoYnInfo=&efYd=20260701&ancYnChk=0",
+      "authority": "국가법령정보센터",
+      "jurisdiction": "KR",
+      "directions": ["import", "export"],
+      "law_effectivity_source_id": "v2_law_customs_act",
+      "bindings": [
+        {"topic": "customs_clearance", "scope": "import_clearance_flow", "directions": ["import"]},
+        {"topic": "customs_clearance", "scope": "export_clearance_flow", "directions": ["export"]},
+        {"topic": "customs_declaration", "scope": "import_declaration", "directions": ["import"]},
+        {"topic": "customs_declaration", "scope": "export_declaration", "directions": ["export"]},
+        {"topic": "customs_duty", "scope": "customs_value_basics", "directions": ["import"]},
+        {"topic": "customs_duty", "scope": "duty_payment_basics", "directions": ["import"]},
+        {"topic": "hs_classification", "scope": "classification_principles", "directions": ["import", "export"]},
+        {"topic": "hs_classification", "scope": "advance_ruling_or_confirmation", "directions": ["import", "export"]},
+        {"topic": "trade_documents", "scope": "commercial_and_declaration_documents", "directions": ["import", "export"]},
+        {"topic": "import_requirements", "scope": "agency_confirmation_and_supporting_documents", "directions": ["import"]},
+        {"topic": "export_requirements", "scope": "agency_confirmation_and_supporting_documents", "directions": ["export"]}
+      ],
+      "availability": "requires_kr_trade_snapshot"
+    },
+    {
+      "source_id": "v2_law_external_trade_act",
+      "source_kind": "official_law",
+      "title": "대외무역법",
+      "official_uri": "https://www.law.go.kr/LSW/lsInfoP.do?ancYnChk=0&chrClsCd=010202&efYd=20260102&lsiSeq=276491&urlMode=lsInfoP",
+      "authority": "국가법령정보센터",
+      "jurisdiction": "KR",
+      "directions": ["import", "export"],
+      "bindings": [
+        {"topic": "export_requirements", "scope": "agency_confirmation_and_supporting_documents", "directions": ["export"]},
+        {"topic": "import_requirements", "scope": "agency_confirmation_and_supporting_documents", "directions": ["import"]}
+      ],
+      "availability": "requires_kr_trade_snapshot"
+    },
+    {
+      "source_id": "v2_law_external_trade_act_body",
+      "source_kind": "official_law",
+      "title": "대외무역법 본문 조문",
+      "official_uri": "https://www.law.go.kr/LSW/joListRInc.do?lsiSeq=276491&mode=1&chapNo=1&nwYn=Y&nwJoYnInfo=&efYd=20260102&ancYnChk=0",
+      "authority": "국가법령정보센터",
+      "jurisdiction": "KR",
+      "directions": ["import", "export"],
+      "law_effectivity_source_id": "v2_law_external_trade_act",
+      "bindings": [
+        {"topic": "export_requirements", "scope": "agency_confirmation_and_supporting_documents", "directions": ["export"]},
+        {"topic": "import_requirements", "scope": "agency_confirmation_and_supporting_documents", "directions": ["import"]}
+      ],
+      "availability": "requires_kr_trade_snapshot"
+    },
+    {
+      "source_id": "v2_kcs_import_clearance",
+      "source_kind": "official_agency_guidance",
+      "title": "수입 통관",
+      "official_uri": "https://www.customs.go.kr/kcs/cm/cntnts/cntntsView.do?cntntsId=817&mi=2819",
+      "authority": "관세청",
+      "jurisdiction": "KR",
+      "directions": ["import"],
+      "bindings": [
+        {"topic": "customs_clearance", "scope": "import_clearance_flow", "directions": ["import"]},
+        {"topic": "customs_declaration", "scope": "import_declaration", "directions": ["import"]},
+        {"topic": "trade_documents", "scope": "commercial_and_declaration_documents", "directions": ["import"]}
+      ],
+      "availability": "requires_kr_trade_snapshot"
+    },
+    {
+      "source_id": "v2_kcs_export_clearance",
+      "source_kind": "official_agency_guidance",
+      "title": "수출 통관",
+      "official_uri": "https://www2.customs.go.kr/kcs/cm/cntnts/cntntsView.do?cntntsId=818&mi=2820",
+      "authority": "관세청",
+      "jurisdiction": "KR",
+      "directions": ["export"],
+      "bindings": [
+        {"topic": "customs_clearance", "scope": "export_clearance_flow", "directions": ["export"]},
+        {"topic": "customs_declaration", "scope": "export_declaration", "directions": ["export"]},
+        {"topic": "trade_documents", "scope": "commercial_and_declaration_documents", "directions": ["export"]},
+        {"topic": "export_requirements", "scope": "agency_confirmation_and_supporting_documents", "directions": ["export"]}
+      ],
+      "availability": "requires_kr_trade_snapshot"
+    },
+    {
+      "source_id": "v2_kcs_import_price_declaration",
+      "source_kind": "official_agency_guidance",
+      "title": "수입물품 가격신고 제도",
+      "official_uri": "https://www.customs.go.kr/kcs/cm/cntnts/cntntsView.do?cntntsId=821&mi=2823",
+      "authority": "관세청",
+      "jurisdiction": "KR",
+      "directions": ["import"],
+      "bindings": [
+        {"topic": "customs_duty", "scope": "customs_value_basics", "directions": ["import"]}
+      ],
+      "availability": "requires_kr_trade_snapshot"
+    },
+    {
+      "source_id": "v2_kcs_duty_payment",
+      "source_kind": "official_agency_guidance",
+      "title": "납세신고 및 납부방법",
+      "official_uri": "https://www2.customs.go.kr/kcs/cm/cntnts/cntntsView.do?cntntsId=822&mi=2824",
+      "authority": "관세청",
+      "jurisdiction": "KR",
+      "directions": ["import"],
+      "bindings": [
+        {"topic": "customs_duty", "scope": "duty_payment_basics", "directions": ["import"]}
+      ],
+      "availability": "requires_kr_trade_snapshot"
+    },
+    {
+      "source_id": "v2_cvnci_hs_advance_ruling",
+      "source_kind": "official_agency_guidance",
+      "title": "품목분류 사전심사 신청방법",
+      "official_uri": "https://www.customs.go.kr/cvnci/cm/cntnts/cntntsView.do?cntntsId=948&mi=3217",
+      "authority": "관세청 관세평가분류원",
+      "jurisdiction": "KR",
+      "directions": ["import", "export"],
+      "bindings": [
+        {"topic": "hs_classification", "scope": "classification_principles", "directions": ["import", "export"]},
+        {"topic": "hs_classification", "scope": "advance_ruling_or_confirmation", "directions": ["import", "export"]}
+      ],
+      "availability": "requires_kr_trade_snapshot"
+    },
+    {
+      "source_id": "v2_cvnci_customs_value_advance",
+      "source_kind": "official_agency_guidance",
+      "title": "관세평가 사전심사 신청방법",
+      "official_uri": "https://www.customs.go.kr/cvnci/cm/cntnts/cntntsView.do?cntntsId=946&mi=3212",
+      "authority": "관세청 관세평가분류원",
+      "jurisdiction": "KR",
+      "directions": ["import"],
+      "bindings": [
+        {"topic": "customs_duty", "scope": "customs_value_basics", "directions": ["import"]}
+      ],
+      "availability": "requires_kr_trade_snapshot"
+    },
+    {
+      "source_id": "v2_fta_origin_confirmation",
+      "source_kind": "official_agency_guidance",
+      "title": "원산지확인서",
+      "official_uri": "https://customs.go.kr/ftaportalkor/cm/cntnts/cntntsView.do?cntntsId=1111&mi=3456",
+      "authority": "관세청 FTA 포털",
+      "jurisdiction": "KR",
+      "directions": ["import", "export"],
+      "bindings": [
+        {"topic": "origin_verification", "scope": "origin_evidence", "directions": ["import", "export"]},
+        {"topic": "fta_procedure", "scope": "origin_certificate", "directions": ["import", "export"]}
+      ],
+      "availability": "requires_kr_trade_snapshot"
+    },
+    {
+      "source_id": "v2_fta_origin_certificate",
+      "source_kind": "official_agency_guidance",
+      "title": "원산지증명서 개요",
+      "official_uri": "https://www.customs.go.kr/ftaportalkor/cm/cntnts/cntntsView.do?cntntsId=1061&mi=3401",
+      "authority": "관세청 FTA 포털",
+      "jurisdiction": "KR",
+      "directions": ["import", "export"],
+      "bindings": [
+        {"topic": "origin_verification", "scope": "origin_evidence", "directions": ["import", "export"]},
+        {"topic": "fta_procedure", "scope": "origin_certificate", "directions": ["import", "export"]},
+        {"topic": "fta_procedure", "scope": "preference_procedure", "directions": ["import", "export"]}
+      ],
+      "availability": "requires_kr_trade_snapshot"
+    },
+    {
+      "source_id": "v2_fta_origin_institution_issue",
+      "source_kind": "official_agency_guidance",
+      "title": "기관발급 원산지증명서",
+      "official_uri": "https://www.customs.go.kr/ftaportalkor/cm/cntnts/cntntsView.do?cntntsId=1062&mi=3402",
+      "authority": "관세청 FTA 포털",
+      "jurisdiction": "KR",
+      "directions": ["import", "export"],
+      "bindings": [
+        {"topic": "fta_procedure", "scope": "origin_certificate", "directions": ["import", "export"]},
+        {"topic": "fta_procedure", "scope": "preference_procedure", "directions": ["import", "export"]}
+      ],
+      "availability": "requires_kr_trade_snapshot"
+    },
+    {
+      "source_id": "v2_fta_origin_verification",
+      "source_kind": "official_agency_guidance",
+      "title": "원산지 검증 주요 체크포인트",
+      "official_uri": "https://www.customs.go.kr/ftaportalkor/cm/cntnts/cntntsView.do?cntntsId=1122&mi=3478",
+      "authority": "관세청 FTA 포털",
+      "jurisdiction": "KR",
+      "directions": ["import", "export"],
+      "bindings": [
+        {"topic": "origin_verification", "scope": "origin_verification", "directions": ["import", "export"]}
+      ],
+      "availability": "requires_kr_trade_snapshot"
+    },
+    {
+      "source_id": "v2_kcs_trade_documents_qa",
+      "source_kind": "official_agency_guidance",
+      "title": "관세청 상담 Q&A",
+      "official_uri": "https://www.customs.go.kr/download/_down/KCS_QnA.pdf",
+      "authority": "관세청",
+      "jurisdiction": "KR",
+      "directions": ["import", "export"],
+      "bindings": [
+        {"topic": "trade_documents", "scope": "commercial_and_declaration_documents", "directions": ["import", "export"]},
+        {"topic": "transport_documents", "scope": "bill_of_lading", "directions": ["import", "export"]},
+        {"topic": "transport_documents", "scope": "air_waybill", "directions": ["import", "export"]}
+      ],
+      "availability": "requires_kr_trade_snapshot"
+    },
+    {
+      "source_id": "v2_ccct_customs_confirmation",
+      "source_kind": "official_requirement_reference",
+      "title": "세관장확인 수출입요건 공개 자료",
+      "official_uri": "https://www.customs.go.kr/cvnci/cm/cntnts/cntntsView.do?cntntsId=5046&mi=3221",
+      "authority": "관세청 및 관계기관",
+      "jurisdiction": "KR",
+      "directions": ["import", "export"],
+      "bindings": [
+        {"topic": "import_requirements", "scope": "agency_confirmation_and_supporting_documents", "directions": ["import"]},
+        {"topic": "export_requirements", "scope": "agency_confirmation_and_supporting_documents", "directions": ["export"]},
+        {"topic": "trade_documents", "scope": "commercial_and_declaration_documents", "directions": ["import", "export"]}
+      ],
+      "availability": "requires_kr_trade_snapshot"
+    },
+    {
+      "source_id": "v2_kotra_trade_terms",
+      "source_kind": "official_public_guidance",
+      "title": "수출원가",
+      "official_uri": "https://dream.kotra.or.kr/dream/cms/com/index.do?MENU_ID=4070",
+      "authority": "대한무역투자진흥공사",
+      "jurisdiction": "KR",
+      "directions": ["import", "export"],
+      "bindings": [
+        {"topic": "trade_terms", "scope": "cost_risk_delivery_terms", "directions": ["import", "export"]}
+      ],
+      "availability": "requires_kr_trade_snapshot"
+    }
+  ],
+  "topics": [
+    {
+      "topic": "customs_clearance",
+      "title": "통관 절차의 기본 안내",
+      "scopes": [
+        {"scope": "import_clearance_flow", "title": "수입 통관 흐름", "directions": ["import"], "keywords": ["수입통관", "수입 통관", "수입절차", "수입 절차"], "development_excerpt": "수입 통관의 일반 흐름은 신고와 세관 심사를 포함합니다. 실제 수리와 반출 여부는 사건 자료와 담당자 검토가 필요합니다.", "required_source_ids": ["v2_law_customs_act", "v2_law_customs_act_body", "v2_kcs_import_clearance"]},
+        {"scope": "export_clearance_flow", "title": "수출 통관 흐름", "directions": ["export"], "keywords": ["수출통관", "수출 통관", "수출절차", "수출 절차"], "development_excerpt": "수출 통관의 일반 흐름은 수출신고, 심사 또는 검사, 수리와 적재 이행을 포함할 수 있습니다. 개별 수출 가능 여부는 확정하지 않습니다.", "required_source_ids": ["v2_law_customs_act", "v2_law_customs_act_body", "v2_kcs_export_clearance"]}
+      ]
+    },
+    {
+      "topic": "customs_declaration",
+      "title": "수출입 신고의 기본 안내",
+      "scopes": [
+        {"scope": "import_declaration", "title": "수입 신고", "directions": ["import"], "keywords": ["수입신고", "수입 신고", "신고서"], "development_excerpt": "수입 신고에는 물품과 거래에 관한 정확한 정보 및 관련 서류 확인이 필요할 수 있습니다.", "required_source_ids": ["v2_law_customs_act", "v2_law_customs_act_body", "v2_kcs_import_clearance"]},
+        {"scope": "export_declaration", "title": "수출 신고", "directions": ["export"], "keywords": ["수출신고", "수출 신고"], "development_excerpt": "수출 신고에는 물품과 거래에 관한 정확한 정보 및 관련 요건 확인이 필요할 수 있습니다.", "required_source_ids": ["v2_law_customs_act", "v2_law_customs_act_body", "v2_kcs_export_clearance"]}
+      ]
+    },
+    {
+      "topic": "customs_duty",
+      "title": "관세와 과세가격의 기본 안내",
+      "scopes": [
+        {"scope": "customs_value_basics", "title": "과세가격 기초", "directions": ["import"], "keywords": ["과세가격", "가격신고", "수입가격"], "development_excerpt": "과세가격은 수입 거래의 가격 및 관련 자료를 바탕으로 검토합니다. 이 안내는 개별 과세가격 또는 세액을 확정하지 않습니다.", "required_source_ids": ["v2_law_customs_act", "v2_law_customs_act_body", "v2_kcs_import_price_declaration", "v2_cvnci_customs_value_advance"]},
+        {"scope": "duty_payment_basics", "title": "관세 납세·납부 기초", "directions": ["import"], "keywords": ["관세", "관세납부", "관세 납부", "납세신고", "세액"], "development_excerpt": "수입 관세의 납세신고와 납부에는 품목분류, 세율, 과세가격 등 확인이 필요합니다. 이 안내는 개별 세액을 계산하지 않습니다.", "required_source_ids": ["v2_law_customs_act", "v2_law_customs_act_body", "v2_kcs_duty_payment"]}
+      ]
+    },
+    {
+      "topic": "hs_classification",
+      "title": "HS 품목분류의 기본 안내",
+      "scopes": [
+        {"scope": "classification_principles", "title": "품목분류 기본 원칙", "directions": ["import", "export"], "keywords": ["hs", "hs코드", "hs 코드", "품목분류", "품목 분류"], "development_excerpt": "품목분류는 물품의 성질, 구성, 용도와 관련 자료를 검토하여 판단합니다. 이 안내는 개별 HS를 확정하지 않습니다.", "required_source_ids": ["v2_law_customs_act", "v2_law_customs_act_body", "v2_cvnci_hs_advance_ruling"]},
+        {"scope": "advance_ruling_or_confirmation", "title": "품목분류 사전심사·확인", "directions": ["import", "export"], "keywords": ["품목분류사전심사", "품목분류 사전심사", "hs 사전심사"], "development_excerpt": "품목분류가 불명확한 경우 공식 사전심사 절차가 안내될 수 있습니다. 이 안내 자체는 사전심사 결과가 아닙니다.", "required_source_ids": ["v2_law_customs_act", "v2_law_customs_act_body", "v2_cvnci_hs_advance_ruling"]}
+      ]
+    },
+    {
+      "topic": "origin_verification",
+      "title": "원산지 확인의 기본 안내",
+      "scopes": [
+        {"scope": "origin_evidence", "title": "원산지 증빙", "directions": ["import", "export"], "keywords": ["원산지", "원산지증명", "원산지 증명", "원산지확인서", "원산지 확인서"], "development_excerpt": "원산지 증빙은 물품과 생산·공급 사실을 뒷받침하는 서류를 바탕으로 확인합니다. 개별 협정 적용은 확정하지 않습니다.", "required_source_ids": ["v2_fta_origin_confirmation", "v2_fta_origin_certificate"]},
+        {"scope": "origin_verification", "title": "원산지 검증", "directions": ["import", "export"], "keywords": ["원산지검증", "원산지 검증", "원산지 조사"], "development_excerpt": "원산지 검증은 협정 및 사건별 증빙을 기준으로 확인합니다. 이 안내는 검증 결과나 사후조치를 확정하지 않습니다.", "required_source_ids": ["v2_fta_origin_verification"]}
+      ]
+    },
+    {
+      "topic": "trade_documents",
+      "title": "무역 서류의 역할 안내",
+      "scopes": [
+        {"scope": "commercial_and_declaration_documents", "title": "상업·신고 관련 서류", "directions": ["import", "export"], "keywords": ["상업송장", "인보이스", "포장명세서", "무역서류", "무역 서류", "신고서류", "신고 서류"], "development_excerpt": "상업송장, 포장명세서 및 신고 관련 서류는 거래·물품·수량·운송 정보를 확인하는 데 사용될 수 있습니다. 필요한 서류는 거래와 법령에 따라 다릅니다.", "required_source_ids": ["v2_law_customs_act", "v2_law_customs_act_body", "v2_kcs_trade_documents_qa", "v2_ccct_customs_confirmation"]}
+      ]
+    },
+    {
+      "topic": "import_requirements",
+      "title": "수입 요건 확인의 기본 안내",
+      "scopes": [
+        {"scope": "agency_confirmation_and_supporting_documents", "title": "세관장 확인·보완서류", "directions": ["import"], "keywords": ["수입요건", "수입 요건", "요건확인", "요건 확인", "수입허가", "수입 허가", "검역"], "development_excerpt": "수입 요건은 품목, 수입 형태 및 관계기관 기준에 따라 확인합니다. 이 안내는 특정 품목의 허가 가능 여부를 확정하지 않습니다.", "required_source_ids": ["v2_law_customs_act", "v2_law_customs_act_body", "v2_law_external_trade_act", "v2_law_external_trade_act_body", "v2_ccct_customs_confirmation"]}
+      ]
+    },
+    {
+      "topic": "export_requirements",
+      "title": "수출 요건 확인의 기본 안내",
+      "scopes": [
+        {"scope": "agency_confirmation_and_supporting_documents", "title": "세관장 확인·보완서류", "directions": ["export"], "keywords": ["수출요건", "수출 요건", "수출허가", "수출 허가", "수출승인", "수출 승인"], "development_excerpt": "수출 요건은 물품, 목적국, 거래 형태와 관계기관 기준에 따라 확인합니다. 이 안내는 특정 수출의 허가·승인을 확정하지 않습니다.", "required_source_ids": ["v2_law_customs_act", "v2_law_customs_act_body", "v2_law_external_trade_act", "v2_law_external_trade_act_body", "v2_kcs_export_clearance", "v2_ccct_customs_confirmation"]}
+      ]
+    },
+    {
+      "topic": "transport_documents",
+      "title": "운송서류의 기본 안내",
+      "scopes": [
+        {"scope": "bill_of_lading", "title": "선하증권(B/L)", "directions": ["import", "export"], "keywords": ["b/l", "bl", "선하증권"], "development_excerpt": "선하증권은 해상운송과 관련된 서류입니다. 개별 운송계약의 권리·의무나 목적국 요건은 별도 확인이 필요합니다.", "required_source_ids": ["v2_kcs_trade_documents_qa"]},
+        {"scope": "air_waybill", "title": "항공화물운송장(AWB)", "directions": ["import", "export"], "keywords": ["awb", "air waybill", "항공화물운송장", "항공 운송장"], "development_excerpt": "항공화물운송장은 항공운송과 관련된 서류입니다. 개별 운송계약의 권리·의무나 목적국 요건은 별도 확인이 필요합니다.", "required_source_ids": ["v2_kcs_trade_documents_qa"]}
+      ]
+    },
+    {
+      "topic": "fta_procedure",
+      "title": "FTA 절차의 기본 안내",
+      "scopes": [
+        {"scope": "origin_certificate", "title": "원산지증명", "directions": ["import", "export"], "keywords": ["fta 원산지증명", "fta 원산지 증명", "원산지증명서", "원산지 증명서"], "development_excerpt": "FTA 원산지증명은 협정별 원산지 기준과 증명서 요건을 함께 확인해야 합니다. 이 안내는 협정관세 적용을 확정하지 않습니다.", "required_source_ids": ["v2_fta_origin_confirmation", "v2_fta_origin_certificate", "v2_fta_origin_institution_issue"]},
+        {"scope": "preference_procedure", "title": "FTA 특혜 적용 절차", "directions": ["import", "export"], "keywords": ["fta", "협정관세", "특혜관세", "특혜 관세"], "development_excerpt": "FTA 특혜 적용 절차는 협정, 물품, 원산지 증명 및 거래 시점에 따라 달라집니다. 이 안내는 특혜 적용 여부를 확정하지 않습니다.", "required_source_ids": ["v2_fta_origin_certificate", "v2_fta_origin_institution_issue"]}
+      ]
+    },
+    {
+      "topic": "trade_terms",
+      "title": "무역 거래조건의 기본 안내",
+      "scopes": [
+        {"scope": "cost_risk_delivery_terms", "title": "비용·위험·인도조건", "directions": ["import", "export"], "keywords": ["인코텀즈", "incoterms", "fob", "cif", "exw", "ddp", "cfr", "cip", "dap"], "development_excerpt": "무역 거래조건은 비용·위험·인도 조건을 정리하는 용어입니다. 이 안내는 Incoterms 원문이나 개별 계약의 해석을 대체하지 않습니다.", "required_source_ids": ["v2_kotra_trade_terms"]}
+      ]
+    }
+  ]
+}
