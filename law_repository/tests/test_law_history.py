@@ -945,6 +945,44 @@ def test_law_history_source_path_rejects_windows_and_parent_escapes(tmp_path) ->
             _profile_source_file(profile, unsafe)
 
 
+class _WindowsProcessCheckError(OSError):
+    """Portable fixture for the Windows ``os.kill(pid, 0)`` result."""
+
+    def __init__(self, winerror: int) -> None:
+        super().__init__(22, "process check failed")
+        self.winerror = winerror
+
+
+@pytest.mark.parametrize(
+    ("error", "platform_name", "expected_live"),
+    [
+        (ProcessLookupError(), "posix", False),
+        (_WindowsProcessCheckError(87), "nt", False),
+        (_WindowsProcessCheckError(87), "posix", True),
+        (PermissionError(), "nt", True),
+        (_WindowsProcessCheckError(5), "nt", True),
+        (OSError(), "nt", True),
+    ],
+)
+def test_mutation_owner_liveness_only_recovers_known_missing_processes(
+    monkeypatch: pytest.MonkeyPatch,
+    error: OSError,
+    platform_name: str,
+    expected_live: bool,
+) -> None:
+    """Windows invalid-parameter means a missing PID; all other errors retain locks."""
+
+    from src import law_history as history
+
+    def raise_process_error(_pid: int, _signal: int) -> None:
+        raise error
+
+    monkeypatch.setattr(history.os, "name", platform_name)
+    monkeypatch.setattr(history.os, "kill", raise_process_error)
+
+    assert history._mutation_owner_is_live(123456) is expected_live
+
+
 def test_refresh_recovery_releases_only_a_verified_dead_owner_lock(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
@@ -1055,6 +1093,49 @@ def test_build_recovery_releases_only_a_verified_dead_lock_without_active_state(
         is True
     )
     assert not lock.exists()
+
+
+def test_interrupted_build_requires_recovery_before_markerless_reset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """A reset never bypasses a dead build lock or removes raw local sources."""
+
+    from src import law_history as history
+    from src.local_profiles import ensure_functional_uat_law_history_profile
+
+    profile = ensure_functional_uat_law_history_profile(root=tmp_path)
+    source = profile / "data" / "laws" / "official-source.json"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("official-local-source", encoding="utf-8")
+    lock = profile / "state" / ".law-history-mutation.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text(
+        json.dumps(
+            {
+                "profile": LAW_HISTORY_PROFILE,
+                "pid": 123456,
+                "created_at": "2026-08-10T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(history, "_mutation_owner_is_live", lambda _pid: False)
+
+    with pytest.raises(LawHistoryError, match="MUTATION_LOCKED"):
+        history.discard_active_law_history_manifest(local_root_override=tmp_path)
+    assert lock.exists()
+    assert source.read_text(encoding="utf-8") == "official-local-source"
+
+    assert (
+        history.recover_law_history_build_lock(
+            confirm_profile=LAW_HISTORY_PROFILE,
+            local_root_override=tmp_path,
+        )
+        is True
+    )
+    assert history.discard_active_law_history_manifest(local_root_override=tmp_path) is False
+    assert not lock.exists()
+    assert source.read_text(encoding="utf-8") == "official-local-source"
 
 
 def test_build_recovery_refuses_when_an_active_manifest_or_journal_exists(

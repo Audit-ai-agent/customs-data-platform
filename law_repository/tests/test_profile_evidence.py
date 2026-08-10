@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import types
+from contextlib import contextmanager
 from hashlib import sha256
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -949,6 +950,105 @@ def _law_history_uat_tool() -> types.ModuleType:
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def test_law_history_reset_proves_profile_state_under_one_lock_before_volume_reset(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    tool = _law_history_uat_tool()
+    expected_profile = tmp_path / "law-history-profile"
+    state = expected_profile / "state"
+    state.mkdir(parents=True)
+    active_marker = state / "active-law-history-manifest.json"
+    active_marker.write_text("{}", encoding="utf-8")
+    events: list[str] = []
+
+    @contextmanager
+    def held_lock(received_profile: Path):
+        assert received_profile == expected_profile
+        events.append("lock-enter")
+        yield
+        events.append("lock-exit")
+
+    def compose(action: str, *, profile: Path | None = None) -> int:
+        assert action == "reset"
+        assert profile == expected_profile
+        assert active_marker.is_file()
+        assert events == ["lock-enter"]
+        events.append("compose-reset")
+        return 0
+
+    monkeypatch.setattr(tool, "ensure_functional_uat_law_history_profile", lambda: expected_profile)
+    monkeypatch.setattr(tool, "_law_history_mutation_lock", held_lock)
+    monkeypatch.setattr(tool, "_compose", compose)
+
+    assert tool._reset(tool.LAW_HISTORY_PROFILE) == 0
+    assert events == ["lock-enter", "compose-reset", "lock-exit"]
+    assert not active_marker.exists()
+
+
+def test_law_history_reset_never_resets_volumes_before_lock_or_marker_safety(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    tool = _law_history_uat_tool()
+    profile = tmp_path / "law-history-profile"
+    profile.mkdir()
+    compose_calls: list[object] = []
+    monkeypatch.setattr(tool, "ensure_functional_uat_law_history_profile", lambda: profile)
+    monkeypatch.setattr(
+        tool,
+        "_compose",
+        lambda *_args, **_kwargs: compose_calls.append("reset") or 0,
+    )
+
+    def refuse_lock(_profile: Path) -> object:
+        raise tool.LawHistoryError("LAW_HISTORY_MUTATION_LOCKED")
+
+    monkeypatch.setattr(tool, "_law_history_mutation_lock", refuse_lock)
+    with pytest.raises(tool.LawHistoryError, match="MUTATION_LOCKED"):
+        tool._reset(tool.LAW_HISTORY_PROFILE)
+    assert compose_calls == []
+
+    @contextmanager
+    def held_lock(_profile: Path):
+        yield
+
+    monkeypatch.setattr(tool, "_law_history_mutation_lock", held_lock)
+    pending_refresh = profile / "state" / "pending-law-history-refresh.json"
+    pending_refresh.parent.mkdir()
+    pending_refresh.write_text("{}", encoding="utf-8")
+    with pytest.raises(tool.LawHistoryError, match="REFRESH_JOURNAL_CONFLICT"):
+        tool._reset(tool.LAW_HISTORY_PROFILE)
+    assert compose_calls == []
+
+
+def test_law_history_reset_never_resets_volumes_for_an_unsafe_manifest_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    tool = _law_history_uat_tool()
+    profile = tmp_path / "law-history-profile"
+    unsafe_marker = profile / "state" / "active-law-history-manifest.json"
+    unsafe_marker.mkdir(parents=True)
+    compose_calls: list[object] = []
+
+    @contextmanager
+    def held_lock(_profile: Path):
+        yield
+
+    monkeypatch.setattr(tool, "ensure_functional_uat_law_history_profile", lambda: profile)
+    monkeypatch.setattr(tool, "_law_history_mutation_lock", held_lock)
+    monkeypatch.setattr(
+        tool,
+        "_compose",
+        lambda *_args, **_kwargs: compose_calls.append("reset") or 0,
+    )
+
+    with pytest.raises(tool.LawHistoryError, match="MANIFEST_PATH_UNSAFE"):
+        tool._reset(tool.LAW_HISTORY_PROFILE)
+    assert compose_calls == []
 
 
 @pytest.mark.parametrize(

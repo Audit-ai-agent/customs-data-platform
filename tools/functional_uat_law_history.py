@@ -29,8 +29,10 @@ from src.law_history import (  # noqa: E402
     LAW_HISTORY_PROFILE,
     FunctionalLawHistoryEvidenceBackend,
     LawHistoryError,
+    _active_manifest_path,
+    _law_history_mutation_lock,
+    _pending_refresh_path,
     build_law_history,
-    discard_active_law_history_manifest,
     recover_law_history_build_lock,
     recover_law_history_published_lock,
     recover_law_history_refresh_lock,
@@ -201,8 +203,11 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _compose(action: str) -> int:
-    profile = ensure_functional_uat_law_history_profile()
+def _compose(action: str, *, profile: Path | None = None) -> int:
+    """Run compose only against the supplied or freshly resolved profile."""
+
+    if profile is None:
+        profile = ensure_functional_uat_law_history_profile()
     command = [
         "docker",
         "compose",
@@ -265,15 +270,53 @@ def _serve(host: str, port: int) -> int:
 def _reset(confirm_profile: str) -> int:
     if confirm_profile != LAW_HISTORY_PROFILE:
         raise LawHistoryError("LAW_HISTORY_RESET_CONFIRMATION_INVALID")
-    if _compose("reset") != 0:
-        return 2
-    removed = discard_active_law_history_manifest()
+    profile = ensure_functional_uat_law_history_profile()
+    # Hold the same writer lock used by build, refresh, and manifest updates
+    # for the entire destructive operation.  In particular, prove that the
+    # active marker is safe and that no staged refresh exists *before* asking
+    # Docker to remove this profile's volumes.  Do not call the public marker
+    # discard helper here: it obtains this lock itself and would deadlock.
+    with _law_history_mutation_lock(profile):
+        active_marker = _reset_active_marker_path(profile)
+        if _compose("reset", profile=profile) != 0:
+            return 2
+        # Compose cannot create profile-state files, but re-check immediately
+        # before unlinking so a local replacement cannot turn reset into an
+        # arbitrary-file deletion.
+        active_marker = _reset_active_marker_path(profile)
+        removed = _discard_reset_active_marker(active_marker)
     state = "removed" if removed else "already absent"
     print(
         "law-history stores and active manifest reset; "
         f"active marker {state}; raw local sources and artifacts were preserved"
     )
     return 0
+
+
+def _reset_active_marker_path(profile: Path) -> Path:
+    """Prove the profile marker/journal state is safe while reset owns its lock."""
+
+    pending_refresh = _pending_refresh_path(profile)
+    if pending_refresh.exists() or pending_refresh.is_symlink():
+        raise LawHistoryError("LAW_HISTORY_REFRESH_JOURNAL_CONFLICT")
+    active_marker = _active_manifest_path(profile)
+    if active_marker.exists() and not active_marker.is_file():
+        raise LawHistoryError("LAW_HISTORY_MANIFEST_PATH_UNSAFE")
+    return active_marker
+
+
+def _discard_reset_active_marker(active_marker: Path) -> bool:
+    """Delete one already-validated regular marker without taking another lock."""
+
+    if not active_marker.exists() and not active_marker.is_symlink():
+        return False
+    if active_marker.is_symlink() or not active_marker.is_file():
+        raise LawHistoryError("LAW_HISTORY_MANIFEST_PATH_UNSAFE")
+    try:
+        active_marker.unlink()
+    except OSError as exc:
+        raise LawHistoryError("LAW_HISTORY_MANIFEST_RESET_FAILED") from exc
+    return True
 
 
 def main(argv: list[str] | None = None) -> int:

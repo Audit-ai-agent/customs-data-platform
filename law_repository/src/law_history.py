@@ -66,6 +66,7 @@ LAW_HISTORY_LOCAL_STATE_VERSION = "functional-law-history/v3"
 _ACTIVE_MANIFEST_NAME = "active-law-history-manifest.json"
 _PENDING_REFRESH_NAME = "pending-law-history-refresh.json"
 _MUTATION_LOCK_NAME = ".law-history-mutation.lock"
+_WINERROR_INVALID_PARAMETER = 87
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MST = re.compile(r"^\d{1,32}$")
 _VERSION_KEY = re.compile(r"^(?P<mst>\d{1,32})@(?P<effective>\d{8})$")
@@ -1775,7 +1776,14 @@ def _mutation_owner_is_live(pid: int) -> bool:
         return False
     except PermissionError:
         return True
-    except OSError:
+    except OSError as exc:
+        # On Windows, ``os.kill(pid, 0)`` maps a missing process to the
+        # generic ``OSError`` ``ERROR_INVALID_PARAMETER`` instead of
+        # ``ProcessLookupError``.  Only that documented missing-PID result is
+        # safe to recover; access-denied and every other unreadable state stay
+        # fail-closed as live owners.
+        if os.name == "nt" and getattr(exc, "winerror", None) == _WINERROR_INVALID_PARAMETER:
+            return False
         return True
     return True
 
