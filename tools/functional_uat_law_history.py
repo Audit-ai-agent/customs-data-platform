@@ -33,6 +33,7 @@ from src.law_history import (  # noqa: E402
     _law_history_mutation_lock,
     _pending_refresh_path,
     build_law_history,
+    recover_law_history_baseline,
     recover_law_history_build_lock,
     recover_law_history_published_lock,
     recover_law_history_refresh_lock,
@@ -182,6 +183,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="release a verified crash-left baseline-build lock; then reset before rebuilding",
     )
     recover_build.add_argument("--confirm-profile", required=True)
+    recover_baseline = commands.add_parser(
+        "recover-baseline",
+        help="publish one fully verified, already-loaded baseline receipt batch without collection",
+    )
+    recover_baseline.add_argument("--source-batch", required=True)
+    recover_baseline.add_argument("--confirm-profile", required=True)
     recover_published = commands.add_parser(
         "recover-published",
         help="release a verified crash-left lock after a fully published active manifest",
@@ -367,6 +374,13 @@ def main(argv: list[str] | None = None) -> int:
                 "law-history baseline-build lock "
                 f"{state}; run the explicit reset before another baseline build"
             )
+            return 0
+        if args.command == "recover-baseline":
+            recover_law_history_baseline(
+                source_batch=args.source_batch,
+                confirm_profile=args.confirm_profile,
+            )
+            print("law-history verified baseline receipt batch was published")
             return 0
         if args.command == "recover-published":
             released = recover_law_history_published_lock(confirm_profile=args.confirm_profile)

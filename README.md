@@ -95,6 +95,16 @@ to be gone and only when there is no active manifest or refresh journal.  It
 releases the verified dead lock but does not reuse partial stores: run the
 explicit profile `reset` before building the baseline again.
 
+When initial loading and indexing completed but the process stopped before an
+active marker was written, `recover-baseline` is the narrower
+operator path. It makes no Law API or model-download call: it requires the
+complete local 65-law receipt batch to match PostgreSQL provenance, fixed
+HSK/requirements projections, and the full temporal Qdrant projection before
+an absent-only active marker can be published. It requires both the direct
+baseline batch name and `--confirm-profile functional-uat-law-history`; any
+mismatch leaves the marker absent and requires the explicit reset/build path
+instead.
+
 If the active manifest was already published when the host stopped (including
 an explicit benchmark-strategy bind), use `recover-published --confirm-profile
 functional-uat-law-history` instead.  It releases nothing unless the dead

@@ -66,6 +66,7 @@ LAW_HISTORY_LOCAL_STATE_VERSION = "functional-law-history/v3"
 _ACTIVE_MANIFEST_NAME = "active-law-history-manifest.json"
 _PENDING_REFRESH_NAME = "pending-law-history-refresh.json"
 _MUTATION_LOCK_NAME = ".law-history-mutation.lock"
+_SOURCE_BATCH_MANIFEST_NAME = "source-manifest.json"
 _WINERROR_INVALID_PARAMETER = 87
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MST = re.compile(r"^\d{1,32}$")
@@ -710,7 +711,7 @@ def _write_source_batch_manifest(
     sources: Sequence[LawHistorySource],
 ) -> None:
     _write_json(
-        root / "source-manifest.json",
+        root / _SOURCE_BATCH_MANIFEST_NAME,
         {
             "local_state_version": LAW_HISTORY_LOCAL_STATE_VERSION,
             "profile": LAW_HISTORY_PROFILE,
@@ -1129,6 +1130,20 @@ def _validate_frozen_input_projections(attestation: Mapping[str, object]) -> Non
         raise LawHistoryError("LAW_HISTORY_FROZEN_INPUT_PROJECTION_UNAVAILABLE") from exc
 
 
+def _neo4j_property_projection(node: Mapping[str, object]) -> dict[str, object]:
+    """Return the exact property map Neo4j can persist for an HSK node.
+
+    Neo4j properties cannot retain ``null`` values: ``SET n = row`` removes a
+    property whose driver value is ``None``.  The frozen HSK input deliberately
+    retains those keys so its source semantics and digest remain exact, while
+    the store-projection comparison must use the corresponding persisted map.
+    Only expected input is normalized; an unexpected stored key or any
+    non-null field/value change still makes the comparison fail closed.
+    """
+
+    return {key: value for key, value in node.items() if value is not None}
+
+
 def _verify_frozen_input_projections_full(attestation: FrozenInputAttestation) -> None:
     """Explicitly compare every fixed HSK/CCCT projection with its inputs."""
 
@@ -1185,7 +1200,8 @@ def _verify_frozen_input_projections_full(attestation: FrozenInputAttestation) -
         for row in dataset.documents
     }
     expected_hsk = {
-        (canonical_json_bytes(node), bool(node.get("is_leaf"))) for node in attestation.hsk_nodes
+        (canonical_json_bytes(_neo4j_property_projection(node)), bool(node.get("is_leaf")))
+        for node in attestation.hsk_nodes
     }
     expected_graph = {
         (
@@ -2077,6 +2093,49 @@ def _write_active_manifest(
     return sha256_bytes(payload)
 
 
+def _write_active_manifest_if_absent(profile: Path, manifest: Mapping[str, object]) -> str:
+    """Publish one fully verified baseline without replacing a concurrent marker.
+
+    The normal build path is already serialized by the profile mutation lock.
+    Recovery additionally needs an absent-only publication primitive: a stale
+    or manually created marker must never be overwritten after its expensive
+    source/store verification has finished.  A same-directory hard link gives
+    the final target an atomic no-replace creation step; a crash before that
+    step leaves only a disposable temporary file, while a crash after it
+    leaves a complete marker for the explicit published-state recovery path.
+    """
+
+    path = _active_manifest_path(profile)
+    if path.exists() or path.is_symlink():
+        raise LawHistoryError("LAW_HISTORY_MANIFEST_CONCURRENT_MODIFICATION")
+    payload = canonical_json_bytes(manifest)
+    descriptor: int | None = None
+    temporary: str | None = None
+    try:
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".recover.tmp", dir=path.parent
+        )
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = None
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError as exc:
+            raise LawHistoryError("LAW_HISTORY_MANIFEST_CONCURRENT_MODIFICATION") from exc
+    except LawHistoryError:
+        raise
+    except OSError as exc:
+        raise LawHistoryError("LAW_HISTORY_OUTPUT_WRITE_FAILED") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary is not None:
+            Path(temporary).unlink(missing_ok=True)
+    return sha256_bytes(payload)
+
+
 def _replace_active_manifest_if_digest(
     *, profile: Path, expected_sha256: str, manifest: Mapping[str, object]
 ) -> str:
@@ -2684,6 +2743,320 @@ def _validate_store_source_provenance(source_assets: Sequence[Mapping[str, objec
         observed_value = observed[key]
         if observed_value != expected_value:
             raise LawHistoryError("LAW_HISTORY_SOURCE_PROVENANCE_MISMATCH")
+
+
+def _recovery_source_batch_directory(profile: Path, source_batch: str) -> Path:
+    """Resolve one direct, ignored baseline receipt directory without escapes."""
+
+    if not isinstance(source_batch, str) or not source_batch:
+        raise LawHistoryError("LAW_HISTORY_RECOVERY_SOURCE_BATCH_INVALID")
+    value = Path(source_batch)
+    if (
+        value.is_absolute()
+        or value.drive
+        or value.root
+        or len(value.parts) != 1
+        or value.name != source_batch
+        or not value.name.startswith("baseline-")
+    ):
+        raise LawHistoryError("LAW_HISTORY_RECOVERY_SOURCE_BATCH_INVALID")
+    parent = _safe_directory(profile / "data" / "law-history")
+    candidate = parent / value.name
+    try:
+        candidate.resolve(strict=True).relative_to(parent.resolve(strict=True))
+    except (OSError, ValueError) as exc:
+        raise LawHistoryError("LAW_HISTORY_RECOVERY_SOURCE_BATCH_INVALID") from exc
+    if not candidate.is_dir() or candidate.is_symlink():
+        raise LawHistoryError("LAW_HISTORY_RECOVERY_SOURCE_BATCH_INVALID")
+    return candidate
+
+
+def _recovery_baseline_entries(
+    *, profile: Path, source_batch: str
+) -> tuple[Path, dict[tuple[str, str], dict[str, object]]]:
+    """Load a complete local baseline receipt manifest, never an arbitrary file set."""
+
+    root = _recovery_source_batch_directory(profile, source_batch)
+    manifest_path = root / _SOURCE_BATCH_MANIFEST_NAME
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        raise LawHistoryError("LAW_HISTORY_RECOVERY_SOURCE_BATCH_INVALID")
+    try:
+        raw = manifest_path.read_bytes()
+        if len(raw) > 256 * 1024:
+            raise LawHistoryError("LAW_HISTORY_RECOVERY_SOURCE_BATCH_INVALID")
+        manifest = json.loads(raw.decode("utf-8"))
+    except LawHistoryError:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise LawHistoryError("LAW_HISTORY_RECOVERY_SOURCE_BATCH_INVALID") from exc
+    if (
+        not isinstance(manifest, dict)
+        or set(manifest) != {"local_state_version", "profile", "as_of", "sources"}
+        or manifest.get("local_state_version") != LAW_HISTORY_LOCAL_STATE_VERSION
+        or manifest.get("profile") != LAW_HISTORY_PROFILE
+        or manifest.get("as_of") != LAW_HISTORY_BASELINE_AS_OF.isoformat()
+        or not isinstance(manifest.get("sources"), list)
+    ):
+        raise LawHistoryError("LAW_HISTORY_RECOVERY_SOURCE_BATCH_INVALID")
+
+    entries: dict[tuple[str, str], dict[str, object]] = {}
+    expected_files = {_SOURCE_BATCH_MANIFEST_NAME}
+    for raw_entry in cast(list[object], manifest["sources"]):
+        if not isinstance(raw_entry, dict) or set(raw_entry) != {
+            "law_id",
+            "effective_mst",
+            "version_key",
+            "effective_sha256",
+            "effective_date",
+            "article_count",
+            "is_repealed",
+        }:
+            raise LawHistoryError("LAW_HISTORY_RECOVERY_SOURCE_BATCH_INVALID")
+        law_id = raw_entry["law_id"]
+        mst = raw_entry["effective_mst"]
+        version_key = raw_entry["version_key"]
+        digest = raw_entry["effective_sha256"]
+        article_count = raw_entry["article_count"]
+        is_repealed = raw_entry["is_repealed"]
+        if (
+            not isinstance(law_id, str)
+            or law_id not in LAW_HISTORY_LAW_IDS
+            or not isinstance(mst, str)
+            or _MST.fullmatch(mst) is None
+            or not isinstance(digest, str)
+            or _SHA256.fullmatch(digest) is None
+            or type(article_count) is not int
+            or article_count < 1
+            or is_repealed is not False
+        ):
+            raise LawHistoryError("LAW_HISTORY_RECOVERY_SOURCE_BATCH_INVALID")
+        try:
+            effective_date = date.fromisoformat(cast(str, raw_entry["effective_date"]))
+        except (TypeError, ValueError) as exc:
+            raise LawHistoryError("LAW_HISTORY_RECOVERY_SOURCE_BATCH_INVALID") from exc
+        if effective_date > LAW_HISTORY_BASELINE_AS_OF or not _valid_law_history_version_key(
+            version_key, mst=mst, effective_date=effective_date
+        ):
+            raise LawHistoryError("LAW_HISTORY_RECOVERY_SOURCE_BATCH_INVALID")
+        key = (law_id, cast(str, version_key))
+        filename = f"law_version_{law_id}_{mst}_{effective_date:%Y%m%d}.json"
+        if key in entries or filename in expected_files:
+            raise LawHistoryError("LAW_HISTORY_RECOVERY_SOURCE_BATCH_INVALID")
+        entries[key] = dict(raw_entry)
+        expected_files.add(filename)
+    if len(entries) != len(LAW_HISTORY_LAW_IDS) or {key[0] for key in entries} != set(
+        LAW_HISTORY_LAW_IDS
+    ):
+        raise LawHistoryError("LAW_HISTORY_RECOVERY_SOURCE_BATCH_INVALID")
+    try:
+        files = tuple(root.iterdir())
+    except OSError as exc:
+        raise LawHistoryError("LAW_HISTORY_RECOVERY_SOURCE_BATCH_INVALID") from exc
+    if {item.name for item in files} != expected_files or any(
+        item.is_symlink() or not item.is_file() for item in files
+    ):
+        raise LawHistoryError("LAW_HISTORY_RECOVERY_SOURCE_BATCH_INVALID")
+    return root, entries
+
+
+def _recoverable_baseline_sources(
+    *, profile: Path, source_batch: str
+) -> tuple[Path, tuple[LawHistorySource, ...]]:
+    """Reconstruct an unpublished baseline only when local receipts equal PG provenance."""
+
+    root, entries = _recovery_baseline_entries(profile=profile, source_batch=source_batch)
+    from src.db.postgres import connect
+
+    try:
+        with connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT src.law_id, src.mst, src.version_key, src.official_uri, src.raw_sha256,
+                       src.collected_at, src.effective_date, src.article_count,
+                       src.is_repealed, version.law_name, version.hierarchy,
+                       version.ministry, src.source_kind, version.enforcement_date
+                FROM law_version_sources src
+                JOIN law_versions version
+                  ON version.law_id=src.law_id AND version.version_key=src.version_key
+                """
+            )
+            rows = cur.fetchall()
+            cur.execute(
+                """
+                SELECT (SELECT count(*) FROM laws),
+                       (SELECT count(*) FROM law_versions),
+                       (SELECT count(*) FROM law_version_sources),
+                       (SELECT count(*) FROM law_history_refreshes)
+                """
+            )
+            counts = cur.fetchone()
+    except Exception as exc:
+        raise LawHistoryError("LAW_HISTORY_SOURCE_PROVENANCE_UNAVAILABLE") from exc
+    if (
+        not isinstance(counts, tuple)
+        or len(counts) != 4
+        or any(type(value) is not int for value in counts)
+    ):
+        raise LawHistoryError("LAW_HISTORY_RECOVERY_SOURCE_PROVENANCE_MISMATCH")
+    if tuple(counts) != (65, 65, 65, 0) or len(rows) != len(LAW_HISTORY_LAW_IDS):
+        raise LawHistoryError("LAW_HISTORY_RECOVERY_SOURCE_PROVENANCE_MISMATCH")
+
+    sources: list[LawHistorySource] = []
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        if not isinstance(row, tuple) or len(row) != 14:
+            raise LawHistoryError("LAW_HISTORY_RECOVERY_SOURCE_PROVENANCE_MISMATCH")
+        (
+            law_id,
+            mst,
+            version_key,
+            official_uri,
+            raw_sha256,
+            collected_at,
+            effective_date,
+            article_count,
+            is_repealed,
+            law_name,
+            hierarchy,
+            ministry,
+            source_kind,
+            version_date,
+        ) = row
+        if (
+            not isinstance(law_id, str)
+            or not isinstance(mst, str)
+            or not isinstance(version_key, str)
+            or not isinstance(official_uri, str)
+            or not isinstance(raw_sha256, str)
+            or not isinstance(collected_at, datetime)
+            or collected_at.tzinfo is None
+            or collected_at.utcoffset() is None
+            or not isinstance(effective_date, date)
+            or type(article_count) is not int
+            or type(is_repealed) is not bool
+            or not isinstance(law_name, str)
+            or not isinstance(hierarchy, str)
+            or not isinstance(ministry, str)
+            or source_kind != "baseline"
+            or is_repealed
+            or version_date != effective_date
+            or official_uri != _official_uri(mst)
+            or not _valid_law_history_version_key(
+                version_key, mst=mst, effective_date=effective_date
+            )
+        ):
+            raise LawHistoryError("LAW_HISTORY_RECOVERY_SOURCE_PROVENANCE_MISMATCH")
+        key = (law_id, version_key)
+        entry = entries.get(key)
+        if (
+            key in seen
+            or entry is None
+            or (
+                entry["effective_mst"] != mst
+                or entry["effective_sha256"] != raw_sha256
+                or entry["effective_date"] != effective_date.isoformat()
+                or entry["article_count"] != article_count
+                or entry["is_repealed"] is not False
+            )
+        ):
+            raise LawHistoryError("LAW_HISTORY_RECOVERY_SOURCE_PROVENANCE_MISMATCH")
+        filename = f"law_version_{law_id}_{mst}_{effective_date:%Y%m%d}.json"
+        source = LawHistorySource(
+            law_id=law_id,
+            current_mst=mst,
+            current_file=filename,
+            current_sha256=raw_sha256,
+            effective_mst=mst,
+            effective_file=filename,
+            effective_sha256=raw_sha256,
+            effective_date=effective_date,
+            article_count=article_count,
+            is_repealed=False,
+            law_name=law_name,
+            hierarchy=hierarchy,
+            ministry=ministry,
+            official_uri=official_uri,
+            collected_at=collected_at.isoformat(),
+            source_kind="baseline",
+        )
+        _validate_source_asset(profile, source.local_state(profile=profile, source_root=root))
+        seen.add(key)
+        sources.append(source)
+    if seen != set(entries):
+        raise LawHistoryError("LAW_HISTORY_RECOVERY_SOURCE_PROVENANCE_MISMATCH")
+    ordered = tuple(sorted(sources, key=lambda source: (source.law_id, source.version_key)))
+    assets = [source.local_state(profile=profile, source_root=root) for source in ordered]
+    _validate_store_source_provenance(assets)
+    return root, ordered
+
+
+def recover_law_history_baseline(
+    *,
+    source_batch: str,
+    confirm_profile: str,
+    local_root_override: Path | None = None,
+) -> Path:
+    """Publish an already-loaded baseline only after the same full build gates pass.
+
+    This operator action is deliberately network-free: it is only for a build
+    that completed isolated loading/indexing but crashed or was blocked before
+    its active manifest could be written.  It never tolerates a partial store,
+    a refresh, an existing marker, or a source receipt that does not exactly
+    match PostgreSQL provenance.
+    """
+
+    if confirm_profile != LAW_HISTORY_PROFILE:
+        raise LawHistoryError("LAW_HISTORY_RECOVERY_CONFIRMATION_INVALID")
+    try:
+        profile = ensure_functional_uat_law_history_profile(root=local_root_override)
+    except LocalProfileError as exc:
+        raise LawHistoryError("LAW_HISTORY_PROFILE_UNAVAILABLE") from exc
+    with _law_history_mutation_lock(profile):
+        try:
+            apply_functional_uat_law_history_runtime_environment(root=local_root_override)
+        except LocalProfileError as exc:
+            raise LawHistoryError("LAW_HISTORY_PROFILE_UNAVAILABLE") from exc
+        active = _active_manifest_path(profile)
+        if active.exists() or active.is_symlink():
+            raise LawHistoryError("LAW_HISTORY_BUILD_RECOVERY_ACTIVE_MANIFEST")
+        pending = _pending_refresh_path(profile)
+        if pending.exists() or pending.is_symlink():
+            raise LawHistoryError("LAW_HISTORY_REFRESH_JOURNAL_CONFLICT")
+        source_root, sources = _recoverable_baseline_sources(
+            profile=profile, source_batch=source_batch
+        )
+        source_assets = [
+            source.local_state(profile=profile, source_root=source_root) for source in sources
+        ]
+        attestation = build_frozen_input_attestation()
+        _verify_frozen_input_projections_full(attestation)
+        models = _law_history_model_inventory(
+            profile=profile, local_root_override=local_root_override
+        )
+        counts = _history_store_counts()
+        source_article_projection_sha256 = _verify_source_article_projection(
+            profile=profile, source_assets=source_assets
+        )
+        temporal_store_projection_sha256 = _verify_temporal_store_projection()
+        manifest = _manifest_from_sources(
+            profile=profile,
+            source_root=source_root,
+            baseline_sources=sources,
+            models=models,
+            counts=counts,
+            source_article_projection_sha256=source_article_projection_sha256,
+            temporal_store_projection_sha256=temporal_store_projection_sha256,
+            frozen_inputs=attestation.manifest,
+            coverage_through=LAW_HISTORY_BASELINE_AS_OF,
+        )
+        published_digest = _write_active_manifest_if_absent(profile, manifest)
+        _published, active_digest = validate_law_history_state(
+            local_root_override=local_root_override
+        )
+        verified = verify_law_history_store(local_root_override=local_root_override)
+        if active_digest != published_digest or verified.get("manifest_sha256") != published_digest:
+            raise LawHistoryError("LAW_HISTORY_RECOVERY_POSTVERIFY_MISMATCH")
+        return _new_public_artifact(as_of=LAW_HISTORY_BASELINE_AS_OF, counts=counts, models=models)
 
 
 def validate_law_history_state(
@@ -3941,6 +4314,7 @@ __all__ = [
     "collect_law_history_baseline",
     "collect_law_history_refresh",
     "discard_active_law_history_manifest",
+    "recover_law_history_baseline",
     "recover_law_history_build_lock",
     "recover_law_history_published_lock",
     "recover_law_history_refresh_lock",

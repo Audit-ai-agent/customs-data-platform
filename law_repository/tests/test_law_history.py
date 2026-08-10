@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from src.functional_uat import canonical_json_bytes
 from src.law_history import (
     LAW_HISTORY_BASELINE_AS_OF,
     LAW_HISTORY_PROFILE,
@@ -25,18 +26,22 @@ from src.law_history import (
     _canonicalize_coeffective_candidates,
     _catalog_for_law,
     _journal_refresh_sources,
+    _neo4j_property_projection,
     _is_valid_baseline_asset,
     _profile_source_file,
     _refresh_record,
+    _recovery_baseline_entries,
     _source_article_projection_records,
     _updated_refresh_manifest,
     _validated_refresh_records,
     collect_law_history_baseline,
     collect_law_history_refresh,
+    recover_law_history_baseline,
     _validate_source_asset,
     _verify_temporal_store_projection,
     _verify_source_article_projection,
     _validate_store_source_provenance,
+    _write_active_manifest_if_absent,
 )
 from src.law_history_spec import LAW_HISTORY_LAW_IDS, LAW_HISTORY_LAWS
 
@@ -158,6 +163,173 @@ def test_law_history_frozen_hsk_and_ccct_inputs_are_attested_before_projection()
     assert attestation["hsk"]["leaf_count"] == 11_327
     assert attestation["ccct"]["query_count"] == 22_654
     assert attestation["ccct"]["raw_row_count"] == 14_726
+
+
+def test_recovery_baseline_source_batch_rejects_path_escape_and_incomplete_manifest(
+    tmp_path: Path,
+) -> None:
+    profile = tmp_path / "profile"
+    (profile / "data" / "law-history" / "baseline-invalid").mkdir(parents=True)
+    (profile / "data" / "law-history" / "baseline-invalid" / "source-manifest.json").write_text(
+        json.dumps(
+            {
+                "local_state_version": "functional-law-history/v3",
+                "profile": LAW_HISTORY_PROFILE,
+                "as_of": "2026-08-05",
+                "sources": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(LawHistoryError, match="RECOVERY_SOURCE_BATCH_INVALID"):
+        _recovery_baseline_entries(profile=profile, source_batch="../outside")
+    with pytest.raises(LawHistoryError, match="RECOVERY_SOURCE_BATCH_INVALID"):
+        _recovery_baseline_entries(profile=profile, source_batch="baseline-invalid")
+
+
+def test_absent_manifest_recovery_publisher_never_overwrites_existing_marker(
+    tmp_path: Path,
+) -> None:
+    profile = tmp_path / "profile"
+    (profile / "state").mkdir(parents=True)
+    first = {"marker": "first"}
+    digest = _write_active_manifest_if_absent(profile, first)
+    active = profile / "state" / "active-law-history-manifest.json"
+    before = active.read_bytes()
+
+    with pytest.raises(LawHistoryError, match="MANIFEST_CONCURRENT_MODIFICATION"):
+        _write_active_manifest_if_absent(profile, {"marker": "second"})
+
+    assert digest == hashlib.sha256(before).hexdigest()
+    assert active.read_bytes() == before
+
+
+def test_recover_baseline_runs_all_gates_before_absent_only_publication(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import src.law_history as history
+
+    profile = tmp_path / "profile"
+    source_root = profile / "data" / "law-history" / "baseline-recovery"
+    (profile / "state").mkdir(parents=True)
+    source_root.mkdir(parents=True)
+    source = LawHistorySource(
+        law_id="001556",
+        current_mst="100",
+        current_file="law.json",
+        current_sha256=_hash("raw"),
+        effective_mst="100",
+        effective_file="law.json",
+        effective_sha256=_hash("raw"),
+        effective_date=LAW_HISTORY_BASELINE_AS_OF,
+        article_count=1,
+        is_repealed=False,
+        law_name="관세법",
+        hierarchy="법률",
+        ministry="관세청",
+        official_uri="https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=100",
+        collected_at=datetime(2026, 8, 9, tzinfo=timezone.utc).isoformat(),
+        source_kind="baseline",
+    )
+    artifact = tmp_path / "artifact.json"
+    calls: list[str] = []
+    published_manifest = {"published": "verified"}
+    published_digest = hashlib.sha256(canonical_json_bytes(published_manifest)).hexdigest()
+
+    monkeypatch.setattr(
+        history, "ensure_functional_uat_law_history_profile", lambda **_kwargs: profile
+    )
+    monkeypatch.setattr(
+        history, "apply_functional_uat_law_history_runtime_environment", lambda **_kwargs: profile
+    )
+    monkeypatch.setattr(
+        history,
+        "_recoverable_baseline_sources",
+        lambda **_kwargs: (source_root, (source,)),
+    )
+    monkeypatch.setattr(
+        history,
+        "build_frozen_input_attestation",
+        lambda: SimpleNamespace(manifest={"attested": "exact"}),
+    )
+    monkeypatch.setattr(
+        history,
+        "_verify_frozen_input_projections_full",
+        lambda _attestation: calls.append("frozen"),
+    )
+    monkeypatch.setattr(
+        history,
+        "_law_history_model_inventory",
+        lambda **_kwargs: {"dense": {"revision": "fixed"}},
+    )
+    monkeypatch.setattr(
+        history,
+        "_history_store_counts",
+        lambda: {"law_count": 65, "law_version_count": 65},
+    )
+    monkeypatch.setattr(
+        history,
+        "_verify_source_article_projection",
+        lambda **_kwargs: calls.append("source") or _hash("source"),
+    )
+    monkeypatch.setattr(
+        history,
+        "_verify_temporal_store_projection",
+        lambda: calls.append("temporal") or _hash("temporal"),
+    )
+    monkeypatch.setattr(history, "_manifest_from_sources", lambda **_kwargs: published_manifest)
+    monkeypatch.setattr(
+        history,
+        "validate_law_history_state",
+        lambda **_kwargs: (published_manifest, published_digest),
+    )
+    monkeypatch.setattr(
+        history,
+        "verify_law_history_store",
+        lambda **_kwargs: {"manifest_sha256": published_digest},
+    )
+    monkeypatch.setattr(history, "_new_public_artifact", lambda **_kwargs: artifact)
+
+    assert (
+        recover_law_history_baseline(
+            source_batch="baseline-recovery",
+            confirm_profile=LAW_HISTORY_PROFILE,
+        )
+        == artifact
+    )
+    assert calls == ["frozen", "source", "temporal"]
+    assert json.loads((profile / "state" / "active-law-history-manifest.json").read_text()) == (
+        published_manifest
+    )
+
+
+def test_hsk_projection_matches_neo4j_null_omission_without_masking_real_changes() -> None:
+    """The full-store audit accepts only Neo4j's unavoidable null omission."""
+
+    parsed_hsk_node = {
+        "code": "0101210000",
+        "level": 10,
+        "name_ko": "말",
+        "is_leaf": True,
+        "quantity_unit": None,
+        "weight_unit": "KG",
+    }
+    persisted_hsk_node = {
+        "code": "0101210000",
+        "level": 10,
+        "name_ko": "말",
+        "is_leaf": True,
+        "weight_unit": "KG",
+    }
+
+    expected = canonical_json_bytes(_neo4j_property_projection(parsed_hsk_node))
+    assert expected == canonical_json_bytes(persisted_hsk_node)
+    assert expected != canonical_json_bytes({**persisted_hsk_node, "quantity_unit": "EA"})
+    assert expected != canonical_json_bytes({**persisted_hsk_node, "weight_unit": "TON"})
+    assert expected != canonical_json_bytes(
+        {key: value for key, value in persisted_hsk_node.items() if key != "weight_unit"}
+    )
 
 
 def test_baseline_asset_uses_effective_on_or_before_snapshot_date() -> None:
