@@ -134,22 +134,26 @@ def test_graph_edge_invariants_are_classified_without_graph_values() -> None:
 
 
 @pytest.mark.parametrize(
-    ("content", "content_hash", "version_mst", "has_version"),
+    ("content", "content_hash", "version_mst", "version_key", "has_version"),
     [
-        ("", hashlib.sha256(b"").hexdigest(), "mst-1", True),
-        ("tampered", "0" * 64, "mst-1", True),
-        ("article", hashlib.sha256(b"article").hexdigest(), " ", True),
-        ("article", hashlib.sha256(b"article").hexdigest(), "missing", False),
+        ("", hashlib.sha256(b"").hexdigest(), "mst-1", "mst-1", True),
+        ("tampered", "0" * 64, "mst-1", "mst-1", True),
+        ("article", hashlib.sha256(b"article").hexdigest(), " ", "mst-1", True),
+        ("article", hashlib.sha256(b"article").hexdigest(), "mst-1", " ", True),
+        ("article", hashlib.sha256(b"article").hexdigest(), "mst-1", "missing", False),
     ],
 )
 def test_law_content_hash_and_version_invariants_are_checked(
     content: str,
     content_hash: str,
     version_mst: str,
+    version_key: str,
     has_version: bool,
 ) -> None:
     with pytest.raises(consistency.StoreVerificationError, match="STORE_LAW_CONTENT_HASH_MISMATCH"):
-        consistency._validate_law_hash_rows([(content, content_hash, version_mst, has_version)])
+        consistency._validate_law_hash_rows(
+            [(content, content_hash, version_mst, version_key, has_version)]
+        )
 
 
 def test_qdrant_scroll_reads_all_pages_with_bounded_payloads() -> None:

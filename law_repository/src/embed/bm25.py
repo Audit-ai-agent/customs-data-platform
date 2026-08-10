@@ -21,6 +21,7 @@ from collections import Counter
 K1 = 1.2
 B = 0.75
 AVG_LEN = 256.0  # fastembed Bm25 기본값과 동일한 상수 근사
+ENCODER_VERSION = "ko-ngram-md5-bm25/v1"
 
 _RUN = re.compile(r"[가-힣]+|[a-z0-9]+")
 

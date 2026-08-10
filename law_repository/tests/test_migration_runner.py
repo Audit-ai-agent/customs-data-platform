@@ -96,17 +96,29 @@ class FakeConnection:
 def test_repository_migrations_are_contiguous_and_checksum_attested() -> None:
     migrations = discover_migrations()
 
-    assert [item.number for item in migrations] == [1, 2, 3]
+    assert [item.number for item in migrations] == [1, 2, 3, 4, 5, 6]
     assert [item.filename for item in migrations] == [
         "001_init.sql",
         "002_parent_article_pk.sql",
         "003_ccct_requirements.sql",
+        "004_law_history_provenance.sql",
+        "005_law_history_version_identity.sql",
+        "006_law_history_official_uri_constraint.sql",
     ]
     assert all(
         hashlib.sha256(item.path.read_bytes()).hexdigest() == item.checksum_sha256
         for item in migrations
     )
     assert all(item.byte_size > 0 for item in migrations)
+
+    identity = migrations[-2].sql
+    assert "version_key" in identity
+    assert "law_versions_law_id_mst_key" in identity
+    assert "law_version_sources_law_id_version_key_fkey" in identity
+
+    uri_constraint = migrations[-1].sql
+    assert "law_version_sources_official_uri_check" in uri_constraint
+    assert "www[.]law[.]go[.]kr" in uri_constraint
 
 
 def test_discovery_rejects_gap_and_non_utf8(tmp_path: Path) -> None:

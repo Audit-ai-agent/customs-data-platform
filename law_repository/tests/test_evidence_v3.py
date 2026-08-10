@@ -54,3 +54,32 @@ def test_v3_request_rejects_duplicate_item_ids() -> None:
         assert "items.item_id must be unique" in str(exc)
     else:
         raise AssertionError("duplicate item IDs must be rejected")
+
+
+def test_v3_response_accepts_only_a_complete_temporal_context() -> None:
+    from src.evidence_v3 import RetrieveResponseV3
+
+    payload = {
+        "schema_version": "3.0",
+        "request_id": "req-v3",
+        "status": "partial",
+        "knowledge_snapshot_id": "snapshot-1",
+        "temporal_context": {
+            "law_as_of": "2026-08-06",
+            "hsk_snapshot_as_of": "2026-08-05",
+            "requirements_snapshot_as_of": "2026-08-05",
+        },
+        "results": [],
+        "errors": [],
+    }
+    response = RetrieveResponseV3.model_validate(payload)
+    assert response.temporal_context is not None
+    assert response.temporal_context.law_as_of.isoformat() == "2026-08-06"
+
+    payload["temporal_context"].pop("requirements_snapshot_as_of")
+    try:
+        RetrieveResponseV3.model_validate(payload)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("partial temporal context must be rejected")

@@ -13,15 +13,18 @@ FlagEmbedding 의 FlagReranker 는 transformers 5.x 에서 깨진다
 from __future__ import annotations
 
 import math
+from typing import Any, Literal
 
 from src.embed.model_identity import RERANK_MODEL
+from src.local_profiles import runtime_model_cache_directory
 
 MODEL = RERANK_MODEL.model_id
 MODEL_REVISION = RERANK_MODEL.revision
 _BATCH = 4  # CPU 메모리 상한 (568M 파라미터 × max_length 토큰)
 
-_tok = None
-_model = None
+_tok: Any | None = None
+_model: Any | None = None
+_model_device: Literal["cpu", "cuda"] = "cpu"
 _failed = False
 
 
@@ -29,8 +32,35 @@ class RerankUnavailable(RuntimeError):
     """The pinned reranker cannot produce a complete, bounded score batch."""
 
 
-def _get():
-    global _tok, _model, _failed
+def _cuda_allowed_for_active_profile() -> bool:
+    """Gate CUDA only for the isolated law-history runtime.
+
+    Other retained profiles keep their existing explicit-device behavior.
+    The law-history profile may reach CUDA solely through the scoped local
+    launcher helper; no Evidence request or ambient environment value can
+    turn it on.
+    """
+
+    from src.local_profiles import (
+        law_history_cuda_opt_in_enabled,
+        law_history_profile_is_active,
+    )
+
+    return not law_history_profile_is_active() or law_history_cuda_opt_in_enabled()
+
+
+def _get(device: Literal["cpu", "cuda"] = "cpu"):
+    global _tok, _model, _model_device, _failed
+    if device == "cuda":
+        if not _cuda_allowed_for_active_profile():
+            return None
+        try:
+            import torch
+
+            if not torch.cuda.is_available():
+                return None
+        except Exception:
+            return None
     if _model is None and not _failed:
         try:
             from transformers import AutoModelForSequenceClassification, AutoTokenizer
@@ -40,28 +70,44 @@ def _get():
             _tok = AutoTokenizer.from_pretrained(  # nosec B615
                 MODEL,
                 revision=MODEL_REVISION,
+                cache_dir=str(runtime_model_cache_directory()),
                 local_files_only=True,
             )
             _model = AutoModelForSequenceClassification.from_pretrained(  # nosec B615
                 MODEL,
                 revision=MODEL_REVISION,
+                cache_dir=str(runtime_model_cache_directory()),
                 local_files_only=True,
             )
             _model.eval()
         except Exception as e:  # noqa: BLE001 — 어떤 실패든 degrade 가 계약
             print(f"[rerank] {MODEL} 로드 실패 — RRF 순위로 degrade: {e}")
             _failed = True
+    if _model is not None and _model_device != device:
+        try:
+            _model.to(device)
+            _model_device = device
+        except Exception:  # noqa: BLE001 - caller must retain deterministic fallback
+            return None
     return _model
 
 
-def available() -> bool:
-    return _get() is not None
+def available(device: Literal["cpu", "cuda"] = "cpu") -> bool:
+    return _get(device) is not None
 
 
-def scores(query: str, passages: list[str], max_length: int = 1024) -> list[float] | None:
+def scores(
+    query: str,
+    passages: list[str],
+    max_length: int = 1024,
+    *,
+    device: Literal["cpu", "cuda"] = "cpu",
+) -> list[float] | None:
     """쿼리-지문 쌍별 [0,1] 정규화(sigmoid) 점수. 모델 불가 시 None."""
     global _failed
-    if _get() is None:
+    model = _get(device)
+    tokenizer = _tok
+    if model is None or tokenizer is None:
         return None
     if not passages:
         return []
@@ -72,7 +118,7 @@ def scores(query: str, passages: list[str], max_length: int = 1024) -> list[floa
         with torch.no_grad():
             for i in range(0, len(passages), _BATCH):
                 chunk = passages[i : i + _BATCH]
-                batch = _tok(
+                batch = tokenizer(
                     [query] * len(chunk),
                     chunk,
                     padding=True,
@@ -80,7 +126,8 @@ def scores(query: str, passages: list[str], max_length: int = 1024) -> list[floa
                     max_length=max_length,
                     return_tensors="pt",
                 )
-                logits = _model(**batch).logits.squeeze(-1)
+                batch = {name: value.to(device) for name, value in batch.items()}
+                logits = model(**batch).logits.squeeze(-1)
                 out.extend(torch.sigmoid(logits).tolist())
         return out
     except Exception as e:  # noqa: BLE001
@@ -89,7 +136,13 @@ def scores(query: str, passages: list[str], max_length: int = 1024) -> list[floa
         return None
 
 
-def required_scores(query: str, passages: list[str], max_length: int = 1024) -> list[float]:
+def required_scores(
+    query: str,
+    passages: list[str],
+    max_length: int = 1024,
+    *,
+    device: Literal["cpu", "cuda"] = "cpu",
+) -> list[float]:
     """Return validated scores or fail closed.
 
     The general-purpose hybrid explorer may still use :func:`scores` and its
@@ -99,7 +152,7 @@ def required_scores(query: str, passages: list[str], max_length: int = 1024) -> 
     reranked search.
     """
 
-    result = scores(query, passages, max_length=max_length)
+    result = scores(query, passages, max_length=max_length, device=device)
     if result is None:
         raise RerankUnavailable("pinned reranker is unavailable")
     if len(result) != len(passages):

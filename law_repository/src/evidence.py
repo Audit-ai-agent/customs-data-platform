@@ -117,6 +117,20 @@ class EvidenceError(ContractModel):
     retryable: bool
 
 
+class TemporalContext(ContractModel):
+    """The independently versioned inputs used for one Evidence result.
+
+    Law text can be retrieved at the review date in the law-history profile,
+    while the retained HSK and CCCT requirement snapshots have one verified
+    baseline date.  Keeping all three dates explicit prevents a consumer from
+    presenting that mixed coverage as one time-complete result.
+    """
+
+    law_as_of: date
+    hsk_snapshot_as_of: date
+    requirements_snapshot_as_of: date
+
+
 class Evidence(ContractModel):
     evidence_id: EvidenceId
     source_record_id: str = Field(min_length=1, max_length=512)
@@ -136,7 +150,7 @@ class Evidence(ContractModel):
     required_document_code: NullableNonEmpty
     required_document_name: NullableNonEmpty
     agencies: list[NonEmpty500] = Field(json_schema_extra={"uniqueItems": True})
-    retrieval_methods: list[Literal["exact_hs", "dense", "bm25", "graph"]] = Field(
+    retrieval_methods: list[Literal["exact_hs", "dense", "bm25", "graph", "rerank"]] = Field(
         min_length=1, json_schema_extra={"uniqueItems": True}
     )
     eligibility: Literal["finding", "supporting", "blocked"]
@@ -174,6 +188,7 @@ class RetrieveResponse(ContractModel):
     request_id: NonEmpty128
     status: Literal["ok", "partial", "failed"]
     knowledge_snapshot_id: NullableNonEmpty
+    temporal_context: TemporalContext | None = None
     results: list[ItemEvidenceResult] = Field(max_length=100)
     errors: list[EvidenceError] = Field(
         default_factory=list,
@@ -190,9 +205,18 @@ class RequirementLookup:
 @dataclass(frozen=True)
 class LawArticleMatch:
     row: dict
-    retrieval_methods: tuple[Literal["dense", "bm25", "graph"], ...]
+    retrieval_methods: tuple[Literal["dense", "bm25", "graph", "rerank"], ...]
     score: float
     raw_scores: dict[str, float]
+
+
+@dataclass(frozen=True)
+class TemporalEvidenceSupport:
+    """Profile-owned temporal availability returned without raw source data."""
+
+    context: TemporalContext
+    law_coverage_available: bool
+    requirements_lookup_as_of: date
 
 
 class EvidenceBackend(Protocol):
@@ -411,7 +435,7 @@ class DatabaseEvidenceBackend:
                 "lexical_overlap": float(lexical),
             }
             method_order = cast(
-                tuple[Literal["dense", "bm25", "graph"], ...],
+                tuple[Literal["dense", "bm25", "graph", "rerank"], ...],
                 tuple(
                     method
                     for method in ("dense", "bm25", "graph")
@@ -504,9 +528,20 @@ def _law_match_to_evidence(
     if row.get("paragraph_no") is not None:
         article_label += f" 제{row['paragraph_no']}항"
     title_suffix = f"({row['title']})" if row.get("title") else ""
-    source_uri = (
-        f"https://www.law.go.kr/%EB%B2%95%EB%A0%B9/{quote(row['law_name'])}/{quote(article_label)}"
-    )
+    # The history backend joins a receipt for the exact version MST.  Its
+    # official URI is the only permitted citation target for that branch;
+    # never synthesize a generic current-law URL for an historical article.
+    verified_uri = row.get("official_uri")
+    if verified_uri is not None:
+        if not isinstance(verified_uri, str) or not verified_uri.startswith(
+            "https://www.law.go.kr/"
+        ):
+            raise RuntimeError("LAW_HISTORY_OFFICIAL_URI_INVALID")
+        source_uri = verified_uri
+    else:
+        # Retained three-law Evidence does not have the law-history receipt
+        # join and preserves its legacy, human-readable article URL.
+        source_uri = f"https://www.law.go.kr/%EB%B2%95%EB%A0%B9/{quote(row['law_name'])}/{quote(article_label)}"
     # law_articles uses a half-open valid_to.  The Evidence wire exposes the
     # last applicable calendar date so every consumer uses one convention.
     wire_valid_to = row["valid_to"] - timedelta(days=1) if row.get("valid_to") else None
@@ -670,11 +705,53 @@ def _unsupported_as_of_results(
     return results
 
 
+def _law_history_temporal_support(
+    backend: EvidenceBackend,
+    snapshot_id: str | None,
+    review_as_of: date,
+) -> TemporalEvidenceSupport | None:
+    """Read an optional profile-owned temporal capability without changing V1.
+
+    The retained three-law backend intentionally has no such method.  It
+    keeps its exact one-date behaviour.  The law-history backend opts in and
+    must return a fully populated, typed context; malformed values are a
+    server-side availability failure rather than a silent legacy fallback.
+    """
+
+    provider = getattr(backend, "temporal_evidence_support", None)
+    if provider is None:
+        return None
+    support = provider(snapshot_id, review_as_of)
+    if not isinstance(support, TemporalEvidenceSupport):
+        raise RuntimeError("LAW_HISTORY_TEMPORAL_SUPPORT_INVALID")
+    if support.context.law_as_of != review_as_of:
+        raise RuntimeError("LAW_HISTORY_TEMPORAL_CONTEXT_INVALID")
+    return support
+
+
 def retrieve_evidence(
     request: RetrieveRequest, backend: EvidenceBackend | None = None
 ) -> RetrieveResponse:
     """Evidence v1 orchestration. backend 주입으로 단위/계약 테스트를 분리한다."""
     backend = backend or DatabaseEvidenceBackend()
+    # A law-history profile owns its three-date context independently from
+    # the mutable CCCT snapshot ID.  Resolve it before any snapshot lookup so
+    # even a controlled availability failure cannot silently erase the date
+    # boundary from a law-history response.  Legacy backends simply return
+    # ``None`` here and retain their old nullable wire behaviour.
+    try:
+        history_support = _law_history_temporal_support(backend, None, request.review_as_of)
+    except Exception:
+        err = _backend_error("KNOWLEDGE_SNAPSHOT_METADATA_UNAVAILABLE")
+        return RetrieveResponse(
+            schema_version=SCHEMA_VERSION,
+            request_id=request.request_id,
+            status="failed",
+            knowledge_snapshot_id=None,
+            results=_unavailable_results(request, err),
+            errors=[err],
+        )
+    temporal_context = history_support.context if history_support is not None else None
     try:
         snapshot_id = backend.current_snapshot_id()
     except Exception as exc:  # DB 장애를 근거 0건으로 오해하지 않도록 계약 응답화
@@ -689,6 +766,7 @@ def retrieve_evidence(
             request_id=request.request_id,
             status="failed",
             knowledge_snapshot_id=None,
+            temporal_context=temporal_context,
             results=_unavailable_results(request, err),
             errors=[err],
         )
@@ -699,6 +777,7 @@ def retrieve_evidence(
             request_id=request.request_id,
             status="failed",
             knowledge_snapshot_id=None,
+            temporal_context=temporal_context,
             results=_unavailable_results(request, err),
             errors=[err],
         )
@@ -712,10 +791,14 @@ def retrieve_evidence(
             request_id=request.request_id,
             status="failed",
             knowledge_snapshot_id=snapshot_id,
+            temporal_context=temporal_context,
             results=_unavailable_results(request, err),
             errors=[err],
         )
-    if request.review_as_of != supported_as_of:
+    # The legacy profile remains deliberately one-date only.  A law-history
+    # profile owns a verified legal date range and keeps the retained HSK /
+    # CCCT snapshot date visible through ``temporal_context`` instead.
+    if history_support is None and request.review_as_of != supported_as_of:
         err = _error(
             "UNSUPPORTED_REVIEW_AS_OF",
             (
@@ -729,13 +812,50 @@ def retrieve_evidence(
             request_id=request.request_id,
             status="failed",
             knowledge_snapshot_id=snapshot_id,
+            temporal_context=temporal_context,
             results=_unsupported_as_of_results(request, backend, err),
             errors=[err],
         )
 
     query_intent = _effective_query_intent(request)
     results: list[ItemEvidenceResult] = []
+    requirements_as_of = (
+        history_support.requirements_lookup_as_of
+        if history_support is not None
+        else request.review_as_of
+    )
+    law_coverage_available = (
+        history_support.law_coverage_available if history_support is not None else True
+    )
+    temporal_item_errors: list[EvidenceError] = []
+    temporal_top_errors: list[EvidenceError] = []
     partial = False
+    if history_support is not None:
+        if requirements_as_of != request.review_as_of:
+            mismatch = _error(
+                "TEMPORAL_REQUIREMENT_SNAPSHOT_MISMATCH",
+                (
+                    "법령 기준일과 HSK·요건 스냅샷 기준일이 다릅니다: "
+                    f"law_as_of={request.review_as_of.isoformat()}, "
+                    f"snapshot_as_of={requirements_as_of.isoformat()}"
+                ),
+                retryable=False,
+            )
+            temporal_item_errors.append(mismatch)
+            temporal_top_errors.append(mismatch)
+            partial = True
+        if not law_coverage_available:
+            unavailable = _error(
+                "LAW_HISTORY_COVERAGE_MISSING",
+                (
+                    "요청 법령 기준일의 검증된 이력 스냅샷이 없습니다: "
+                    f"law_as_of={request.review_as_of.isoformat()}"
+                ),
+                retryable=False,
+            )
+            temporal_item_errors.append(unavailable)
+            temporal_top_errors.append(unavailable)
+            partial = True
     for item in request.items:
         try:
             resolution = backend.resolve_hsk(item.hs_code)
@@ -751,7 +871,7 @@ def retrieve_evidence(
                     coverage="unknown",
                     requirements_found=False,
                     evidence=[],
-                    errors=[err],
+                    errors=[*temporal_item_errors, err],
                 )
             )
             continue
@@ -777,7 +897,7 @@ def retrieve_evidence(
                     coverage="unknown",
                     requirements_found=False,
                     evidence=[],
-                    errors=[_error(code, message)],
+                    errors=[*temporal_item_errors, _error(code, message)],
                 )
             )
             continue
@@ -795,14 +915,14 @@ def retrieve_evidence(
                     coverage="partial",
                     requirements_found=False,
                     evidence=[],
-                    errors=[destination_error],
+                    errors=[*temporal_item_errors, destination_error],
                 )
             )
             continue
 
         try:
             lookup = backend.lookup_requirements(
-                snapshot_id, resolution.resolved_hsk10, request.trade_type, request.review_as_of
+                snapshot_id, resolution.resolved_hsk10, request.trade_type, requirements_as_of
             )
         except Exception:
             partial = True
@@ -816,7 +936,7 @@ def retrieve_evidence(
                     coverage="partial",
                     requirements_found=False,
                     evidence=[],
-                    errors=[err],
+                    errors=[*temporal_item_errors, err],
                 )
             )
             continue
@@ -837,15 +957,17 @@ def retrieve_evidence(
                     coverage="partial",
                     requirements_found=False,
                     evidence=[],
-                    errors=[err],
+                    errors=[*temporal_item_errors, err],
                 )
             )
             continue
 
         requirement_evidence = [_row_to_evidence(item.item_id, row) for row in lookup.rows]
         law_evidence: list[Evidence] = []
-        item_errors: list[EvidenceError] = []
-        item_coverage: Literal["complete", "partial"] = "complete"
+        item_errors: list[EvidenceError] = list(temporal_item_errors)
+        item_coverage: Literal["complete", "partial"] = (
+            "partial" if temporal_item_errors else "complete"
+        )
         if destination_error is not None:
             # A foreign destination is valid for Korean export processing, but
             # no Korean-only local dataset can certify the destination's own
@@ -854,7 +976,12 @@ def retrieve_evidence(
             partial = True
             item_coverage = "partial"
             item_errors.append(destination_error)
-        if "law_support" in query_intent:
+        if "law_support" in query_intent and not law_coverage_available:
+            # Do not query a current vector collection and then pretend it is
+            # a historical answer.  The explicit coverage error above remains
+            # the only public explanation.
+            item_coverage = "partial"
+        elif "law_support" in query_intent:
             try:
                 matches = backend.search_law_articles(
                     _law_query(request, item, resolution.resolved_hsk10),
@@ -883,22 +1010,21 @@ def retrieve_evidence(
             )
         )
 
-    top_errors = (
-        [
+    top_errors = [*temporal_top_errors]
+    if partial and not top_errors:
+        top_errors = [
             _error(
                 "PARTIAL_RESULTS",
                 "일부 품목의 지식 조회를 완료하지 못함",
                 retryable=any(error.retryable for result in results for error in result.errors),
             )
         ]
-        if partial
-        else []
-    )
     return RetrieveResponse(
         schema_version=SCHEMA_VERSION,
         request_id=request.request_id,
         status="partial" if partial else "ok",
         knowledge_snapshot_id=snapshot_id,
+        temporal_context=temporal_context,
         results=results,
         errors=top_errors,
     )

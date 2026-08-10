@@ -32,8 +32,8 @@ def _insert_article(cur, valid_from, valid_to):
     cur.execute(
         """
         INSERT INTO law_articles
-          (law_id, article_no, content, content_hash, version_mst, valid_from, valid_to)
-        VALUES (%s, 1, 'x', 'h', 'mst', %s, %s)
+          (law_id, article_no, content, content_hash, version_mst, version_key, valid_from, valid_to)
+        VALUES (%s, 1, 'x', 'h', 'mst', 'mst', %s, %s)
         """,
         (_SEED_LAW[0], valid_from, valid_to),
     )

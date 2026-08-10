@@ -51,9 +51,85 @@ uv run --locked --no-sync --group dev --extra store --extra ingestion python too
 uv run --locked --no-sync --group dev --extra store python tools/dev_store.py verify
 ```
 
-## Real functional UAT: three customs laws
+## Real functional UAT: 65-law Evidence history (default)
 
-`functional-uat-3law` verifies the actual local service path with the exact
+`functional-uat-law-history` is the default real Evidence profile for the
+end-to-end Functional-UAT path. It starts with an explicit `2026-08-05`
+baseline of the fixed 65-law registry, retains every later official version
+only after an operator-selected refresh, and searches a separate all-version
+Qdrant collection with the legal-date filter applied before ranking. It does
+not import clone raw JSON, dense caches, query rewrite code, or deployment
+settings.
+
+```powershell
+uv sync --locked --group dev --extra store --extra rag --extra ingestion --python 3.11
+uv run --locked --no-sync --group dev --extra store --extra rag --extra ingestion python tools/functional_uat_law_history.py init
+# Add only your personal LAW_API_OC to this new ignored profile config.
+uv run --locked --no-sync --group dev --extra store --extra rag --extra ingestion python tools/functional_uat_law_history.py compose up
+uv run --locked --no-sync --group dev --extra store --extra rag --extra ingestion python tools/functional_uat_law_history.py build --as-of 2026-08-05
+uv run --locked --no-sync --group dev --extra store --extra rag --extra ingestion python tools/functional_uat_law_history.py verify-store
+uv run --locked --no-sync --group dev --extra store --extra rag --extra ingestion python tools/functional_uat_law_history.py serve `
+  --host 127.0.0.1 --port 18083
+```
+
+Raw official bodies, version receipts, temporal vectors, and local model cache
+remain below `_local`; Git contains only the fixed candidate registry, schema,
+and verification code. Each response includes `temporal_context`: the legal
+date, the fixed `2026-08-05` HSK snapshot date, and the fixed requirements
+snapshot date. For a later legal date the latter two remain explicit and the
+Evidence result is `partial`; Data never disguises this as a same-date complete
+answer. `refresh --from YYYY-MM-DD --to YYYY-MM-DD` is an explicit operator
+operation only—there is no scheduler or polling path.
+
+If a host is forcibly stopped during a refresh, serving remains fail-closed.
+The operator may run `recover-refresh --from ... --to ... --confirm-profile
+functional-uat-law-history` only after the process is known to be gone; it
+validates the staged local receipts and active-manifest digest before releasing
+the crash-left lock. The same explicit `refresh` range must then be run again.
+No automatic stale-lock deletion exists.
+
+If a host is forcibly stopped during the initial baseline build, there is no
+refresh journal to resume.  The operator may run `recover-build
+--confirm-profile functional-uat-law-history` only after the process is known
+to be gone and only when there is no active manifest or refresh journal.  It
+releases the verified dead lock but does not reuse partial stores: run the
+explicit profile `reset` before building the baseline again.
+
+When initial loading and indexing completed but the process stopped before an
+active marker was written, `recover-baseline` is the narrower
+operator path. It makes no Law API or model-download call: it requires the
+complete local 65-law receipt batch to match PostgreSQL provenance, fixed
+HSK/requirements projections, and the full temporal Qdrant projection before
+an absent-only active marker can be published. It requires both the direct
+baseline batch name and `--confirm-profile functional-uat-law-history`; any
+mismatch leaves the marker absent and requires the explicit reset/build path
+instead.
+
+If the active manifest was already published when the host stopped (including
+an explicit benchmark-strategy bind), use `recover-published --confirm-profile
+functional-uat-law-history` instead.  It releases nothing unless the dead
+owner, absent journal, active manifest, source receipts, fixed inputs,
+PostgreSQL, and temporal Qdrant projection all validate together.  This is an
+operator recovery action, never automatic stale-lock cleanup.
+
+Here, the HSK and CCCT date is a **fixed input-contract baseline**: the build
+attests the exact tracked bytes and their PostgreSQL/Neo4j projections against
+that declared `2026-08-05` boundary. Those tracked inputs do not by themselves
+prove that an external agency collected them on that date, so the product never
+labels this as live or independently time-stamped agency provenance.
+
+An optional local held-out benchmark compares the retained RRF+lexical baseline
+with a separate Kiwi sparse index and bounded CPU/GPU rerank candidates. It
+does not use the clone Goldset as acceptance data and only selects a candidate
+that preserves strict recall@5/@10 and stays within the published p95 budget.
+Normal law-history builds, refreshes, serving, and baseline/CPU benchmark runs
+force CPU inference. CUDA is available only through an explicit local command
+option and is recorded as a separate GPU benchmark candidate; it never turns
+on through an HTTP request, profile configuration, or ambient environment.
+
+## Legacy functional UAT: three customs laws
+
+`functional-uat-3law` remains a compatibility profile for the exact
 three law IDs `001556`, `002421`, and `006392` as of `2026-08-05`. It is a
 functional check, not Production approval: results remain human-review-only,
 and there is no release admission, signature, trust store, quality gate, or
@@ -187,8 +263,10 @@ build succeeds.
 
 ### V2 page-level Korean trade coverage
 
-V2 is additive: V1/r3 and the `functional-uat-3law` profile are not migrated,
-rewritten, or deleted. Its checked-in registry is
+V2 is additive: V1/r3 and the `functional-uat-3law` compatibility profile are
+not migrated, rewritten, or deleted. `functional-uat-law-history` is an
+independent Evidence profile and is never mixed with a V1/r3 source snapshot.
+Its checked-in registry is
 `law_repository/src/guidance_registry_v2.json`; the Git-safe consumer copy is
 `contracts/evidence/v3/guidance_registry_v2.manifest.json`. V2 declares 11
 topics, 18 closed sub-scopes, and 28 applicable `(topic, scope, direction)`
@@ -241,7 +319,8 @@ tax, approval, or real-time agency status has been determined.
   tests only. Secrets, raw official responses, model binaries, Docker volumes,
   and UAT results remain outside Git.
 - `dev-fixture` is the team default. `dev-store` is Data-only development.
-  `functional-uat-3law` is the explicit real-data functional check.
+  `functional-uat-law-history` is the default real-data Evidence UAT profile;
+  `functional-uat-3law` remains an explicit compatibility check.
 - `functional-uat-kr-trade` can serve only a hash-verified, explicitly built
   local guidance snapshot. It is not a replacement for the three-store
   Evidence profile or a claim of complete Korean trade-law coverage.

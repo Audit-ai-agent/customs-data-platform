@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import types
+from contextlib import contextmanager
 from hashlib import sha256
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -52,6 +53,7 @@ from src.local_profiles import (
 from src.profile_evidence import (
     FUNCTIONAL_UAT_MODE,
     LOCAL_DEVELOPMENT_MODE,
+    ProfileEvidenceRestartRequired,
     SERVICE_MODE_HEADER,
     create_guidance_snapshot_application,
     create_profile_evidence_application,
@@ -532,6 +534,23 @@ def test_model_prefetch_uses_only_pinned_identities_and_local_cache(tmp_path: Pa
     )
 
 
+@pytest.mark.parametrize(
+    "apply_profile",
+    [
+        "apply_functional_uat_runtime_environment",
+        "apply_functional_uat_law_history_runtime_environment",
+    ],
+)
+def test_runtime_model_cache_uses_the_exact_applied_local_root(
+    tmp_path: Path, apply_profile: str
+) -> None:
+    from src import local_profiles
+
+    getattr(local_profiles, apply_profile)(root=tmp_path)
+
+    assert local_profiles.runtime_model_cache_directory() == (tmp_path / "cache" / "huggingface")
+
+
 def test_functional_backend_uses_the_validated_manifest_review_date() -> None:
     backend = FunctionalUatEvidenceBackend(review_as_of=FUNCTIONAL_UAT_AS_OF)
 
@@ -592,6 +611,77 @@ def test_functional_ready_revalidates_local_state_after_authentication_without_d
     assert response.json() == {"detail": "local Evidence profile is unavailable"}
     assert "secret" not in response.text
     assert calls == ["state"]
+
+
+def test_functional_retrieve_revalidates_local_state_before_evidence_dispatch() -> None:
+    """A stale active source marker cannot be bypassed after server startup."""
+
+    token = "a" * 32
+    calls: list[str] = []
+
+    def state_validator() -> None:
+        calls.append("state")
+        raise RuntimeError("postgresql://trade:secret@127.0.0.1:55452/trade_doc")
+
+    from src.conformance import TestOnlyConformanceEvidenceBackend
+
+    backend = TestOnlyConformanceEvidenceBackend(effective_date=FUNCTIONAL_UAT_AS_OF)
+    app = create_profile_evidence_application(
+        mode=FUNCTIONAL_UAT_MODE,
+        service_token=token,
+        backend=backend,
+        runtime_state_validator=state_validator,
+    )
+    client = TestClient(app)
+    unauthenticated = client.post("/internal/rag/v3/retrieve", json=_request())
+    assert unauthenticated.status_code == 401
+    assert calls == []
+    assert backend.retrieve_calls == 0
+
+    response = client.post(
+        "/internal/rag/v3/retrieve",
+        json=_request(),
+        headers={
+            "Authorization": f"Bearer {token}",
+            SERVICE_MODE_HEADER: FUNCTIONAL_UAT_MODE,
+        },
+    )
+    assert response.status_code == 503
+    assert response.json() == {"detail": "local Evidence profile is unavailable"}
+    assert "secret" not in response.text
+    assert calls == ["state"]
+    assert backend.retrieve_calls == 0
+
+
+def test_functional_restart_required_is_a_safe_distinct_503_response() -> None:
+    token = "a" * 32
+
+    def restart_validator() -> None:
+        raise ProfileEvidenceRestartRequired("LAW_HISTORY_SERVICE_RESTART_REQUIRED")
+
+    from src.conformance import TestOnlyConformanceEvidenceBackend
+
+    backend = TestOnlyConformanceEvidenceBackend(effective_date=FUNCTIONAL_UAT_AS_OF)
+    app = create_profile_evidence_application(
+        mode=FUNCTIONAL_UAT_MODE,
+        service_token=token,
+        backend=backend,
+        runtime_state_validator=restart_validator,
+    )
+    client = TestClient(app)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        SERVICE_MODE_HEADER: FUNCTIONAL_UAT_MODE,
+    }
+
+    ready = client.get("/internal/rag/v3/health/ready", headers=headers)
+    response = client.post("/internal/rag/v3/retrieve", json=_request(), headers=headers)
+
+    assert ready.status_code == 503
+    assert response.status_code == 503
+    assert ready.json() == {"detail": "local Evidence profile restart required"}
+    assert response.json() == {"detail": "local Evidence profile restart required"}
+    assert backend.retrieve_calls == 0
 
 
 def test_functional_guidance_revalidates_narrow_source_scope_after_authentication() -> None:
@@ -848,3 +938,205 @@ def test_dev_store_verify_is_explicit_and_redacts_store_failures(
     captured = capsys.readouterr()
     assert captured.err == "BLOCKED: dev-store integrity verification failed\n"
     assert secret not in captured.err
+
+
+def _law_history_uat_tool() -> types.ModuleType:
+    tool_path = Path(__file__).resolve().parents[2] / "tools" / "functional_uat_law_history.py"
+    spec = importlib.util.spec_from_file_location("test_law_history_uat_tool", tool_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    # The tool defines a dataclass under postponed annotations; registering
+    # the temporary module mirrors normal import semantics for dataclasses.
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_law_history_reset_proves_profile_state_under_one_lock_before_volume_reset(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    tool = _law_history_uat_tool()
+    expected_profile = tmp_path / "law-history-profile"
+    state = expected_profile / "state"
+    state.mkdir(parents=True)
+    active_marker = state / "active-law-history-manifest.json"
+    active_marker.write_text("{}", encoding="utf-8")
+    events: list[str] = []
+
+    @contextmanager
+    def held_lock(received_profile: Path):
+        assert received_profile == expected_profile
+        events.append("lock-enter")
+        yield
+        events.append("lock-exit")
+
+    def compose(action: str, *, profile: Path | None = None) -> int:
+        assert action == "reset"
+        assert profile == expected_profile
+        assert active_marker.is_file()
+        assert events == ["lock-enter"]
+        events.append("compose-reset")
+        return 0
+
+    monkeypatch.setattr(tool, "ensure_functional_uat_law_history_profile", lambda: expected_profile)
+    monkeypatch.setattr(tool, "_law_history_mutation_lock", held_lock)
+    monkeypatch.setattr(tool, "_compose", compose)
+
+    assert tool._reset(tool.LAW_HISTORY_PROFILE) == 0
+    assert events == ["lock-enter", "compose-reset", "lock-exit"]
+    assert not active_marker.exists()
+
+
+def test_law_history_reset_never_resets_volumes_before_lock_or_marker_safety(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    tool = _law_history_uat_tool()
+    profile = tmp_path / "law-history-profile"
+    profile.mkdir()
+    compose_calls: list[object] = []
+    monkeypatch.setattr(tool, "ensure_functional_uat_law_history_profile", lambda: profile)
+    monkeypatch.setattr(
+        tool,
+        "_compose",
+        lambda *_args, **_kwargs: compose_calls.append("reset") or 0,
+    )
+
+    def refuse_lock(_profile: Path) -> object:
+        raise tool.LawHistoryError("LAW_HISTORY_MUTATION_LOCKED")
+
+    monkeypatch.setattr(tool, "_law_history_mutation_lock", refuse_lock)
+    with pytest.raises(tool.LawHistoryError, match="MUTATION_LOCKED"):
+        tool._reset(tool.LAW_HISTORY_PROFILE)
+    assert compose_calls == []
+
+    @contextmanager
+    def held_lock(_profile: Path):
+        yield
+
+    monkeypatch.setattr(tool, "_law_history_mutation_lock", held_lock)
+    pending_refresh = profile / "state" / "pending-law-history-refresh.json"
+    pending_refresh.parent.mkdir()
+    pending_refresh.write_text("{}", encoding="utf-8")
+    with pytest.raises(tool.LawHistoryError, match="REFRESH_JOURNAL_CONFLICT"):
+        tool._reset(tool.LAW_HISTORY_PROFILE)
+    assert compose_calls == []
+
+
+def test_law_history_reset_never_resets_volumes_for_an_unsafe_manifest_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    tool = _law_history_uat_tool()
+    profile = tmp_path / "law-history-profile"
+    unsafe_marker = profile / "state" / "active-law-history-manifest.json"
+    unsafe_marker.mkdir(parents=True)
+    compose_calls: list[object] = []
+
+    @contextmanager
+    def held_lock(_profile: Path):
+        yield
+
+    monkeypatch.setattr(tool, "ensure_functional_uat_law_history_profile", lambda: profile)
+    monkeypatch.setattr(tool, "_law_history_mutation_lock", held_lock)
+    monkeypatch.setattr(
+        tool,
+        "_compose",
+        lambda *_args, **_kwargs: compose_calls.append("reset") or 0,
+    )
+
+    with pytest.raises(tool.LawHistoryError, match="MANIFEST_PATH_UNSAFE"):
+        tool._reset(tool.LAW_HISTORY_PROFILE)
+    assert compose_calls == []
+
+
+@pytest.mark.parametrize(
+    ("changed_manifest", "changed_digest"),
+    [
+        (
+            {"coverage_through": "2026-08-05", "retrieval_strategy": "rrf_lexical"},
+            "b" * 64,
+        ),
+        (
+            {"coverage_through": "2026-08-06", "retrieval_strategy": "rrf_lexical"},
+            "a" * 64,
+        ),
+        (
+            {
+                "coverage_through": "2026-08-05",
+                "retrieval_strategy": "cross_encoder_rerank",
+            },
+            "a" * 64,
+        ),
+    ],
+)
+def test_law_history_server_binding_rejects_manifest_digest_or_backend_config_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    changed_manifest: dict[str, str],
+    changed_digest: str,
+) -> None:
+    tool = _law_history_uat_tool()
+    startup_manifest = {
+        "coverage_through": "2026-08-05",
+        "retrieval_strategy": "rrf_lexical",
+    }
+    calls = 0
+
+    def validate() -> tuple[dict[str, str], str]:
+        nonlocal calls
+        calls += 1
+        return (startup_manifest, "a" * 64) if calls == 1 else (changed_manifest, changed_digest)
+
+    monkeypatch.setattr(tool, "validate_law_history_state", validate)
+    binding = tool._capture_law_history_service_binding()
+
+    assert binding.coverage_through == date(2026, 8, 5)
+    assert binding.retrieval_strategy == "rrf_lexical"
+    with pytest.raises(ProfileEvidenceRestartRequired, match="SERVICE_RESTART_REQUIRED"):
+        binding.validate_runtime()
+
+
+def test_law_history_server_binding_returns_restart_503_before_evidence_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool = _law_history_uat_tool()
+    calls = 0
+
+    def validate() -> tuple[dict[str, str], str]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return (
+                {"coverage_through": "2026-08-05", "retrieval_strategy": "rrf_lexical"},
+                "a" * 64,
+            )
+        return (
+            {"coverage_through": "2026-08-06", "retrieval_strategy": "rrf_lexical"},
+            "a" * 64,
+        )
+
+    monkeypatch.setattr(tool, "validate_law_history_state", validate)
+    binding = tool._capture_law_history_service_binding()
+    from src.conformance import TestOnlyConformanceEvidenceBackend
+
+    backend = TestOnlyConformanceEvidenceBackend(effective_date=FUNCTIONAL_UAT_AS_OF)
+    app = create_profile_evidence_application(
+        mode=FUNCTIONAL_UAT_MODE,
+        service_token="a" * 32,
+        backend=backend,
+        runtime_state_validator=binding.validate_runtime,
+    )
+    client = TestClient(app)
+    response = client.post(
+        "/internal/rag/v3/retrieve",
+        json=_request(),
+        headers={
+            "Authorization": "Bearer " + "a" * 32,
+            SERVICE_MODE_HEADER: FUNCTIONAL_UAT_MODE,
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "local Evidence profile restart required"}
+    assert backend.retrieve_calls == 0

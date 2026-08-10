@@ -26,7 +26,8 @@ requirement exists.
 | --- | --- | --- | --- |
 | `dev-fixture` | normal full-stack development | Python only | deterministic synthetic Evidence, human review only |
 | `dev-store` | Data implementation work | local Docker | isolated disposable stores |
-| `functional-uat-3law` | actual local feature check | local Docker, Law API, model cache | bounded real Data state, human review only |
+| `functional-uat-law-history` | default real Evidence UAT | local Docker, Law API, model cache | 65-law temporal Evidence; legal date plus explicit fixed HSK/requirements dates |
+| `functional-uat-3law` | legacy compatibility check | local Docker, Law API, model cache | bounded three-law real Data state, human review only |
 
 All profile services bind to literal loopback addresses. The caller must send a
 profile-specific bearer token and `X-Customs-Service-Mode`; Data returns the
@@ -41,17 +42,25 @@ to an operational `status`; the mode response header is the local-profile
 binding. It carries no release, signature, trust, approval, quality-gate, or
 deployment-admission metadata.
 
-The functional UAT artifact manifest contains only profile, date, law IDs,
-source hashes, model IDs/revisions, store counts, and a build timestamp. Raw
-source paths/MSTs and collection time remain in the ignored active local state,
-where startup can validate the collected bytes without exposing them in the
-artifact. Compose pins local store images; runtime does not inspect Docker
-image metadata. Models are cached once at `_local/cache/huggingface`. The
-bounded CCCT reference input is tracked and loaded locally; no data.go.kr
-credential or bulk refresh path remains. Passwords, bearer tokens, Docker
-volumes, and output artifacts stay outside Git.
+The law-history active manifest retains local-only official source receipts
+(law ID, MST, URI, hash, collection time, effective date, and article count)
+and the all-version temporal Qdrant projection. The public V3 response adds
+only `temporal_context` dates. Qdrant filters the half-open legal validity
+interval before dense/BM25 ranking and PostgreSQL confirms the exact row; it
+does not retrieve a current article and substitute an old body afterwards.
+The retained HSK/CCCT `2026-08-05` values are a fixed input-contract baseline:
+their exact tracked bytes and projections are attested, but the source files
+do not claim a separately verifiable external collection timestamp.
+The three-law manifest remains compatible. Compose pins local store images;
+runtime does not inspect Docker image metadata. Models are cached once at
+`_local/cache/huggingface`. The bounded CCCT reference input is tracked and
+loaded locally; no data.go.kr credential or bulk refresh path remains.
+Passwords, bearer tokens, Docker volumes, and output artifacts stay outside
+Git.
 
-`/health/ready` checks only profile state, store connectivity, and bounded
-counts. The full PostgreSQL/Qdrant/Neo4j ID and law-hash comparison is the
-explicit `functional_uat_3law.py verify-store` maintenance command, not a UAT
-or request-time gate.
+`/health/ready` checks profile state, store connectivity, and bounded counts.
+Functional `/retrieve` rechecks its profile-owned state before dispatch so a
+post-start source mutation cannot bypass the local guard. The full
+PostgreSQL/Qdrant/Neo4j ID and law-hash comparison is the explicit
+`functional_uat_law_history.py verify-store` maintenance command, not a
+Production or deployment gate.

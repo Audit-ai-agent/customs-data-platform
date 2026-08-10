@@ -46,9 +46,16 @@ fields; the other official source kinds retain their registry source family
 and official URI without pretending to be a law article.
 
 `local-development` returns a clearly marked deterministic fixture source.
-The current `functional-uat` launcher validates the active legacy three-law
-source scope before every authenticated guidance request and returns only
-sources from that locally validated corpus. The separate
+The default `functional-uat-law-history` `/retrieve` profile validates its
+active local receipts and temporal stores before each authenticated retrieval.
+Its additive `temporal_context` contains `law_as_of`,
+`hsk_snapshot_as_of`, and `requirements_snapshot_as_of`; all three are
+required when the object is present. A legal date different from the fixed
+HSK/requirements snapshot remains `partial`, never a hidden complete result.
+The retained `functional-uat-3law` response may omit this object for legacy
+compatibility. The legacy launcher still validates the active three-law source
+scope before every authenticated guidance request and returns only sources
+from that locally validated corpus. The separate
 `functional-uat-kr-trade` profile is `source_build_required` until an explicit
 allowlisted local source build succeeds. Each source-build receipt must attest
 the exact registry `official_uri`; the immutable local manifest preserves that

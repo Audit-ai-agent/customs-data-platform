@@ -267,16 +267,21 @@ MERGE (req)-[:REQUIRES_DOCUMENT]->(cert)
 """
 
 
-def _iter_progress():
-    """Yield bounded reference records; an incomplete final JSON line is ignored."""
-    if not PROGRESS.exists():
+def _iter_progress_from_path(path: Path):
+    """Yield one bounded local ledger file; an incomplete final line is ignored."""
+    if not path.exists():
         return
-    with PROGRESS.open(encoding="utf-8") as f:
+    with path.open(encoding="utf-8") as f:
         for line in f:
             try:
                 yield json.loads(line)
             except json.JSONDecodeError:
                 continue
+
+
+def _iter_progress():
+    """Yield bounded reference records; an incomplete final JSON line is ignored."""
+    yield from _iter_progress_from_path(PROGRESS)
 
 
 def persist_postgres(dataset: CcctDataset) -> None:
@@ -450,9 +455,13 @@ def project_neo4j(dataset: CcctDataset) -> None:
         drv.close()
 
 
-def load() -> None:
-    """PROGRESS → PostgreSQL 원장 → Neo4j projection (멱등)."""
-    dataset = build_dataset()
+def load(dataset: CcctDataset | None = None) -> None:
+    """PROGRESS → PostgreSQL 원장 → Neo4j projection (멱등).
+
+    ``dataset`` is optional so a caller that just verified the tracked bytes
+    can project that exact in-memory snapshot rather than re-reading it.
+    """
+    dataset = dataset or build_dataset()
     print(
         f"[load] snapshot={dataset.snapshot_id[:21]}… | 조회 {len(dataset.queries)} | "
         f"raw {len(dataset.source_records)} | Requirement {len(dataset.requirements)}"
@@ -508,7 +517,9 @@ def main(_argv: list[str] | None = None) -> int:
 
     for _stream in (sys.stdout, sys.stderr):
         try:
-            _stream.reconfigure(errors="replace")
+            configure = getattr(_stream, "reconfigure", None)
+            if callable(configure):
+                configure(errors="replace")
         except (AttributeError, ValueError):
             pass
     load()
