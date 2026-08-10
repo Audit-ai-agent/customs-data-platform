@@ -205,7 +205,8 @@ def _kiwi_retriever(*, as_of: date) -> tuple[KiwiSparseIndex, Any]:
             """
             SELECT concat(a.law_id, ':', a.id), a.content
             FROM law_articles a
-            JOIN law_version_sources s ON s.law_id=a.law_id AND s.mst=a.version_mst
+            JOIN law_version_sources s
+              ON s.law_id=a.law_id AND s.version_key=a.version_key
             WHERE a.valid_from <= %s AND (a.valid_to IS NULL OR a.valid_to > %s)
               AND NOT EXISTS (SELECT 1 FROM law_articles c WHERE c.parent_article_pk=a.id)
             ORDER BY a.id

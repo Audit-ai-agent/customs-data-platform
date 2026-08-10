@@ -30,6 +30,7 @@ _TEMPORAL_PAYLOAD_INDEXES: dict[str, models.PayloadSchemaType] = {
     # compare each temporal vector to its immutable PostgreSQL article/version
     # receipt instead of accepting a matching aggregate count.
     "version_mst": models.PayloadSchemaType.KEYWORD,
+    "version_key": models.PayloadSchemaType.KEYWORD,
     "content_hash": models.PayloadSchemaType.KEYWORD,
 }
 

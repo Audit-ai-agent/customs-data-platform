@@ -62,12 +62,13 @@ from src.local_profiles import (
     validate_functional_uat_law_history_api_credential,
 )
 
-LAW_HISTORY_LOCAL_STATE_VERSION = "functional-law-history/v1"
+LAW_HISTORY_LOCAL_STATE_VERSION = "functional-law-history/v3"
 _ACTIVE_MANIFEST_NAME = "active-law-history-manifest.json"
 _PENDING_REFRESH_NAME = "pending-law-history-refresh.json"
 _MUTATION_LOCK_NAME = ".law-history-mutation.lock"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MST = re.compile(r"^\d{1,32}$")
+_VERSION_KEY = re.compile(r"^(?P<mst>\d{1,32})@(?P<effective>\d{8})$")
 
 
 class LawHistoryError(RuntimeError):
@@ -98,6 +99,18 @@ class LawHistorySource:
     collected_at: str
     source_kind: Literal["baseline", "refresh"]
 
+    @property
+    def version_key(self) -> str:
+        """Immutable internal identity for a phased official MST version.
+
+        An official MST is a promulgation unit, not necessarily one effective
+        body: a single MST can have several phased enforcement dates.  Keep
+        the public MST separate for citations and derive this local join key
+        from the exact official request identity.
+        """
+
+        return _law_history_version_key(self.effective_mst, self.effective_date)
+
     def local_state(self, *, profile: Path, source_root: Path) -> dict[str, object]:
         return {
             "law_id": self.law_id,
@@ -105,6 +118,7 @@ class LawHistorySource:
             "current_file": str((source_root / self.current_file).relative_to(profile)),
             "current_sha256": self.current_sha256,
             "effective_mst": self.effective_mst,
+            "version_key": self.version_key,
             "effective_file": str((source_root / self.effective_file).relative_to(profile)),
             "effective_sha256": self.effective_sha256,
             "effective_date": self.effective_date.isoformat(),
@@ -134,6 +148,7 @@ class _ProjectedSourceArticle:
     title: str | None
     content_hash: str
     version_mst: str
+    version_key: str
     valid_from: date
     valid_to: date | None
     parent: _ProjectedSourceArticle | None = None
@@ -146,6 +161,25 @@ class LawHistoryVersionCandidate:
     law_id: str
     mst: str
     effective_date: date
+
+    @property
+    def version_key(self) -> str:
+        return _law_history_version_key(self.mst, self.effective_date)
+
+
+@dataclass(frozen=True, slots=True)
+class _CollectedCatalogCandidate:
+    """One exact official body held only until its date group is resolved.
+
+    The raw body is never put in a manifest or a log.  It stays in memory
+    only while one co-effective candidate group is normalized, and only the
+    verified canonical body is written under the ignored profile directory.
+    """
+
+    candidate: LawHistoryVersionCandidate
+    source: LawHistorySource
+    body: dict[str, Any]
+    projection_sha256: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +195,27 @@ def _official_uri(mst: str) -> str:
     # This records a public citation target only.  The Law API OC credential
     # never appears in a URI, manifest, log, or returned Evidence payload.
     return f"https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq={mst}"
+
+
+def _law_history_version_key(mst: str, effective_date: date) -> str:
+    """Return the one-to-one local identity for an official MST+시행일.
+
+    A separate canonicalization step resolves a co-effective group only from
+    equivalent parsed bodies or a verified official 신구법 predecessor graph.
+    The key itself never chooses among different MSTs on the same day.
+    """
+
+    if _MST.fullmatch(mst) is None or not isinstance(effective_date, date):
+        raise LawHistoryError("LAW_HISTORY_VERSION_KEY_INVALID")
+    return f"{mst}@{effective_date:%Y%m%d}"
+
+
+def _valid_law_history_version_key(value: object, *, mst: str, effective_date: date) -> bool:
+    return (
+        isinstance(value, str)
+        and _VERSION_KEY.fullmatch(value) is not None
+        and value == _law_history_version_key(mst, effective_date)
+    )
 
 
 def _law_hierarchy(name: str) -> str:
@@ -248,10 +303,12 @@ def _catalog_for_law(*, law_id: str, api_get: LawApiGet) -> tuple[LawHistoryVers
 
     from src import lawgo
 
-    candidates: list[LawHistoryVersionCandidate] = []
+    candidates: dict[tuple[str, date], LawHistoryVersionCandidate] = {}
     # Query each documented status separately instead of assuming a
     # comma-combined parameter has the same semantics at every API revision.
-    # Every status is fully paginated and later de-duplicated by MST.
+    # Every status is fully paginated and later de-duplicated only by the
+    # documented request identity, ``MST + 시행일``.  A single MST can have
+    # phased effective bodies, and different MSTs can take effect together.
     for status in ("1", "2", "3"):
         expected_total: int | None = None
         observed_total = 0
@@ -291,41 +348,148 @@ def _catalog_for_law(*, law_id: str, api_get: LawApiGet) -> tuple[LawHistoryVers
                     effective_date = datetime.strptime(raw_date, "%Y%m%d").date()
                 except ValueError as exc:
                     raise LawHistoryError("LAW_HISTORY_CATALOG_PAGE_INVALID") from exc
-                candidates.append(LawHistoryVersionCandidate(law_id, mst, effective_date))
+                candidate = LawHistoryVersionCandidate(law_id, mst, effective_date)
+                key = (candidate.mst, candidate.effective_date)
+                existing = candidates.get(key)
+                if existing is not None and existing != candidate:
+                    raise LawHistoryError("LAW_HISTORY_CATALOG_DUPLICATE")
+                candidates[key] = candidate
             observed_total += len(rows)
             if observed_total == expected_total:
                 break
             if observed_total > expected_total or not rows or page >= 10_000:
                 raise LawHistoryError("LAW_HISTORY_CATALOG_PAGE_INCOMPLETE")
             page += 1
-    by_mst = {(candidate.mst, candidate.effective_date): candidate for candidate in candidates}
-    if len(by_mst) != len(candidates):
-        raise LawHistoryError("LAW_HISTORY_CATALOG_DUPLICATE")
-    by_date: dict[date, str] = {}
-    for candidate in by_mst.values():
-        previous = by_date.setdefault(candidate.effective_date, candidate.mst)
-        if previous != candidate.mst:
-            raise LawHistoryError("LAW_HISTORY_CATALOG_EFFECTIVE_CONFLICT")
-    return tuple(sorted(by_mst.values(), key=lambda value: (value.effective_date, value.mst)))
+    return tuple(sorted(candidates.values(), key=lambda value: (value.effective_date, value.mst)))
+
+
+def _candidate_group_as_of(
+    candidates: Sequence[LawHistoryVersionCandidate], *, as_of: date
+) -> tuple[LawHistoryVersionCandidate, ...]:
+    """Return only the latest effective-date group eligible at ``as_of``.
+
+    This deliberately does not fetch or resolve unrelated historical groups.
+    A co-effective group is normalized only when it is actually needed for a
+    baseline or explicit refresh window.
+    """
+
+    eligible = [candidate for candidate in candidates if candidate.effective_date <= as_of]
+    if not eligible:
+        raise LawHistoryError("LAW_HISTORY_CATALOG_COVERAGE_MISSING")
+    selected_date = max(candidate.effective_date for candidate in eligible)
+    group = tuple(
+        sorted(
+            (candidate for candidate in eligible if candidate.effective_date == selected_date),
+            key=lambda candidate: candidate.version_key,
+        )
+    )
+    if not group or len({candidate.law_id for candidate in group}) != 1:
+        raise LawHistoryError("LAW_HISTORY_CATALOG_CANONICAL_UNRESOLVED")
+    return group
 
 
 def _candidate_as_of(
     candidates: Sequence[LawHistoryVersionCandidate], *, as_of: date
 ) -> LawHistoryVersionCandidate:
-    eligible = [candidate for candidate in candidates if candidate.effective_date <= as_of]
-    if not eligible:
-        raise LawHistoryError("LAW_HISTORY_CATALOG_COVERAGE_MISSING")
-    return max(eligible, key=lambda value: (value.effective_date, value.mst))
+    """Compatibility helper for callers that require an unambiguous group."""
+
+    group = _candidate_group_as_of(candidates, as_of=as_of)
+    if len(group) != 1:
+        raise LawHistoryError("LAW_HISTORY_CATALOG_CANONICAL_REQUIRED")
+    return group[0]
 
 
-def _collect_catalog_candidate(
+def _parsed_projection_sha256(
+    *, meta: Mapping[str, object], rows: Sequence[Mapping[str, object]], is_repealed: bool
+) -> str:
+    """Hash the legal projection, independent of non-semantic raw JSON shape."""
+
+    law_id = meta.get("law_id")
+    law_name = meta.get("law_name")
+    ministry = meta.get("ministry")
+    effective = meta.get("enforcement_date")
+    if (
+        not isinstance(law_id, str)
+        or not law_id
+        or not isinstance(law_name, str)
+        or not law_name
+        or not isinstance(ministry, str)
+        or not isinstance(effective, str)
+        or not re.fullmatch(r"\d{8}", effective)
+    ):
+        raise LawHistoryError("LAW_HISTORY_SOURCE_METADATA_INVALID")
+
+    seen: set[tuple[int, int | None]] = set()
+
+    def project_row(value: Mapping[str, object], *, expected_child: bool) -> dict[str, object]:
+        article_no = value.get("article_no")
+        paragraph_no = value.get("paragraph_no")
+        title = value.get("title")
+        valid_from = value.get("valid_from")
+        content = value.get("content")
+        if (
+            type(article_no) is not int
+            or (paragraph_no is not None and type(paragraph_no) is not int)
+            or (expected_child and paragraph_no is None)
+            or (not expected_child and paragraph_no is not None)
+            or (title is not None and not isinstance(title, str))
+            or not isinstance(valid_from, date)
+            or not isinstance(content, str)
+        ):
+            raise LawHistoryError("LAW_HISTORY_SOURCE_INVALID")
+        identity = (article_no, paragraph_no)
+        if identity in seen:
+            raise LawHistoryError("LAW_HISTORY_SOURCE_INVALID")
+        seen.add(identity)
+        return {
+            "article_no": article_no,
+            "paragraph_no": paragraph_no,
+            "title": title,
+            "valid_from": valid_from.isoformat(),
+            "content": content,
+        }
+
+    projected: list[dict[str, object]] = []
+    for parent in rows:
+        parent_projection = project_row(parent, expected_child=False)
+        children = parent.get("children")
+        if not isinstance(children, list):
+            raise LawHistoryError("LAW_HISTORY_SOURCE_INVALID")
+        parent_projection["children"] = sorted(
+            (
+                project_row(cast(Mapping[str, object], child), expected_child=True)
+                for child in children
+            ),
+            key=lambda child: (cast(int, child["article_no"]), cast(int, child["paragraph_no"])),
+        )
+        projected.append(parent_projection)
+    if is_repealed:
+        if projected:
+            raise LawHistoryError("LAW_HISTORY_REPEAL_BODY_AMBIGUOUS")
+    elif not projected:
+        raise LawHistoryError("LAW_HISTORY_EFFECTIVE_ARTICLES_MISSING")
+    return sha256_bytes(
+        canonical_json_bytes(
+            {
+                "law_id": law_id,
+                "law_name": law_name,
+                "hierarchy": _law_hierarchy(law_name),
+                "ministry": ministry,
+                "effective_date": effective,
+                "is_repealed": is_repealed,
+                "articles": sorted(projected, key=lambda row: cast(int, row["article_no"])),
+            }
+        )
+    )
+
+
+def _prepare_catalog_candidate(
     *,
-    source_root: Path,
     candidate: LawHistoryVersionCandidate,
     source_kind: Literal["baseline", "refresh"],
     api_get: LawApiGet,
-) -> LawHistorySource:
-    """Fetch and verify one exact eflaw body selected from the full catalog."""
+) -> _CollectedCatalogCandidate:
+    """Fetch and validate one exact body without making it active local state."""
 
     from src.ingest.laws import build_meta, parse_articles
 
@@ -348,8 +512,6 @@ def _collect_catalog_candidate(
     article_count = sum(1 + len(row.get("children", [])) for row in rows)
     is_repealed = _is_repeal_revision(meta.get("revision_type"))
     if is_repealed and article_count:
-        # A body marked repealed but still carrying article text is ambiguous:
-        # do not index text that might no longer be effective after its date.
         raise LawHistoryError("LAW_HISTORY_REPEAL_BODY_AMBIGUOUS")
     if not is_repealed and article_count < 1:
         raise LawHistoryError("LAW_HISTORY_EFFECTIVE_ARTICLES_MISSING")
@@ -357,12 +519,11 @@ def _collect_catalog_candidate(
     ministry = meta.get("ministry")
     if not isinstance(law_name, str) or not law_name or not isinstance(ministry, str):
         raise LawHistoryError("LAW_HISTORY_SOURCE_METADATA_INVALID")
-    filename = f"law_version_{candidate.law_id}_{candidate.mst}.json"
-    raw_sha256 = _write_json(source_root / filename, body)
-    # ``current_*`` is retained only for the existing local manifest shape.
-    # This exact eflaw body is the requested effective version, not a
-    # separately fetched wall-clock 'current' substitute.
-    return LawHistorySource(
+    filename = (
+        f"law_version_{candidate.law_id}_{candidate.mst}_{candidate.effective_date:%Y%m%d}.json"
+    )
+    raw_sha256 = sha256_bytes(canonical_json_bytes(body))
+    source = LawHistorySource(
         law_id=candidate.law_id,
         current_mst=candidate.mst,
         current_file=filename,
@@ -379,6 +540,165 @@ def _collect_catalog_candidate(
         official_uri=_official_uri(candidate.mst),
         collected_at=datetime.now(timezone.utc).isoformat(),
         source_kind=source_kind,
+    )
+    return _CollectedCatalogCandidate(
+        candidate=candidate,
+        source=source,
+        body=body,
+        projection_sha256=_parsed_projection_sha256(meta=meta, rows=rows, is_repealed=is_repealed),
+    )
+
+
+def _old_and_new_predecessor(*, candidate: LawHistoryVersionCandidate, api_get: LawApiGet) -> str:
+    """Read one official direct predecessor edge without retaining its body."""
+
+    from src import lawgo
+
+    payload = api_get("lawService.do", target="oldAndNew", MST=candidate.mst)
+    service = payload.get("OldAndNewService")
+    if not isinstance(service, Mapping):
+        raise LawHistoryError("LAW_HISTORY_CATALOG_CANONICAL_UNRESOLVED")
+    old = service.get("구조문_기본정보")
+    new = service.get("신조문_기본정보")
+    if not isinstance(old, Mapping) or not isinstance(new, Mapping):
+        raise LawHistoryError("LAW_HISTORY_CATALOG_CANONICAL_UNRESOLVED")
+    predecessor = lawgo.squash(cast(str | None, old.get("법령일련번호")))
+    successor = lawgo.squash(cast(str | None, new.get("법령일련번호")))
+    old_law_id = lawgo.squash(cast(str | None, old.get("법령ID")))
+    new_law_id = lawgo.squash(cast(str | None, new.get("법령ID")))
+    if (
+        _MST.fullmatch(predecessor) is None
+        or _MST.fullmatch(successor) is None
+        or predecessor == successor
+        or successor != candidate.mst
+        or old_law_id != candidate.law_id
+        or new_law_id != candidate.law_id
+    ):
+        raise LawHistoryError("LAW_HISTORY_CATALOG_CANONICAL_UNRESOLVED")
+    return predecessor
+
+
+def _canonicalize_coeffective_candidates(
+    *, receipts: Sequence[_CollectedCatalogCandidate], api_get: LawApiGet
+) -> _CollectedCatalogCandidate:
+    """Choose one legal state for a same-day group, or fail closed.
+
+    The official list does not document an MST numeric or response-order
+    priority.  Equivalent parsed projections are therefore interchangeable
+    for legal retrieval and use a deterministic receipt representative.  If
+    they differ, only a verified official 구조문→신조문 graph with exactly
+    one reachable terminal version may establish the canonical body.
+    """
+
+    if not receipts:
+        raise LawHistoryError("LAW_HISTORY_CATALOG_CANONICAL_UNRESOLVED")
+    law_ids = {receipt.candidate.law_id for receipt in receipts}
+    effective_dates = {receipt.candidate.effective_date for receipt in receipts}
+    msts = {receipt.candidate.mst for receipt in receipts}
+    if (
+        len(law_ids) != 1
+        or len(effective_dates) != 1
+        or len(msts) != len(receipts)
+        or any(
+            receipt.source.law_id != receipt.candidate.law_id
+            or receipt.source.effective_mst != receipt.candidate.mst
+            or receipt.source.effective_date != receipt.candidate.effective_date
+            or _SHA256.fullmatch(receipt.projection_sha256) is None
+            for receipt in receipts
+        )
+    ):
+        raise LawHistoryError("LAW_HISTORY_CATALOG_CANONICAL_UNRESOLVED")
+    if len(receipts) == 1:
+        return receipts[0]
+    if len({receipt.projection_sha256 for receipt in receipts}) == 1:
+        # This only chooses a citation representative; the complete parsed
+        # legal projection is already equal for every official candidate.
+        return min(receipts, key=lambda receipt: receipt.candidate.version_key)
+
+    outgoing: dict[str, set[str]] = {mst: set() for mst in msts}
+    for receipt in receipts:
+        predecessor = _old_and_new_predecessor(candidate=receipt.candidate, api_get=api_get)
+        if predecessor in msts:
+            outgoing[predecessor].add(receipt.candidate.mst)
+    sinks = [mst for mst, successors in outgoing.items() if not successors]
+    if len(sinks) != 1:
+        raise LawHistoryError("LAW_HISTORY_CATALOG_CANONICAL_UNRESOLVED")
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(mst: str) -> None:
+        if mst in visiting:
+            raise LawHistoryError("LAW_HISTORY_CATALOG_CANONICAL_UNRESOLVED")
+        if mst in visited:
+            return
+        visiting.add(mst)
+        for successor in outgoing[mst]:
+            visit(successor)
+        visiting.remove(mst)
+        visited.add(mst)
+
+    for mst in msts:
+        visit(mst)
+    sink = sinks[0]
+    reverse: dict[str, set[str]] = {mst: set() for mst in msts}
+    for predecessor, successors in outgoing.items():
+        for successor in successors:
+            reverse[successor].add(predecessor)
+    reachable: set[str] = set()
+    frontier = [sink]
+    while frontier:
+        current = frontier.pop()
+        if current in reachable:
+            continue
+        reachable.add(current)
+        frontier.extend(reverse[current])
+    if reachable != msts:
+        raise LawHistoryError("LAW_HISTORY_CATALOG_CANONICAL_UNRESOLVED")
+    return next(receipt for receipt in receipts if receipt.candidate.mst == sink)
+
+
+def _write_collected_catalog_candidate(
+    *, source_root: Path, receipt: _CollectedCatalogCandidate
+) -> LawHistorySource:
+    """Persist only the selected official body under the ignored profile root."""
+
+    actual_sha256 = _write_json(source_root / receipt.source.effective_file, receipt.body)
+    if actual_sha256 != receipt.source.effective_sha256:
+        raise LawHistoryError("LAW_HISTORY_SOURCE_HASH_MISMATCH")
+    return receipt.source
+
+
+def _collect_canonical_candidate_group(
+    *,
+    source_root: Path,
+    candidates: Sequence[LawHistoryVersionCandidate],
+    source_kind: Literal["baseline", "refresh"],
+    api_get: LawApiGet,
+) -> LawHistorySource:
+    """Fetch exactly one needed date group and persist its canonical body."""
+
+    receipts = tuple(
+        _prepare_catalog_candidate(candidate=candidate, source_kind=source_kind, api_get=api_get)
+        for candidate in candidates
+    )
+    selected = _canonicalize_coeffective_candidates(receipts=receipts, api_get=api_get)
+    return _write_collected_catalog_candidate(source_root=source_root, receipt=selected)
+
+
+def _collect_catalog_candidate(
+    *,
+    source_root: Path,
+    candidate: LawHistoryVersionCandidate,
+    source_kind: Literal["baseline", "refresh"],
+    api_get: LawApiGet,
+) -> LawHistorySource:
+    """Fetch and persist one unambiguous exact eflaw body."""
+
+    return _write_collected_catalog_candidate(
+        source_root=source_root,
+        receipt=_prepare_catalog_candidate(
+            candidate=candidate, source_kind=source_kind, api_get=api_get
+        ),
     )
 
 
@@ -398,6 +718,7 @@ def _write_source_batch_manifest(
                 {
                     "law_id": source.law_id,
                     "effective_mst": source.effective_mst,
+                    "version_key": source.version_key,
                     "effective_sha256": source.effective_sha256,
                     "effective_date": source.effective_date.isoformat(),
                     "article_count": source.article_count,
@@ -422,9 +743,9 @@ def collect_law_history_baseline(
     root = _source_root(profile, label="baseline")
     try:
         sources = tuple(
-            _collect_catalog_candidate(
+            _collect_canonical_candidate_group(
                 source_root=root,
-                candidate=_candidate_as_of(
+                candidates=_candidate_group_as_of(
                     _catalog_for_law(law_id=law_id, api_get=api_get), as_of=as_of
                 ),
                 source_kind="baseline",
@@ -468,23 +789,28 @@ def collect_law_history_refresh(
         raise LawHistoryError("LAW_HISTORY_REFRESH_RANGE_INVALID")
     root = _source_root(profile, label="refresh")
     try:
-        selected: dict[tuple[str, str], LawHistoryVersionCandidate] = {}
+        selected: dict[tuple[str, date], tuple[LawHistoryVersionCandidate, ...]] = {}
         for law_id in LAW_HISTORY_LAW_IDS:
             catalog = _catalog_for_law(law_id=law_id, api_get=api_get)
+            grouped: dict[date, list[LawHistoryVersionCandidate]] = {}
             for candidate in catalog:
                 if from_date <= candidate.effective_date <= to_date:
-                    selected[(candidate.law_id, candidate.mst)] = candidate
-            current_at_to = _candidate_as_of(catalog, as_of=to_date)
-            selected[(current_at_to.law_id, current_at_to.mst)] = current_at_to
+                    grouped.setdefault(candidate.effective_date, []).append(candidate)
+            for effective_date, group in grouped.items():
+                selected[(law_id, effective_date)] = tuple(
+                    sorted(group, key=lambda candidate: candidate.version_key)
+                )
+            current_at_to = _candidate_group_as_of(catalog, as_of=to_date)
+            selected[(law_id, current_at_to[0].effective_date)] = current_at_to
         sources = tuple(
-            _collect_catalog_candidate(
+            _collect_canonical_candidate_group(
                 source_root=root,
-                candidate=candidate,
+                candidates=candidates,
                 source_kind="refresh",
                 api_get=api_get,
             )
-            for _key, candidate in sorted(
-                selected.items(), key=lambda item: (item[1].effective_date, item[0][0], item[0][1])
+            for _key, candidates in sorted(
+                selected.items(), key=lambda item: (item[0][1], item[0][0])
             )
         )
         _write_source_batch_manifest(
@@ -989,8 +1315,8 @@ def _record_source_provenance(cur, source: LawHistorySource) -> None:
         "SELECT official_uri, raw_sha256, collected_at, effective_date, article_count, "
         "is_repealed, source_kind "
         "FROM law_version_sources "
-        "WHERE law_id=%s AND mst=%s",
-        (source.law_id, source.effective_mst),
+        "WHERE law_id=%s AND version_key=%s",
+        (source.law_id, source.version_key),
     )
     existing = cur.fetchone()
     if existing is not None:
@@ -1009,13 +1335,14 @@ def _record_source_provenance(cur, source: LawHistorySource) -> None:
     cur.execute(
         """
         INSERT INTO law_version_sources
-          (law_id, mst, official_uri, raw_sha256, collected_at, effective_date, article_count,
-           is_repealed, source_kind)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+          (law_id, mst, version_key, official_uri, raw_sha256, collected_at, effective_date,
+           article_count, is_repealed, source_kind)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
         (
             source.law_id,
             source.effective_mst,
+            source.version_key,
             source.official_uri,
             source.effective_sha256,
             datetime.fromisoformat(source.collected_at),
@@ -1040,7 +1367,8 @@ def _history_store_counts() -> dict[str, int]:
                 """
                 SELECT count(*)
                 FROM law_articles a
-                JOIN law_version_sources s ON s.law_id=a.law_id AND s.mst=a.version_mst
+                JOIN law_version_sources s
+                  ON s.law_id=a.law_id AND s.version_key=a.version_key
                 WHERE NOT EXISTS (SELECT 1 FROM law_articles c WHERE c.parent_article_pk=a.id)
                 """
             )
@@ -1132,12 +1460,12 @@ def _verify_temporal_store_projection() -> str:
                 """
                 SELECT a.id, a.law_id, version.law_name, version.hierarchy,
                        a.article_no, a.paragraph_no, a.item_no, a.content,
-                       a.version_mst, a.content_hash, a.valid_from, a.valid_to
+                       a.version_mst, a.version_key, a.content_hash, a.valid_from, a.valid_to
                 FROM law_articles a
                 JOIN law_versions version
-                  ON version.law_id=a.law_id AND version.mst=a.version_mst
+                  ON version.law_id=a.law_id AND version.version_key=a.version_key
                 JOIN law_version_sources source
-                  ON source.law_id=a.law_id AND source.mst=a.version_mst
+                  ON source.law_id=a.law_id AND source.version_key=a.version_key
                 WHERE NOT EXISTS (
                   SELECT 1 FROM law_articles child WHERE child.parent_article_pk=a.id
                 )
@@ -1147,7 +1475,7 @@ def _verify_temporal_store_projection() -> str:
             rows = cur.fetchall()
         expected: dict[str, dict[str, object]] = {}
         for row in rows:
-            if not isinstance(row, tuple) or len(row) != 12:
+            if not isinstance(row, tuple) or len(row) != 13:
                 raise LawHistoryError("LAW_HISTORY_TEMPORAL_STORE_INVALID")
             (
                 article_pk,
@@ -1159,6 +1487,7 @@ def _verify_temporal_store_projection() -> str:
                 item_no,
                 content,
                 version_mst,
+                version_key,
                 content_hash,
                 valid_from,
                 valid_to,
@@ -1177,6 +1506,9 @@ def _verify_temporal_store_projection() -> str:
                 or not isinstance(content, str)
                 or not isinstance(version_mst, str)
                 or _MST.fullmatch(version_mst) is None
+                or not isinstance(version_key, str)
+                or (version_match := _VERSION_KEY.fullmatch(version_key)) is None
+                or version_match.group("mst") != version_mst
                 or not isinstance(content_hash, str)
                 or _SHA256.fullmatch(content_hash) is None
                 or sha256_bytes(content.encode("utf-8")) != content_hash
@@ -1184,7 +1516,7 @@ def _verify_temporal_store_projection() -> str:
                 or (valid_to is not None and not isinstance(valid_to, date))
             ):
                 raise LawHistoryError("LAW_HISTORY_TEMPORAL_STORE_INVALID")
-            point_id = temporal_point_id(article_pk, version_mst)
+            point_id = temporal_point_id(article_pk, version_key)
             if point_id in expected:
                 raise LawHistoryError("LAW_HISTORY_TEMPORAL_STORE_INVALID")
             expected[point_id] = {
@@ -1196,6 +1528,7 @@ def _verify_temporal_store_projection() -> str:
                 "paragraph_no": paragraph_no,
                 "item_no": item_no,
                 "version_mst": version_mst,
+                "version_key": version_key,
                 "content_hash": content_hash,
                 "valid_from_ordinal": valid_from.toordinal(),
                 "valid_to_ordinal": (
@@ -1619,15 +1952,19 @@ def _source_receipt_rows(sources: Sequence[LawHistorySource]) -> list[dict[str, 
         {
             "law_id": source.law_id,
             "mst": source.effective_mst,
+            "version_key": source.version_key,
             "effective_date": source.effective_date.isoformat(),
             "raw_sha256": source.effective_sha256,
             "is_repealed": source.is_repealed,
         }
         for source in sources
     ]
-    if len({(row["law_id"], row["mst"]) for row in rows}) != len(rows):
+    if len({(row["law_id"], row["version_key"]) for row in rows}) != len(rows):
         raise LawHistoryError("LAW_HISTORY_REFRESH_RECEIPT_INVALID")
-    return sorted(rows, key=lambda row: (row["effective_date"], row["law_id"], row["mst"]))
+    return sorted(
+        rows,
+        key=lambda row: (row["effective_date"], row["law_id"], row["version_key"]),
+    )
 
 
 def _as_of_source_rows(
@@ -1647,10 +1984,12 @@ def _as_of_source_rows(
         if source.effective_date > to_date:
             raise LawHistoryError("LAW_HISTORY_REFRESH_RECEIPT_INVALID")
         previous = selected.get(source.law_id)
-        if previous is None or (source.effective_date, source.effective_mst) > (
-            previous.effective_date,
-            previous.effective_mst,
-        ):
+        if previous is not None and source.effective_date == previous.effective_date:
+            # A request range must already have a single canonical official
+            # body for each law/day.  Never turn unresolved same-day MST
+            # ambiguity into an arbitrary version-key tie break here.
+            raise LawHistoryError("LAW_HISTORY_REFRESH_SAME_DAY_AMBIGUITY")
+        if previous is None or source.effective_date > previous.effective_date:
             selected[source.law_id] = source
     rows: list[dict[str, object]] = []
     for law_id in LAW_HISTORY_LAW_IDS:
@@ -1661,6 +2000,7 @@ def _as_of_source_rows(
             {
                 "law_id": selected_source.law_id,
                 "mst": selected_source.effective_mst,
+                "version_key": selected_source.version_key,
                 "effective_date": selected_source.effective_date.isoformat(),
                 "raw_sha256": selected_source.effective_sha256,
                 "is_repealed": selected_source.is_repealed,
@@ -1916,18 +2256,30 @@ def _validated_refresh_records(
             raise LawHistoryError("LAW_HISTORY_MANIFEST_INVALID")
         law_id = asset.get("law_id")
         mst = asset.get("effective_mst")
+        version_key = asset.get("version_key")
         effective_date = asset.get("effective_date")
         raw_sha256 = asset.get("effective_sha256")
         is_repealed = asset.get("is_repealed")
         if (
             not isinstance(law_id, str)
             or not isinstance(mst, str)
+            or not isinstance(version_key, str)
             or not isinstance(effective_date, str)
             or not isinstance(raw_sha256, str)
             or type(is_repealed) is not bool
         ):
             raise LawHistoryError("LAW_HISTORY_MANIFEST_INVALID")
-        key = (law_id, mst)
+        try:
+            parsed_effective_date = date.fromisoformat(effective_date)
+        except ValueError as exc:
+            raise LawHistoryError("LAW_HISTORY_MANIFEST_INVALID") from exc
+        if not _valid_law_history_version_key(
+            version_key,
+            mst=mst,
+            effective_date=parsed_effective_date,
+        ):
+            raise LawHistoryError("LAW_HISTORY_MANIFEST_INVALID")
+        key = (law_id, version_key)
         if key in assets_by_key:
             raise LawHistoryError("LAW_HISTORY_MANIFEST_INVALID")
         assets_by_key[key] = (effective_date, raw_sha256, is_repealed)
@@ -1976,6 +2328,7 @@ def _validated_refresh_records(
             if not isinstance(row, dict) or set(row) != {
                 "law_id",
                 "mst",
+                "version_key",
                 "effective_date",
                 "raw_sha256",
                 "is_repealed",
@@ -1983,6 +2336,7 @@ def _validated_refresh_records(
                 raise LawHistoryError("LAW_HISTORY_REFRESH_CHAIN_INVALID")
             law_id = row["law_id"]
             mst = row["mst"]
+            version_key = row["version_key"]
             effective_date = row["effective_date"]
             raw_sha = row["raw_sha256"]
             is_repealed = row["is_repealed"]
@@ -1991,17 +2345,28 @@ def _validated_refresh_records(
                 or law_id not in LAW_HISTORY_LAW_IDS
                 or not isinstance(mst, str)
                 or _MST.fullmatch(mst) is None
+                or not isinstance(version_key, str)
                 or not isinstance(effective_date, str)
                 or not isinstance(raw_sha, str)
                 or _SHA256.fullmatch(raw_sha) is None
                 or type(is_repealed) is not bool
-                or assets_by_key.get((law_id, mst)) != (effective_date, raw_sha, is_repealed)
             ):
+                raise LawHistoryError("LAW_HISTORY_REFRESH_CHAIN_INVALID")
+            try:
+                parsed_effective_date = date.fromisoformat(effective_date)
+            except ValueError as exc:
+                raise LawHistoryError("LAW_HISTORY_REFRESH_CHAIN_INVALID") from exc
+            if not _valid_law_history_version_key(
+                version_key,
+                mst=mst,
+                effective_date=parsed_effective_date,
+            ) or assets_by_key.get((law_id, version_key)) != (effective_date, raw_sha, is_repealed):
                 raise LawHistoryError("LAW_HISTORY_REFRESH_CHAIN_INVALID")
             normalized_rows.append(
                 {
                     "law_id": law_id,
                     "mst": mst,
+                    "version_key": version_key,
                     "effective_date": effective_date,
                     "raw_sha256": raw_sha,
                     "is_repealed": is_repealed,
@@ -2009,10 +2374,10 @@ def _validated_refresh_records(
             )
         sorted_rows = sorted(
             normalized_rows,
-            key=lambda value: (value["effective_date"], value["law_id"], value["mst"]),
+            key=lambda value: (value["effective_date"], value["law_id"], value["version_key"]),
         )
         if normalized_rows != sorted_rows or len(
-            {(row["law_id"], row["mst"]) for row in sorted_rows}
+            {(row["law_id"], row["version_key"]) for row in sorted_rows}
         ) != len(sorted_rows):
             raise LawHistoryError("LAW_HISTORY_REFRESH_CHAIN_INVALID")
         if sha256_bytes(canonical_json_bytes(sorted_rows)) != source_sha256:
@@ -2027,9 +2392,12 @@ def _validated_refresh_records(
                 raise LawHistoryError("LAW_HISTORY_REFRESH_CHAIN_INVALID")
             law_id = cast(str, row["law_id"])
             previous = selected.get(law_id)
-            if previous is None or (effective_date, cast(str, row["mst"])) > (
-                date.fromisoformat(cast(str, previous["effective_date"])),
-                cast(str, previous["mst"]),
+            if previous is not None:
+                previous_date = date.fromisoformat(cast(str, previous["effective_date"]))
+                if effective_date == previous_date:
+                    raise LawHistoryError("LAW_HISTORY_REFRESH_CHAIN_INVALID")
+            if previous is None or effective_date > date.fromisoformat(
+                cast(str, previous["effective_date"])
             ):
                 selected[law_id] = row
         expected_as_of_rows = [
@@ -2099,6 +2467,7 @@ def _validate_source_asset(profile: Path, asset: Mapping[str, object]) -> None:
         "current_file",
         "current_sha256",
         "effective_mst",
+        "version_key",
         "effective_file",
         "effective_sha256",
         "effective_date",
@@ -2120,6 +2489,7 @@ def _validate_source_asset(profile: Path, asset: Mapping[str, object]) -> None:
         raise LawHistoryError("LAW_HISTORY_MANIFEST_INVALID")
     current_mst = asset["current_mst"]
     effective_mst = asset["effective_mst"]
+    version_key = asset["version_key"]
     if (
         not isinstance(current_mst, str)
         or _MST.fullmatch(current_mst) is None
@@ -2148,11 +2518,17 @@ def _validate_source_asset(profile: Path, asset: Mapping[str, object]) -> None:
     ):
         raise LawHistoryError("LAW_HISTORY_MANIFEST_INVALID")
     try:
-        date.fromisoformat(cast(str, asset["effective_date"]))
+        asset_effective_date = date.fromisoformat(cast(str, asset["effective_date"]))
         collected_at = datetime.fromisoformat(cast(str, asset["collected_at"]))
     except (TypeError, ValueError) as exc:
         raise LawHistoryError("LAW_HISTORY_MANIFEST_INVALID") from exc
     if collected_at.tzinfo is None or collected_at.utcoffset() is None:
+        raise LawHistoryError("LAW_HISTORY_MANIFEST_INVALID")
+    if not _valid_law_history_version_key(
+        version_key,
+        mst=cast(str, effective_mst),
+        effective_date=asset_effective_date,
+    ):
         raise LawHistoryError("LAW_HISTORY_MANIFEST_INVALID")
     from src.ingest.laws import build_meta, parse_articles
 
@@ -2214,7 +2590,7 @@ def _validate_store_source_provenance(source_assets: Sequence[Mapping[str, objec
 
     expected: dict[tuple[str, str], tuple[object, ...]] = {}
     for asset in source_assets:
-        key = (cast(str, asset["law_id"]), cast(str, asset["effective_mst"]))
+        key = (cast(str, asset["law_id"]), cast(str, asset["version_key"]))
         try:
             collected_at = datetime.fromisoformat(cast(str, asset["collected_at"]))
             effective_date = date.fromisoformat(cast(str, asset["effective_date"]))
@@ -2236,12 +2612,13 @@ def _validate_store_source_provenance(source_assets: Sequence[Mapping[str, objec
         with connect() as conn, conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT src.law_id, src.mst, src.official_uri, src.raw_sha256,
+                SELECT src.law_id, src.mst, src.version_key, src.official_uri, src.raw_sha256,
                        src.collected_at, src.effective_date, src.article_count,
                        src.is_repealed, version.law_name, version.hierarchy,
                        version.ministry, src.source_kind, version.enforcement_date
                 FROM law_version_sources src
-                JOIN law_versions version ON version.law_id=src.law_id AND version.mst=src.mst
+                JOIN law_versions version
+                  ON version.law_id=src.law_id AND version.version_key=src.version_key
                 """
             )
             rows = cur.fetchall()
@@ -2249,11 +2626,12 @@ def _validate_store_source_provenance(source_assets: Sequence[Mapping[str, objec
         raise LawHistoryError("LAW_HISTORY_SOURCE_PROVENANCE_UNAVAILABLE") from exc
     observed: dict[tuple[str, str], tuple[object, ...]] = {}
     for row in rows:
-        if not isinstance(row, tuple) or len(row) != 13:
+        if not isinstance(row, tuple) or len(row) != 14:
             raise LawHistoryError("LAW_HISTORY_SOURCE_PROVENANCE_MISMATCH")
         (
             law_id,
             mst,
+            version_key,
             official_uri,
             raw_sha256,
             collected_at,
@@ -2266,7 +2644,18 @@ def _validate_store_source_provenance(source_assets: Sequence[Mapping[str, objec
             source_kind,
             version_date,
         ) = row
-        key = (str(law_id), str(mst))
+        if (
+            not isinstance(version_key, str)
+            or not isinstance(mst, str)
+            or not isinstance(effective_date, date)
+            or not _valid_law_history_version_key(
+                version_key,
+                mst=mst,
+                effective_date=effective_date,
+            )
+        ):
+            raise LawHistoryError("LAW_HISTORY_SOURCE_PROVENANCE_MISMATCH")
+        key = (str(law_id), version_key)
         if key in observed or effective_date != version_date:
             raise LawHistoryError("LAW_HISTORY_SOURCE_PROVENANCE_MISMATCH")
         observed[key] = (
@@ -2321,7 +2710,7 @@ def validate_law_history_state(
         if not isinstance(asset, dict):
             raise LawHistoryError("LAW_HISTORY_MANIFEST_INVALID")
         _validate_source_asset(profile, asset)
-        key = (cast(str, asset["law_id"]), cast(str, asset["effective_mst"]))
+        key = (cast(str, asset["law_id"]), cast(str, asset["version_key"]))
         if key in seen:
             raise LawHistoryError("LAW_HISTORY_MANIFEST_INVALID")
         seen.add(key)
@@ -2470,7 +2859,7 @@ def _load_history_sources(
 
 def _source_from_asset(asset: Mapping[str, object]) -> LawHistorySource:
     try:
-        return LawHistorySource(
+        source = LawHistorySource(
             law_id=cast(str, asset["law_id"]),
             current_mst=cast(str, asset["current_mst"]),
             current_file=cast(str, asset["current_file"]),
@@ -2490,6 +2879,9 @@ def _source_from_asset(asset: Mapping[str, object]) -> LawHistorySource:
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise LawHistoryError("LAW_HISTORY_MANIFEST_INVALID") from exc
+    if asset.get("version_key") != source.version_key:
+        raise LawHistoryError("LAW_HISTORY_MANIFEST_INVALID")
+    return source
 
 
 def _load_history_source_assets(
@@ -2505,7 +2897,7 @@ def _load_history_source_assets(
         key=lambda value: (
             cast(str, value.get("effective_date")),
             cast(str, value.get("law_id")),
-            cast(str, value.get("effective_mst")),
+            cast(str, value.get("version_key")),
         ),
     ):
         source, meta, rows = _read_history_source_asset(profile, asset)
@@ -2538,6 +2930,7 @@ def _read_history_source_asset(
     if sum(1 + len(row.get("children", [])) for row in rows) != source.article_count:
         raise LawHistoryError("LAW_HISTORY_ARTICLE_COUNT_MISMATCH")
     meta["is_repealed"] = source.is_repealed
+    meta["version_key"] = source.version_key
     return (
         source,
         cast(dict[str, object], meta),
@@ -2621,12 +3014,12 @@ def _source_article_projection_records(
         key=lambda value: (
             cast(str, value.get("effective_date")),
             cast(str, value.get("law_id")),
-            cast(str, value.get("effective_mst")),
+            cast(str, value.get("version_key")),
         ),
     )
     for asset in ordered_assets:
         source, meta, rows = _read_history_source_asset(profile, asset)
-        source_key = (source.law_id, source.effective_mst)
+        source_key = (source.law_id, source.version_key)
         if source_key in seen_sources:
             raise LawHistoryError("LAW_HISTORY_SOURCE_ARTICLE_PROJECTION_MISMATCH")
         seen_sources.add(source_key)
@@ -2683,6 +3076,7 @@ def _source_article_projection_records(
                 title=cast(str | None, row["title"]),
                 content_hash=sha256_bytes(content.encode("utf-8")),
                 version_mst=source.effective_mst,
+                version_key=source.version_key,
                 valid_from=valid_from,
                 valid_to=None,
                 parent=parent,
@@ -2709,6 +3103,7 @@ def _source_article_projection_records(
                 "article_no": projected.article_no,
                 "paragraph_no": projected.paragraph_no,
                 "version_mst": projected.version_mst,
+                "version_key": projected.version_key,
                 "title": projected.title,
                 "content_hash": projected.content_hash,
                 "valid_from": projected.valid_from.isoformat(),
@@ -2717,6 +3112,7 @@ def _source_article_projection_records(
                 "parent_article_no": parent.article_no if parent else None,
                 "parent_paragraph_no": parent.paragraph_no if parent else None,
                 "parent_version_mst": parent.version_mst if parent else None,
+                "parent_version_key": parent.version_key if parent else None,
             }
         )
     records.sort(
@@ -2724,7 +3120,7 @@ def _source_article_projection_records(
             cast(str, value["law_id"]),
             cast(int, value["article_no"]),
             -1 if value["paragraph_no"] is None else cast(int, value["paragraph_no"]),
-            cast(str, value["version_mst"]),
+            cast(str, value["version_key"]),
         )
     )
     return tuple(records)
@@ -2745,7 +3141,7 @@ def _verify_source_article_projection(
             cast(str, value["law_id"]),
             cast(int, value["article_no"]),
             cast(int | None, value["paragraph_no"]),
-            cast(str, value["version_mst"]),
+            cast(str, value["version_key"]),
         )
         if identity in expected:
             raise LawHistoryError("LAW_HISTORY_SOURCE_ARTICLE_PROJECTION_MISMATCH")
@@ -2761,9 +3157,9 @@ def _verify_source_article_projection(
                 """
                 SELECT a.law_id, a.article_no, a.paragraph_no, a.item_no,
                        a.title, a.content, a.content_hash, a.version_mst,
-                       a.valid_from, a.valid_to,
+                       a.version_key, a.valid_from, a.valid_to,
                        parent.law_id, parent.article_no, parent.paragraph_no,
-                       parent.version_mst
+                       parent.version_mst, parent.version_key
                 FROM law_articles a
                 LEFT JOIN law_articles parent ON parent.id=a.parent_article_pk
                 ORDER BY a.id
@@ -2775,7 +3171,7 @@ def _verify_source_article_projection(
 
     observed: dict[tuple[str, int, int | None, str], dict[str, object]] = {}
     for row in database_rows:
-        if not isinstance(row, tuple) or len(row) != 14:
+        if not isinstance(row, tuple) or len(row) != 16:
             raise LawHistoryError("LAW_HISTORY_SOURCE_ARTICLE_PROJECTION_MISMATCH")
         (
             law_id,
@@ -2786,12 +3182,14 @@ def _verify_source_article_projection(
             content,
             content_hash,
             version_mst,
+            version_key,
             valid_from,
             valid_to,
             parent_law_id,
             parent_article_no,
             parent_paragraph_no,
             parent_version_mst,
+            parent_version_key,
         ) = row
         if (
             not isinstance(law_id, str)
@@ -2806,6 +3204,9 @@ def _verify_source_article_projection(
             or sha256_bytes(content.encode("utf-8")) != content_hash
             or not isinstance(version_mst, str)
             or _MST.fullmatch(version_mst) is None
+            or not isinstance(version_key, str)
+            or (version_match := _VERSION_KEY.fullmatch(version_key)) is None
+            or version_match.group("mst") != version_mst
             or not isinstance(valid_from, date)
             or (valid_to is not None and not isinstance(valid_to, date))
             or (valid_to is not None and valid_to <= valid_from)
@@ -2814,7 +3215,12 @@ def _verify_source_article_projection(
         if parent_law_id is None:
             if any(
                 value is not None
-                for value in (parent_article_no, parent_paragraph_no, parent_version_mst)
+                for value in (
+                    parent_article_no,
+                    parent_paragraph_no,
+                    parent_version_mst,
+                    parent_version_key,
+                )
             ):
                 raise LawHistoryError("LAW_HISTORY_SOURCE_ARTICLE_PROJECTION_MISMATCH")
         elif (
@@ -2824,9 +3230,12 @@ def _verify_source_article_projection(
             or (parent_paragraph_no is not None and type(parent_paragraph_no) is not int)
             or not isinstance(parent_version_mst, str)
             or _MST.fullmatch(parent_version_mst) is None
+            or not isinstance(parent_version_key, str)
+            or (parent_match := _VERSION_KEY.fullmatch(parent_version_key)) is None
+            or parent_match.group("mst") != parent_version_mst
         ):
             raise LawHistoryError("LAW_HISTORY_SOURCE_ARTICLE_PROJECTION_MISMATCH")
-        identity = (law_id, article_no, paragraph_no, version_mst)
+        identity = (law_id, article_no, paragraph_no, version_key)
         if identity in observed:
             raise LawHistoryError("LAW_HISTORY_SOURCE_ARTICLE_PROJECTION_MISMATCH")
         observed[identity] = {
@@ -2834,6 +3243,7 @@ def _verify_source_article_projection(
             "article_no": article_no,
             "paragraph_no": paragraph_no,
             "version_mst": version_mst,
+            "version_key": version_key,
             "title": title,
             "content_hash": content_hash,
             "valid_from": valid_from.isoformat(),
@@ -2842,6 +3252,7 @@ def _verify_source_article_projection(
             "parent_article_no": parent_article_no,
             "parent_paragraph_no": parent_paragraph_no,
             "parent_version_mst": parent_version_mst,
+            "parent_version_key": parent_version_key,
         }
     if observed != expected:
         raise LawHistoryError("LAW_HISTORY_SOURCE_ARTICLE_PROJECTION_MISMATCH")
@@ -2950,7 +3361,7 @@ def _journal_refresh_sources(
         if raw_asset.get("source_kind") != "refresh":
             raise LawHistoryError("LAW_HISTORY_REFRESH_JOURNAL_INVALID")
         source = _source_from_asset(raw_asset)
-        key = (source.law_id, source.effective_mst)
+        key = (source.law_id, source.version_key)
         if key in seen:
             raise LawHistoryError("LAW_HISTORY_REFRESH_JOURNAL_INVALID")
         seen.add(key)
@@ -2987,7 +3398,7 @@ def _combined_refresh_assets(
     for raw_asset in raw_existing:
         if not isinstance(raw_asset, dict):
             raise LawHistoryError("LAW_HISTORY_MANIFEST_INVALID")
-        key = (cast(str, raw_asset.get("law_id")), cast(str, raw_asset.get("effective_mst")))
+        key = (cast(str, raw_asset.get("law_id")), cast(str, raw_asset.get("version_key")))
         if key in existing:
             raise LawHistoryError("LAW_HISTORY_MANIFEST_INVALID")
         existing[key] = dict(raw_asset)
@@ -2995,7 +3406,7 @@ def _combined_refresh_assets(
     new_assets: list[dict[str, object]] = []
     for raw_asset in staged_assets:
         asset = dict(raw_asset)
-        key = (cast(str, asset.get("law_id")), cast(str, asset.get("effective_mst")))
+        key = (cast(str, asset.get("law_id")), cast(str, asset.get("version_key")))
         current = existing.get(key)
         if current is None:
             existing[key] = asset
@@ -3004,7 +3415,7 @@ def _combined_refresh_assets(
             continue
         if any(
             current.get(field) != asset.get(field)
-            for field in ("effective_date", "effective_sha256", "is_repealed")
+            for field in ("effective_mst", "effective_date", "effective_sha256", "is_repealed")
         ):
             raise LawHistoryError("LAW_HISTORY_REFRESH_SOURCE_CONFLICT")
     return combined, tuple(new_assets)
@@ -3425,9 +3836,9 @@ class FunctionalLawHistoryEvidenceBackend(DatabaseEvidenceBackend):
                        source.official_uri
                 FROM law_articles a
                 JOIN law_versions version
-                  ON version.law_id=a.law_id AND version.mst=a.version_mst
+                  ON version.law_id=a.law_id AND version.version_key=a.version_key
                 JOIN law_version_sources source
-                  ON source.law_id=a.law_id AND source.mst=a.version_mst
+                  ON source.law_id=a.law_id AND source.version_key=a.version_key
                 WHERE a.id = ANY(%s) AND a.valid_from <= %s
                   AND (a.valid_to IS NULL OR a.valid_to > %s)
                 """,

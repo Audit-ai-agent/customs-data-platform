@@ -16,6 +16,7 @@ import math
 from typing import Any, Literal
 
 from src.embed.model_identity import RERANK_MODEL
+from src.local_profiles import runtime_model_cache_directory
 
 MODEL = RERANK_MODEL.model_id
 MODEL_REVISION = RERANK_MODEL.revision
@@ -69,11 +70,13 @@ def _get(device: Literal["cpu", "cuda"] = "cpu"):
             _tok = AutoTokenizer.from_pretrained(  # nosec B615
                 MODEL,
                 revision=MODEL_REVISION,
+                cache_dir=str(runtime_model_cache_directory()),
                 local_files_only=True,
             )
             _model = AutoModelForSequenceClassification.from_pretrained(  # nosec B615
                 MODEL,
                 revision=MODEL_REVISION,
+                cache_dir=str(runtime_model_cache_directory()),
                 local_files_only=True,
             )
             _model.eval()

@@ -11,6 +11,7 @@ from threading import Lock
 from typing import Any, Literal
 
 from src.embed.model_identity import DENSE_MODEL
+from src.local_profiles import runtime_model_cache_directory
 
 DenseDevice = Literal["auto", "cpu", "cuda"]
 
@@ -58,6 +59,11 @@ def _get_model(device: DenseDevice):
                 model_path = snapshot_download(  # nosec B615
                     repo_id=DENSE_MODEL.model_id,
                     revision=DENSE_MODEL.revision,
+                    # ``HF_HOME`` can be read by huggingface_hub before this
+                    # profile applies its environment.  Pass the same
+                    # profile-owned cache explicitly so the cache-only loader
+                    # consumes the exact immutable snapshot prefetch stored.
+                    cache_dir=str(runtime_model_cache_directory()),
                     # Local setup must prefetch this immutable revision. Runtime
                     # lookup must never contact or trust a mutable remote model
                     # repository.

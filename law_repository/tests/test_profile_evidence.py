@@ -533,6 +533,23 @@ def test_model_prefetch_uses_only_pinned_identities_and_local_cache(tmp_path: Pa
     )
 
 
+@pytest.mark.parametrize(
+    "apply_profile",
+    [
+        "apply_functional_uat_runtime_environment",
+        "apply_functional_uat_law_history_runtime_environment",
+    ],
+)
+def test_runtime_model_cache_uses_the_exact_applied_local_root(
+    tmp_path: Path, apply_profile: str
+) -> None:
+    from src import local_profiles
+
+    getattr(local_profiles, apply_profile)(root=tmp_path)
+
+    assert local_profiles.runtime_model_cache_directory() == (tmp_path / "cache" / "huggingface")
+
+
 def test_functional_backend_uses_the_validated_manifest_review_date() -> None:
     backend = FunctionalUatEvidenceBackend(review_as_of=FUNCTIONAL_UAT_AS_OF)
 

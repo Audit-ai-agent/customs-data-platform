@@ -62,14 +62,14 @@ def test_content_hash_present(cur):
     assert cur.fetchone()[0] == 0
 
 
-def test_version_mst_matches_law_versions(cur):
-    """Every stored article MST belongs to its law version ledger."""
+def test_version_key_matches_law_versions(cur):
+    """Every stored article has an exact law-version ledger identity."""
     cur.execute(
         """
         SELECT count(*) FROM law_articles a
         WHERE NOT EXISTS (
           SELECT 1 FROM law_versions v
-          WHERE v.law_id = a.law_id AND v.mst = a.version_mst
+          WHERE v.law_id = a.law_id AND v.version_key = a.version_key
         )
         """
     )

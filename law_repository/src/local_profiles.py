@@ -33,6 +33,8 @@ CONFIG_FILENAME = "config.env"
 # value or an HTTP request cannot switch the law-history profile to GPU.
 _law_history_cuda_opt_in_depth = 0
 _law_history_cuda_opt_in_lock = Lock()
+_runtime_model_cache: tuple[str, Path] | None = None
+_runtime_model_cache_lock = Lock()
 
 
 class LocalProfileError(RuntimeError):
@@ -105,6 +107,23 @@ def shared_model_cache_directory(*, root: Path | None = None) -> Path:
     """Return the one ignored model cache shared by local Data profiles."""
 
     return _safe_directory(local_root(root) / "cache" / "huggingface")
+
+
+def runtime_model_cache_directory() -> Path:
+    """Return the cache root bound by the active local profile application.
+
+    Hugging Face libraries may cache environment-derived paths at import time.
+    Data model loaders therefore use this profile-owned value instead of
+    ambient cache variables.  A process that has not applied a profile keeps
+    the historical shared-cache fallback.
+    """
+
+    profile = os.environ.get("CUSTOMS_DATA_PROFILE")
+    with _runtime_model_cache_lock:
+        bound = _runtime_model_cache
+        if bound is not None and profile == bound[0]:
+            return _safe_directory(bound[1])
+    return shared_model_cache_directory()
 
 
 def _validate_profile_name(profile: str) -> str:
@@ -376,6 +395,8 @@ def apply_data_store_environment(
     one profile without a repository ``.env`` file.
     """
 
+    global _runtime_model_cache
+
     directory = profile_directory(profile, root=root)
     values = load_config(directory / CONFIG_FILENAME)
     required = {
@@ -393,6 +414,8 @@ def apply_data_store_environment(
         include_law_api_credential=include_law_api_credential,
     )
     cache_root = shared_model_cache_directory(root=root)
+    with _runtime_model_cache_lock:
+        _runtime_model_cache = (profile, cache_root)
     os.environ["HF_HOME"] = str(cache_root)
     # Runtime is cache-only.  The explicit prefetch command temporarily
     # overrides this for its own downloader calls.
@@ -542,6 +565,7 @@ __all__ = [
     "profile_directory",
     "profile_paths",
     "read_service_token",
+    "runtime_model_cache_directory",
     "shared_model_cache_directory",
     "validate_functional_uat_law_api_credential",
     "validate_functional_uat_law_history_api_credential",

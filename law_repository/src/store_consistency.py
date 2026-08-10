@@ -87,11 +87,11 @@ def _count(cursor: Any, query: str, params: object | None = None) -> int:
 
 
 def _validate_law_hash_rows(rows: list[Any]) -> None:
-    """Validate all stored law content bytes and their version provenance."""
+    """Validate all stored law content bytes and their exact version provenance."""
 
     if not rows:
         raise StoreVerificationError("STORE_LAW_CORPUS_EMPTY")
-    for content, content_hash, version_mst, has_version in rows:
+    for content, content_hash, version_mst, version_key, has_version in rows:
         if (
             not isinstance(content, str)
             or not content.strip()
@@ -99,6 +99,8 @@ def _validate_law_hash_rows(rows: list[Any]) -> None:
             or hashlib.sha256(content.encode("utf-8")).hexdigest() != content_hash
             or not isinstance(version_mst, str)
             or not version_mst.strip()
+            or not isinstance(version_key, str)
+            or not version_key.strip()
             or not has_version
         ):
             raise StoreVerificationError("STORE_LAW_CONTENT_HASH_MISMATCH")
@@ -156,10 +158,10 @@ def _read_postgres_state() -> PostgresStoreState:
         hash_rows = _rows(
             cursor,
             """
-            SELECT a.content, a.content_hash, a.version_mst,
+            SELECT a.content, a.content_hash, a.version_mst, a.version_key,
                    EXISTS (
                      SELECT 1 FROM law_versions v
-                     WHERE v.law_id = a.law_id AND v.mst = a.version_mst
+                     WHERE v.law_id = a.law_id AND v.version_key = a.version_key
                    )
             FROM law_articles a
             """,

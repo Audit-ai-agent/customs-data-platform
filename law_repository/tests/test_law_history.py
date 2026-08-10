@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from src.law_history import (
@@ -17,7 +18,11 @@ from src.law_history import (
     FunctionalLawHistoryEvidenceBackend,
     LawHistoryError,
     LawHistorySource,
+    LawHistoryVersionCandidate,
+    _CollectedCatalogCandidate,
     _candidate_as_of,
+    _candidate_group_as_of,
+    _canonicalize_coeffective_candidates,
     _catalog_for_law,
     _journal_refresh_sources,
     _is_valid_baseline_asset,
@@ -64,6 +69,47 @@ class _HistoryCursor:
 
 def _hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _coeffective_receipt(
+    *, mst: str, projection: str, raw_tag: str, effective_date: date = date(2026, 8, 5)
+) -> _CollectedCatalogCandidate:
+    """Build a body-free official-receipt fixture for canonicalizer tests."""
+
+    candidate = LawHistoryVersionCandidate("001556", mst, effective_date)
+    source = LawHistorySource(
+        law_id=candidate.law_id,
+        current_mst=mst,
+        current_file=f"{mst}.json",
+        current_sha256=_hash(f"current-{raw_tag}"),
+        effective_mst=mst,
+        effective_file=f"{mst}.json",
+        effective_sha256=_hash(f"effective-{raw_tag}"),
+        effective_date=effective_date,
+        article_count=1,
+        is_repealed=False,
+        law_name="관세법",
+        hierarchy="법률",
+        ministry="관세청",
+        official_uri=f"https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq={mst}",
+        collected_at=datetime(2026, 8, 9, tzinfo=timezone.utc).isoformat(),
+        source_kind="baseline",
+    )
+    return _CollectedCatalogCandidate(
+        candidate=candidate,
+        source=source,
+        body={},
+        projection_sha256=_hash(projection),
+    )
+
+
+def _old_and_new_response(*, predecessor: str, successor: str, law_id: str = "001556") -> dict:
+    return {
+        "OldAndNewService": {
+            "구조문_기본정보": {"법령ID": law_id, "법령일련번호": predecessor},
+            "신조문_기본정보": {"법령ID": law_id, "법령일련번호": successor},
+        }
+    }
 
 
 def _complete_refresh_sources(
@@ -189,6 +235,158 @@ def test_effective_catalog_reads_all_pages_and_selects_exact_as_of_version() -> 
         )
 
 
+def test_candidate_group_is_lazy_and_does_not_fetch_unselected_historical_conflict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Only the latest applicable date group may invoke body/edge retrieval."""
+
+    import src.law_history as history
+
+    monkeypatch.setattr(history, "LAW_HISTORY_LAW_IDS", ("001556",))
+    calls: list[dict[str, object]] = []
+
+    def body(mst: str, effective: str) -> dict[str, object]:
+        return {
+            "법령": {
+                "기본정보": {
+                    "법령ID": "001556",
+                    "법령명_한글": "관세법",
+                    "시행일자": effective,
+                    "공포일자": "20200101",
+                    "제개정구분": "일부개정",
+                    "소관부처": "관세청",
+                },
+                "조문": {
+                    "조문단위": {
+                        "조문여부": "조문",
+                        "조문번호": "0001",
+                        "조문가지번호": "00",
+                        "조문제목": "목적",
+                        "조문내용": f"safe {mst}",
+                    }
+                },
+            }
+        }
+
+    def api_get(endpoint: str, **params: object) -> dict[str, object]:
+        calls.append({"endpoint": endpoint, **params})
+        if endpoint == "lawSearch.do":
+            if params["nw"] == "1":
+                return {
+                    "LawSearch": {
+                        "totalCnt": "3",
+                        "law": [
+                            {
+                                "법령ID": "001556",
+                                "법령일련번호": "100",
+                                "시행일자": "20200101",
+                            },
+                            {
+                                "법령ID": "001556",
+                                "법령일련번호": "101",
+                                "시행일자": "20200101",
+                            },
+                            {
+                                "법령ID": "001556",
+                                "법령일련번호": "102",
+                                "시행일자": "20260805",
+                            },
+                        ],
+                    }
+                }
+            return {"LawSearch": {"totalCnt": "0", "law": []}}
+        assert endpoint == "lawService.do"
+        assert params["target"] == "eflaw"
+        assert params["MST"] == "102"
+        return body("102", "20260805")
+
+    _root, sources = collect_law_history_baseline(
+        profile=tmp_path, as_of=date(2026, 8, 5), api_get=api_get
+    )
+    assert [source.effective_mst for source in sources] == ["102"]
+    assert all(
+        not (call["endpoint"] == "lawService.do" and call["target"] == "oldAndNew")
+        for call in calls
+    )
+
+
+def test_same_day_identical_projection_uses_deterministic_receipt_without_old_and_new() -> None:
+    calls: list[dict[str, object]] = []
+
+    def api_get(endpoint: str, **params: object) -> dict:
+        calls.append({"endpoint": endpoint, **params})
+        raise AssertionError("identical legal projections must not call oldAndNew")
+
+    selected = _canonicalize_coeffective_candidates(
+        receipts=(
+            _coeffective_receipt(mst="101", projection="equal", raw_tag="b"),
+            _coeffective_receipt(mst="100", projection="equal", raw_tag="a"),
+        ),
+        api_get=api_get,
+    )
+    assert selected.candidate.mst == "100"
+    assert calls == []
+
+
+def test_same_day_divergent_projection_requires_verified_official_unique_sink() -> None:
+    calls: list[dict[str, object]] = []
+    edges = {"100": "099", "101": "100"}
+
+    def api_get(endpoint: str, **params: object) -> dict:
+        assert endpoint == "lawService.do"
+        assert params["target"] == "oldAndNew"
+        mst = str(params["MST"])
+        calls.append({"endpoint": endpoint, **params})
+        return _old_and_new_response(predecessor=edges[mst], successor=mst)
+
+    selected = _canonicalize_coeffective_candidates(
+        receipts=(
+            _coeffective_receipt(mst="100", projection="before", raw_tag="a"),
+            _coeffective_receipt(mst="101", projection="after", raw_tag="b"),
+        ),
+        api_get=api_get,
+    )
+    assert selected.candidate.mst == "101"
+    assert {str(call["MST"]) for call in calls} == {"100", "101"}
+
+
+@pytest.mark.parametrize(
+    ("edges", "law_id"),
+    [
+        ({"100": "099", "101": "098"}, "001556"),
+        ({"100": "101", "101": "100"}, "001556"),
+        ({"100": "099", "101": "100"}, "999999"),
+    ],
+)
+def test_same_day_divergent_projection_fails_closed_without_a_single_verified_sink(
+    edges: dict[str, str], law_id: str
+) -> None:
+    def api_get(_endpoint: str, **params: object) -> dict:
+        mst = str(params["MST"])
+        return _old_and_new_response(predecessor=edges[mst], successor=mst, law_id=law_id)
+
+    with pytest.raises(LawHistoryError, match="CATALOG_CANONICAL_UNRESOLVED"):
+        _canonicalize_coeffective_candidates(
+            receipts=(
+                _coeffective_receipt(mst="100", projection="a", raw_tag="a"),
+                _coeffective_receipt(mst="101", projection="b", raw_tag="b"),
+            ),
+            api_get=api_get,
+        )
+
+
+def test_candidate_group_returns_all_same_day_candidates_before_canonicalization() -> None:
+    candidates = (
+        LawHistoryVersionCandidate("001556", "100", date(2026, 8, 5)),
+        LawHistoryVersionCandidate("001556", "101", date(2026, 8, 5)),
+        LawHistoryVersionCandidate("001556", "102", date(2026, 8, 6)),
+    )
+    group = _candidate_group_as_of(candidates, as_of=date(2026, 8, 5))
+    assert [candidate.mst for candidate in group] == ["100", "101"]
+    with pytest.raises(LawHistoryError, match="CATALOG_CANONICAL_REQUIRED"):
+        _candidate_as_of(candidates, as_of=date(2026, 8, 5))
+
+
 def test_baseline_and_refresh_fetch_exact_effective_body_not_current_substitute(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
@@ -267,6 +465,115 @@ def test_baseline_and_refresh_fetch_exact_effective_body_not_current_substitute(
     ]
     law_service = [call for call in calls if call["endpoint"] == "lawService.do"]
     assert {call["efYd"] for call in law_service} == {"20260805", "20260806"}
+
+
+def test_phased_mst_refresh_keeps_one_receipt_per_effective_date(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """One MST may have multiple phases; its raw receipts must not overwrite."""
+
+    import src.law_history as history
+
+    monkeypatch.setattr(history, "LAW_HISTORY_LAW_IDS", ("001556",))
+
+    def body(effective: str) -> dict[str, object]:
+        return {
+            "법령": {
+                "기본정보": {
+                    "법령ID": "001556",
+                    "법령명_한글": "관세법",
+                    "시행일자": effective,
+                    "공포일자": "20260801",
+                    "제개정구분": "일부개정",
+                    "소관부처": "관세청",
+                },
+                "조문": {
+                    "조문단위": {
+                        "조문여부": "조문",
+                        "조문번호": "0001",
+                        "조문가지번호": "00",
+                        "조문제목": "목적",
+                        "조문내용": f"phase {effective}",
+                    }
+                },
+            }
+        }
+
+    def api_get(endpoint: str, **params: object) -> dict[str, object]:
+        if endpoint == "lawSearch.do":
+            if params["nw"] == "1":
+                return {
+                    "LawSearch": {
+                        "totalCnt": "2",
+                        "law": [
+                            {
+                                "법령ID": "001556",
+                                "법령일련번호": "100",
+                                "시행일자": "20260806",
+                            },
+                            {
+                                "법령ID": "001556",
+                                "법령일련번호": "100",
+                                "시행일자": "20260807",
+                            },
+                        ],
+                    }
+                }
+            return {"LawSearch": {"totalCnt": "0", "law": []}}
+        assert endpoint == "lawService.do"
+        assert params["MST"] == "100"
+        return body(str(params["efYd"]))
+
+    root, sources = collect_law_history_refresh(
+        profile=tmp_path,
+        from_date=date(2026, 8, 6),
+        to_date=date(2026, 8, 7),
+        api_get=api_get,
+    )
+
+    assert [(source.effective_mst, source.version_key) for source in sources] == [
+        ("100", "100@20260806"),
+        ("100", "100@20260807"),
+    ]
+    assert len({source.effective_file for source in sources}) == 2
+    assert all((root / source.effective_file).is_file() for source in sources)
+    receipt = _refresh_record(from_date=date(2026, 8, 6), to_date=date(2026, 8, 7), sources=sources)
+    assert [row["version_key"] for row in receipt["sources"]] == [
+        "100@20260806",
+        "100@20260807",
+    ]
+    assert receipt["as_of_sources"] == [receipt["sources"][-1]]
+
+
+def test_refresh_receipt_refuses_unresolved_same_day_mst_ambiguity() -> None:
+    """Version keys do not authorize an arbitrary same-day canonical choice."""
+
+    def source(mst: str) -> LawHistorySource:
+        return LawHistorySource(
+            law_id="001556",
+            current_mst=mst,
+            current_file=f"{mst}.json",
+            current_sha256="a" * 64,
+            effective_mst=mst,
+            effective_file=f"{mst}.json",
+            effective_sha256="a" * 64,
+            effective_date=date(2026, 8, 6),
+            article_count=1,
+            is_repealed=False,
+            law_name="관세법",
+            hierarchy="법률",
+            ministry="관세청",
+            official_uri=f"https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq={mst}",
+            collected_at=datetime(2026, 8, 9, tzinfo=timezone.utc).isoformat(),
+            source_kind="refresh",
+        )
+
+    with pytest.raises(LawHistoryError, match="REFRESH_SAME_DAY_AMBIGUITY"):
+        _refresh_record(
+            from_date=date(2026, 8, 6),
+            to_date=date(2026, 8, 6),
+            sources=(source("100"), source("101")),
+        )
 
 
 def test_temporal_backend_exposes_fixed_hsk_and_requirement_baseline() -> None:
@@ -398,6 +705,7 @@ def test_refresh_invalidates_a_pre_refresh_benchmark_binding() -> None:
         {
             "law_id": source.law_id,
             "effective_mst": source.effective_mst,
+            "version_key": source.version_key,
             "effective_date": source.effective_date.isoformat(),
             "effective_sha256": source.effective_sha256,
             "is_repealed": source.is_repealed,
@@ -408,6 +716,7 @@ def test_refresh_invalidates_a_pre_refresh_benchmark_binding() -> None:
         {
             "law_id": source.law_id,
             "effective_mst": source.effective_mst,
+            "version_key": source.version_key,
             "effective_date": source.effective_date.isoformat(),
             "effective_sha256": source.effective_sha256,
             "is_repealed": source.is_repealed,
@@ -451,6 +760,7 @@ def test_refresh_receipt_requires_an_as_of_selection_for_every_registry_law() ->
         {
             "law_id": source.law_id,
             "effective_mst": source.effective_mst,
+            "version_key": source.version_key,
             "effective_date": source.effective_date.isoformat(),
             "effective_sha256": source.effective_sha256,
             "is_repealed": source.is_repealed,
@@ -485,6 +795,142 @@ def test_law_history_baseline_requires_dense_but_not_optional_reranker(tmp_path)
     assert set(inventory) == {"dense"}
     assert len(calls) == 1
     assert calls[0]["repo_id"] == inventory["dense"]["model_id"]
+
+
+def test_temporal_index_orders_full_text_work_by_length_without_losing_row_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CPU padding optimization may change write order, never row identity."""
+
+    from src.embed import dense
+    from src.ingest import laws
+
+    # tuple positions mirror index_temporal_qdrant's private SELECT exactly.
+    rows = [
+        (
+            20,
+            "law",
+            "name",
+            "법률",
+            2,
+            None,
+            None,
+            date(2026, 8, 5),
+            None,
+            "aa",
+            "2",
+            "2@20260805",
+            "b" * 64,
+        ),
+        (
+            10,
+            "law",
+            "name",
+            "법률",
+            1,
+            None,
+            None,
+            date(2026, 8, 5),
+            None,
+            "bb",
+            "1",
+            "1@20260805",
+            "a" * 64,
+        ),
+        (
+            30,
+            "law",
+            "name",
+            "법률",
+            3,
+            None,
+            None,
+            date(2026, 8, 5),
+            None,
+            "long",
+            "3",
+            "3@20260805",
+            "c" * 64,
+        ),
+    ]
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, _query: str) -> None:
+            return None
+
+        def fetchall(self):
+            return rows
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return Cursor()
+
+    class Qdrant:
+        def __init__(self) -> None:
+            self.batches: list[list[object]] = []
+
+        def upsert(self, *, collection_name: str, points: list[object]) -> None:
+            assert collection_name == laws.TEMPORAL_COLLECTION
+            self.batches.append(points)
+
+    qdrant = Qdrant()
+    encoded: list[tuple[list[str], int]] = []
+    vectors_by_text = {"bb": [1.0], "aa": [2.0], "long": [3.0]}
+
+    def fake_encode(texts: list[str], *, batch_size: int) -> np.ndarray:
+        encoded.append((texts, batch_size))
+        return np.asarray([vectors_by_text[text] for text in texts], dtype="float32")
+
+    monkeypatch.setattr(laws, "connect", lambda: Connection())
+    monkeypatch.setattr(laws, "qdrant_client", lambda: qdrant)
+    monkeypatch.setattr(laws, "ensure_temporal_collection", lambda _client: None)
+    monkeypatch.setattr(laws.bm25, "encode_doc", lambda _text: ([], []))
+    monkeypatch.setattr(dense, "encode", fake_encode)
+
+    assert laws.index_temporal_qdrant(batch_size=2) == 3
+    assert encoded == [(["bb", "aa"], 8), (["long"], 8)]
+    points = [point for batch in qdrant.batches for point in batch]
+    observed = {
+        point.payload["article_pk"]: {
+            "id": point.id,
+            "version_key": point.payload["version_key"],
+            "content_hash": point.payload["content_hash"],
+            "vector": point.vector[laws.DENSE_VECTOR],
+        }
+        for point in points
+    }
+    assert observed == {
+        10: {
+            "id": laws.temporal_point_id(10, "1@20260805"),
+            "version_key": "1@20260805",
+            "content_hash": "a" * 64,
+            "vector": [1.0],
+        },
+        20: {
+            "id": laws.temporal_point_id(20, "2@20260805"),
+            "version_key": "2@20260805",
+            "content_hash": "b" * 64,
+            "vector": [2.0],
+        },
+        30: {
+            "id": laws.temporal_point_id(30, "3@20260805"),
+            "version_key": "3@20260805",
+            "content_hash": "c" * 64,
+            "vector": [3.0],
+        },
+    }
 
 
 def test_law_history_source_path_rejects_windows_and_parent_escapes(tmp_path) -> None:
@@ -760,6 +1206,7 @@ def test_law_history_source_asset_requires_exact_effective_uri_and_dates(tmp_pat
         "current_file": "data/law-history/run/law.json",
         "current_sha256": digest,
         "effective_mst": "100",
+        "version_key": "100@20260805",
         "effective_file": "data/law-history/run/law.json",
         "effective_sha256": digest,
         "effective_date": "2026-08-05",
@@ -834,6 +1281,7 @@ def test_full_source_article_projection_binds_raw_body_title_content_and_interva
             "current_file": relative,
             "current_sha256": digest,
             "effective_mst": mst,
+            "version_key": f"{mst}@{effective}",
             "effective_file": relative,
             "effective_sha256": digest,
             "effective_date": f"{effective[:4]}-{effective[4:6]}-{effective[6:]}",
@@ -875,12 +1323,14 @@ def test_full_source_article_projection_binds_raw_body_title_content_and_interva
             contents_by_mst[str(row["version_mst"])],
             row["content_hash"],
             row["version_mst"],
+            row["version_key"],
             date.fromisoformat(str(row["valid_from"])),
             date.fromisoformat(str(row["valid_to"])) if row["valid_to"] else None,
             row["parent_law_id"],
             row["parent_article_no"],
             row["parent_paragraph_no"],
             row["parent_version_mst"],
+            row["parent_version_key"],
         )
         for row in expected
     ]
@@ -940,6 +1390,7 @@ def test_temporal_qdrant_projection_rehashes_db_text_and_checks_full_payload(
         None,
         content,
         "100",
+        "100@20260805",
         content_hash,
         date(2026, 8, 5),
         None,
@@ -977,6 +1428,7 @@ def test_temporal_qdrant_projection_rehashes_db_text_and_checks_full_payload(
         "paragraph_no": None,
         "item_no": None,
         "version_mst": "100",
+        "version_key": "100@20260805",
         "content_hash": content_hash,
         "valid_from_ordinal": date(2026, 8, 5).toordinal(),
         "valid_to_ordinal": date.max.toordinal(),
@@ -992,7 +1444,7 @@ def test_temporal_qdrant_projection_rehashes_db_text_and_checks_full_payload(
             return SimpleNamespace(count=1)
 
         def scroll(self, **_kwargs: object) -> tuple[list[SimpleNamespace], None]:
-            return [SimpleNamespace(id=temporal_point_id(7, "100"), payload=payload)], None
+            return [SimpleNamespace(id=temporal_point_id(7, "100@20260805"), payload=payload)], None
 
     monkeypatch.setattr(postgres, "connect", lambda: Connection())
     monkeypatch.setattr(qdrant, "client", lambda: QdrantClient())
@@ -1010,6 +1462,7 @@ def test_law_history_store_provenance_requires_exact_manifest_receipts(
     asset = {
         "law_id": "001556",
         "effective_mst": "100",
+        "version_key": "100@20260805",
         "official_uri": "https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=100",
         "effective_sha256": "a" * 64,
         "collected_at": collected_at.isoformat(),
@@ -1031,6 +1484,7 @@ def test_law_history_store_provenance_requires_exact_manifest_receipts(
                 (
                     "001556",
                     "100",
+                    "100@20260805",
                     "https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=100",
                     "a" * 64,
                     collected_at,

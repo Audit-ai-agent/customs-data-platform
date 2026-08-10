@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import uuid
 from datetime import date, datetime
+from typing import Any, Sequence
 
 from src import lawgo
 from src.db.postgres import connect
@@ -43,6 +44,7 @@ SPLIT_THRESHOLD = 6000  # bge-m3 8192 토큰 대비 여유. 현행 관세 3법 �
 
 _POINT_NS = uuid.uuid5(uuid.NAMESPACE_URL, "trade-doc-auditor/law-article")
 _TEMPORAL_POINT_NS = uuid.uuid5(uuid.NAMESPACE_URL, "customs-law-history/temporal-article")
+_TEMPORAL_DENSE_BATCH_SIZE = 8
 
 
 def _hierarchy(name: str) -> str:
@@ -65,10 +67,27 @@ def point_id(law_id: str, article_no: int, paragraph_no: int | None, mst: str) -
     return str(uuid.uuid5(_POINT_NS, f"{law_id}:{article_no}:{paragraph_no or 0}:{mst}"))
 
 
-def temporal_point_id(article_pk: int, mst: str) -> str:
-    """Stable all-version Qdrant point identity for the law-history profile."""
+def temporal_point_id(article_pk: int, version_key: str) -> str:
+    """Stable all-version Qdrant identity for one exact source version."""
 
-    return str(uuid.uuid5(_TEMPORAL_POINT_NS, f"{article_pk}:{mst}"))
+    return str(uuid.uuid5(_TEMPORAL_POINT_NS, f"{article_pk}:{version_key}"))
+
+
+def _temporal_embedding_order(rows: Sequence[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
+    """Group similarly sized full texts before bounded dense batches.
+
+    The temporal index always embeds the complete stored text with the pinned
+    8,192-token policy.  Reordering write work by text length only reduces
+    per-batch padding on CPU; point identities, content, vector model, and
+    final Qdrant payloads remain bound to their original PostgreSQL rows.
+    """
+
+    def key(row: tuple[Any, ...]) -> tuple[int, int]:
+        if len(row) <= 9 or type(row[0]) is not int or not isinstance(row[9], str):
+            raise ValueError("temporal embedding row is invalid")
+        return len(row[9]), row[0]
+
+    return sorted(rows, key=key)
 
 
 # ---------------------------------------------------------------- 파싱/청킹
@@ -155,6 +174,20 @@ def parse_articles(body: dict, meta: dict) -> list[dict]:
 # ---------------------------------------------------------------- PG 적재
 
 
+def _version_key(meta: dict) -> str:
+    """Return an exact source identity while preserving legacy MST behavior.
+
+    The legacy 3-law loader has no phased-source receipt and uses its raw
+    MST.  The law-history collector supplies an explicit ``MST@YYYYMMDD``
+    identity before calling this module.
+    """
+
+    value = meta.get("version_key", meta.get("mst"))
+    if not isinstance(value, str) or not value:
+        raise ValueError("law source has invalid version key")
+    return value
+
+
 def upsert_law(cur, meta: dict) -> None:
     cur.execute(
         """
@@ -167,13 +200,15 @@ def upsert_law(cur, meta: dict) -> None:
     )
     cur.execute(
         """
-        INSERT INTO law_versions (law_id, mst, promulgation_date, enforcement_date, revision_type)
-        VALUES (%s, %s, %s, %s, %s)
-        ON CONFLICT (law_id, mst) DO NOTHING
+        INSERT INTO law_versions
+          (law_id, mst, version_key, promulgation_date, enforcement_date, revision_type)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (law_id, version_key) DO NOTHING
         """,
         (
             meta["law_id"],
             meta["mst"],
+            _version_key(meta),
             _to_date(meta["promulgation_date"]),
             _to_date(meta["enforcement_date"]),
             meta["revision_type"],
@@ -206,14 +241,15 @@ def upsert_law_history(cur, meta: dict) -> None:
     cur.execute(
         """
         INSERT INTO law_versions
-          (law_id, mst, promulgation_date, enforcement_date, revision_type,
+          (law_id, mst, version_key, promulgation_date, enforcement_date, revision_type,
            law_name, hierarchy, ministry)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (law_id, mst) DO NOTHING
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (law_id, version_key) DO NOTHING
         """,
         (
             meta["law_id"],
             meta["mst"],
+            _version_key(meta),
             _to_date(meta["promulgation_date"]),
             _to_date(meta["enforcement_date"]),
             meta["revision_type"],
@@ -225,7 +261,12 @@ def upsert_law_history(cur, meta: dict) -> None:
 
 
 def _upsert_article_row(
-    cur, law_id: str, mst: str, row: dict, parent_pk: int | None = None
+    cur,
+    law_id: str,
+    mst: str,
+    version_key: str,
+    row: dict,
+    parent_pk: int | None = None,
 ) -> tuple[int, str]:
     """열린 행(valid_to IS NULL) 기준 upsert. 반환: (pk, 'new'|'changed'|'unchanged')."""
     chash = _content_hash(row["content"])
@@ -245,8 +286,8 @@ def _upsert_article_row(
             """
             INSERT INTO law_articles
               (law_id, article_no, paragraph_no, title, content, content_hash,
-               version_mst, valid_from, valid_to, is_current, parent_article_pk)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL, %s, %s)
+               version_mst, version_key, valid_from, valid_to, is_current, parent_article_pk)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, %s, %s)
             RETURNING id
             """,
             (
@@ -257,6 +298,7 @@ def _upsert_article_row(
                 row["content"],
                 chash,
                 mst,
+                version_key,
                 row["valid_from"],
                 is_current,
                 parent_pk,
@@ -271,23 +313,41 @@ def _upsert_article_row(
         """
         UPDATE law_articles
         SET title = %s, content = %s, content_hash = %s, version_mst = %s,
-            valid_from = %s, is_current = %s, qdrant_point_id = NULL,
+            version_key = %s, valid_from = %s, is_current = %s, qdrant_point_id = NULL,
             parent_article_pk = %s
         WHERE id = %s
         """,
-        (row["title"], row["content"], chash, mst, row["valid_from"], is_current, parent_pk, pk),
+        (
+            row["title"],
+            row["content"],
+            chash,
+            mst,
+            version_key,
+            row["valid_from"],
+            is_current,
+            parent_pk,
+            pk,
+        ),
     )
     return pk, "changed"
 
 
 def load_law(cur, meta: dict, rows: list[dict]) -> dict:
     upsert_law(cur, meta)
+    version_key = _version_key(meta)
     stats = {"new": 0, "changed": 0, "unchanged": 0}
     for row in rows:
-        pk, status = _upsert_article_row(cur, meta["law_id"], meta["mst"], row)
+        pk, status = _upsert_article_row(cur, meta["law_id"], meta["mst"], version_key, row)
         stats[status] += 1
         for child in row["children"]:
-            _, cstatus = _upsert_article_row(cur, meta["law_id"], meta["mst"], child, parent_pk=pk)
+            _, cstatus = _upsert_article_row(
+                cur,
+                meta["law_id"],
+                meta["mst"],
+                version_key,
+                child,
+                parent_pk=pk,
+            )
             stats[cstatus] += 1
     return stats
 
@@ -297,6 +357,7 @@ def _insert_temporal_article_row(
     *,
     law_id: str,
     mst: str,
+    version_key: str,
     row: dict,
     parent_pk: int | None = None,
 ) -> int:
@@ -311,8 +372,8 @@ def _insert_temporal_article_row(
         """
         INSERT INTO law_articles
           (law_id, article_no, paragraph_no, title, content, content_hash,
-           version_mst, valid_from, valid_to, is_current, parent_article_pk)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL, false, %s)
+           version_mst, version_key, valid_from, valid_to, is_current, parent_article_pk)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, false, %s)
         RETURNING id
         """,
         (
@@ -323,6 +384,7 @@ def _insert_temporal_article_row(
             row["content"],
             _content_hash(row["content"]),
             mst,
+            version_key,
             row["valid_from"],
             parent_pk,
         ),
@@ -333,7 +395,7 @@ def _insert_temporal_article_row(
 def load_law_history_version(cur, meta: dict, rows: list[dict]) -> dict[str, int | bool]:
     """Append one official law version to the temporal ledger.
 
-    A refresh is idempotent by ``(law_id, mst)``.  The Law API can expose a
+    A refresh is idempotent by ``(law_id, version_key)``.  The Law API can expose a
     source-wide effective date *and* article-specific future effective dates,
     so intervals are advanced per article.  A whole law-version date closes
     only articles that disappear from the complete official body.  This
@@ -350,6 +412,7 @@ def load_law_history_version(cur, meta: dict, rows: list[dict]) -> dict[str, int
         enforcement = _to_date(meta["enforcement_date"])
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("law-history source has an invalid enforcement date") from exc
+    version_key = _version_key(meta)
 
     # Keep parent/child identity explicit.  Child rows are indexed separately
     # when a long article is split, but their interval and parent link remain
@@ -373,8 +436,8 @@ def load_law_history_version(cur, meta: dict, rows: list[dict]) -> dict[str, int
             incoming.append((child_key, child, parent_row_key))
 
     cur.execute(
-        "SELECT 1 FROM law_versions WHERE law_id=%s AND mst=%s",
-        (meta["law_id"], meta["mst"]),
+        "SELECT 1 FROM law_versions WHERE law_id=%s AND version_key=%s",
+        (meta["law_id"], version_key),
     )
     already_loaded = cur.fetchone() is not None
     if already_loaded:
@@ -461,6 +524,7 @@ def load_law_history_version(cur, meta: dict, rows: list[dict]) -> dict[str, int
             cur,
             law_id=meta["law_id"],
             mst=meta["mst"],
+            version_key=version_key,
             row=row,
             parent_pk=parent_pk,
         )
@@ -565,23 +629,23 @@ def index_temporal_qdrant(batch_size: int = 64) -> int:
             """
             SELECT a.id, a.law_id, version.law_name, version.hierarchy, a.article_no,
                    a.paragraph_no, a.item_no, a.valid_from, a.valid_to,
-                   a.content, a.version_mst, a.content_hash
+                   a.content, a.version_mst, a.version_key, a.content_hash
             FROM law_articles a
             JOIN law_versions version
-              ON version.law_id=a.law_id AND version.mst=a.version_mst
+              ON version.law_id=a.law_id AND version.version_key=a.version_key
             JOIN law_version_sources src
-              ON src.law_id=a.law_id AND src.mst=a.version_mst
+              ON src.law_id=a.law_id AND src.version_key=a.version_key
             WHERE NOT EXISTS (SELECT 1 FROM law_articles c WHERE c.parent_article_pk=a.id)
             ORDER BY a.id
             """
         )
-        rows = cur.fetchall()
+        rows = _temporal_embedding_order(cur.fetchall())
     qc = qdrant_client()
     ensure_temporal_collection(qc)
     total = 0
     for index in range(0, len(rows), batch_size):
         batch = rows[index : index + batch_size]
-        vectors = dense.encode([row[9] for row in batch])
+        vectors = dense.encode([row[9] for row in batch], batch_size=_TEMPORAL_DENSE_BATCH_SIZE)
         points = []
         for row, vector in zip(batch, vectors):
             (
@@ -596,12 +660,13 @@ def index_temporal_qdrant(batch_size: int = 64) -> int:
                 valid_to,
                 text,
                 mst,
+                version_key,
                 content_hash,
             ) = row
             sparse_indices, sparse_values = bm25.encode_doc(text)
             points.append(
                 models.PointStruct(
-                    id=temporal_point_id(int(article_pk), str(mst)),
+                    id=temporal_point_id(int(article_pk), str(version_key)),
                     vector={
                         DENSE_VECTOR: vector.tolist(),
                         BM25_VECTOR: models.SparseVector(
@@ -621,6 +686,7 @@ def index_temporal_qdrant(batch_size: int = 64) -> int:
                             valid_to.toordinal() if valid_to is not None else date.max.toordinal()
                         ),
                         "version_mst": str(mst),
+                        "version_key": str(version_key),
                         "content_hash": str(content_hash),
                         "text": text,
                     },
