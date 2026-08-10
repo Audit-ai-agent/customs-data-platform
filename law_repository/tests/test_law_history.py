@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import date
 import hashlib
 import json
@@ -30,6 +31,7 @@ from src.law_history import (
     _journal_refresh_sources,
     _neo4j_property_projection,
     _is_valid_baseline_asset,
+    _is_rebindable_stale_frozen_inputs,
     _profile_source_file,
     _refresh_record,
     _recovery_baseline_entries,
@@ -42,6 +44,7 @@ from src.law_history import (
     collect_law_history_baseline,
     collect_law_history_refresh,
     recover_law_history_baseline,
+    rebind_law_history_frozen_inputs,
     _validate_source_asset,
     _verify_temporal_store_projection,
     _verify_source_article_projection,
@@ -307,6 +310,206 @@ def test_recover_baseline_runs_all_gates_before_absent_only_publication(
     assert json.loads((profile / "state" / "active-law-history-manifest.json").read_text()) == (
         published_manifest
     )
+
+
+def _frozen_input_receipt(*, digest: str, byte_size: int) -> dict[str, object]:
+    return {
+        "attestation_kind": "functional-law-history/frozen-inputs/v1",
+        "hsk_snapshot_as_of": "2026-08-05",
+        "requirements_snapshot_as_of": "2026-08-05",
+        "hsk": {
+            "files": [],
+            "node_count": 1,
+            "leaf_count": 1,
+            "projection_sha256": "b" * 64,
+        },
+        "ccct": {
+            "relative_path": "fixed.jsonl",
+            "input_sha256": digest,
+            "byte_size": byte_size,
+            "snapshot_id": "ccct_" + "c" * 64,
+            "content_hash": "c" * 64,
+            "query_count": 1,
+            "raw_row_count": 1,
+            "requirement_count": 1,
+            "document_count": 1,
+            "projection_sha256": "d" * 64,
+        },
+    }
+
+
+def test_frozen_input_rebind_allows_only_a_stale_ccct_byte_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.law_history as history
+
+    current = _frozen_input_receipt(digest="a" * 64, byte_size=10)
+    stale = _frozen_input_receipt(digest="e" * 64, byte_size=12)
+    monkeypatch.setattr(history, "_validate_frozen_inputs_manifest", lambda value: current)
+
+    assert _is_rebindable_stale_frozen_inputs(stale=stale, current=current) is True
+
+    changed_hsk = deepcopy(stale)
+    changed_hsk["hsk"]["leaf_count"] = 2  # type: ignore[index]
+    assert _is_rebindable_stale_frozen_inputs(stale=changed_hsk, current=current) is False
+
+    changed_semantics = deepcopy(stale)
+    changed_semantics["ccct"]["query_count"] = 2  # type: ignore[index]
+    assert _is_rebindable_stale_frozen_inputs(stale=changed_semantics, current=current) is False
+
+    malformed_receipt = deepcopy(stale)
+    malformed_receipt["ccct"]["input_sha256"] = "not-a-digest"  # type: ignore[index]
+    assert _is_rebindable_stale_frozen_inputs(stale=malformed_receipt, current=current) is False
+
+
+def test_rebind_frozen_inputs_preserves_refreshes_and_never_collects_or_downloads(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import src.law_history as history
+
+    profile = tmp_path / "law-history-profile"
+    (profile / "state").mkdir(parents=True)
+    stale = _frozen_input_receipt(digest="e" * 64, byte_size=12)
+    current = _frozen_input_receipt(digest="a" * 64, byte_size=10)
+    source_assets = [{"asset": "retained"}]
+    refreshes = [{"refresh": "retained"}]
+    manifest: dict[str, object] = {
+        "source_assets": source_assets,
+        "refreshes": refreshes,
+        "frozen_inputs": stale,
+        "source_article_projection_sha256": "1" * 64,
+        "temporal_store_projection_sha256": "2" * 64,
+    }
+    events: list[str] = []
+    published_digest = "f" * 64
+    replacement: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        history, "ensure_functional_uat_law_history_profile", lambda **_kwargs: profile
+    )
+    monkeypatch.setattr(
+        history,
+        "apply_functional_uat_law_history_runtime_environment",
+        lambda **_kwargs: profile,
+    )
+    monkeypatch.setattr(
+        history,
+        "build_frozen_input_attestation",
+        lambda: SimpleNamespace(manifest=current),
+    )
+    monkeypatch.setattr(
+        history,
+        "_load_rebindable_frozen_input_manifest",
+        lambda **_kwargs: (manifest, "0" * 64),
+    )
+    monkeypatch.setattr(
+        history,
+        "_validate_loaded_law_history_state",
+        lambda **kwargs: (
+            events.append("local-state")
+            if kwargs["frozen_inputs"] == current
+            else pytest.fail("stale fixed inputs were accepted")
+        ),
+    )
+    monkeypatch.setattr(
+        history,
+        "_verify_frozen_input_projections_full",
+        lambda attestation: (
+            events.append("frozen-projection")
+            if attestation.manifest == current
+            else pytest.fail("unexpected fixed inputs")
+        ),
+    )
+    monkeypatch.setattr(
+        history,
+        "_verify_source_article_projection",
+        lambda **_kwargs: events.append("source-projection") or "1" * 64,
+    )
+    monkeypatch.setattr(
+        history,
+        "_verify_temporal_store_projection",
+        lambda: events.append("temporal-projection") or "2" * 64,
+    )
+
+    def replace(**kwargs: object) -> str:
+        updated = kwargs["manifest"]
+        assert isinstance(updated, dict)
+        replacement.update(updated)
+        assert updated["frozen_inputs"] == current
+        assert updated["source_assets"] is source_assets
+        assert updated["refreshes"] is refreshes
+        events.append("replace")
+        return published_digest
+
+    monkeypatch.setattr(history, "_replace_active_manifest_bytes_if_digest", replace)
+    monkeypatch.setattr(
+        history,
+        "validate_law_history_state",
+        lambda **_kwargs: (replacement, published_digest),
+    )
+    monkeypatch.setattr(
+        history,
+        "verify_law_history_store",
+        lambda **_kwargs: {"manifest_sha256": published_digest},
+    )
+    monkeypatch.setattr(
+        history,
+        "validate_functional_uat_law_history_api_credential",
+        lambda **_kwargs: pytest.fail("rebind must not read a collection credential"),
+    )
+    monkeypatch.setattr(
+        history,
+        "functional_uat_law_history_collection_environment",
+        lambda **_kwargs: pytest.fail("rebind must not enter a collection environment"),
+    )
+    monkeypatch.setattr(
+        history,
+        "prefetch_models",
+        lambda **_kwargs: pytest.fail("rebind must not download a model"),
+    )
+    monkeypatch.setattr(
+        history,
+        "collect_law_history_baseline",
+        lambda **_kwargs: pytest.fail("rebind must not collect official sources"),
+    )
+
+    assert rebind_law_history_frozen_inputs(confirm_profile=LAW_HISTORY_PROFILE) == published_digest
+    assert events == [
+        "local-state",
+        "frozen-projection",
+        "source-projection",
+        "temporal-projection",
+        "replace",
+    ]
+
+
+def test_rebind_frozen_inputs_refuses_any_pending_refresh_before_reading_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import src.law_history as history
+
+    profile = tmp_path / "law-history-profile"
+    pending = profile / "state" / "pending-law-history-refresh.json"
+    pending.parent.mkdir(parents=True)
+    pending.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        history, "ensure_functional_uat_law_history_profile", lambda **_kwargs: profile
+    )
+    monkeypatch.setattr(
+        history,
+        "apply_functional_uat_law_history_runtime_environment",
+        lambda **_kwargs: profile,
+    )
+    monkeypatch.setattr(
+        history,
+        "build_frozen_input_attestation",
+        lambda: pytest.fail("pending refresh must stop rebind before fixed-input reads"),
+    )
+
+    with pytest.raises(LawHistoryError, match="LAW_HISTORY_REFRESH_JOURNAL_CONFLICT"):
+        rebind_law_history_frozen_inputs(confirm_profile=LAW_HISTORY_PROFILE)
 
 
 def test_hsk_projection_matches_neo4j_null_omission_without_masking_real_changes() -> None:

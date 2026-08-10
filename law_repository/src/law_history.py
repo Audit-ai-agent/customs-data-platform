@@ -1062,6 +1062,69 @@ def _validate_frozen_inputs_manifest(value: object) -> Mapping[str, object]:
     return value
 
 
+def _is_rebindable_stale_frozen_inputs(*, stale: object, current: Mapping[str, object]) -> bool:
+    """Allow one narrowly-defined fixed-input receipt migration.
+
+    A published law-history marker normally cannot be altered unless an
+    explicit refresh or reviewed benchmark changes it.  One exceptional
+    maintenance case is a correction to the *tracked-byte receipt* for the
+    fixed CCCT input: the source/store projection remains identical, while
+    the persisted receipt no longer matches the canonical checkout bytes.
+
+    This predicate deliberately accepts only that case.  HSK receipts and all
+    semantic/projection fields must already equal the freshly attested fixed
+    inputs; the old CCCT digest and byte count merely have to be well-formed
+    and differ from the current pair.  It is not a generic malformed-manifest
+    repair path.
+    """
+
+    try:
+        verified_current = _validate_frozen_inputs_manifest(current)
+    except LawHistoryError:
+        return False
+    if not isinstance(stale, Mapping) or set(stale) != set(verified_current):
+        return False
+    if any(
+        stale.get(key) != verified_current.get(key)
+        for key in (
+            "attestation_kind",
+            "hsk_snapshot_as_of",
+            "requirements_snapshot_as_of",
+        )
+    ):
+        return False
+    stale_hsk = stale.get("hsk")
+    current_hsk = verified_current.get("hsk")
+    stale_ccct = stale.get("ccct")
+    current_ccct = verified_current.get("ccct")
+    if (
+        not isinstance(stale_hsk, Mapping)
+        or not isinstance(current_hsk, Mapping)
+        or stale_hsk != current_hsk
+        or not isinstance(stale_ccct, Mapping)
+        or not isinstance(current_ccct, Mapping)
+        or set(stale_ccct) != set(current_ccct)
+    ):
+        return False
+    if any(
+        stale_ccct.get(key) != current_ccct.get(key)
+        for key in set(current_ccct) - {"input_sha256", "byte_size"}
+    ):
+        return False
+    stale_digest = stale_ccct.get("input_sha256")
+    stale_size = stale_ccct.get("byte_size")
+    if (
+        not isinstance(stale_digest, str)
+        or _SHA256.fullmatch(stale_digest) is None
+        or type(stale_size) is not int
+        or stale_size < 1
+    ):
+        return False
+    return stale_digest != current_ccct.get("input_sha256") or stale_size != current_ccct.get(
+        "byte_size"
+    )
+
+
 def _validate_frozen_input_projections(attestation: Mapping[str, object]) -> None:
     """Lightweight runtime proof that the attested fixed inputs are projected."""
 
@@ -2162,6 +2225,30 @@ def _replace_active_manifest_if_digest(
     return _write_active_manifest(profile, manifest, replace=True)
 
 
+def _replace_active_manifest_bytes_if_digest(
+    *, profile: Path, expected_sha256: str, manifest: Mapping[str, object]
+) -> str:
+    """CAS-replace a marker that is intentionally unreadable by the normal validator.
+
+    The caller must already hold the profile writer lock and have completed the
+    constrained stale-receipt validation.  Reading raw bytes here avoids
+    treating the one known-stale receipt as a normal active manifest while
+    retaining the same concurrent-modification protection as ordinary marker
+    mutations.
+    """
+
+    path = _active_manifest_path(profile)
+    if not path.is_file() or path.is_symlink():
+        raise LawHistoryError("LAW_HISTORY_MANIFEST_CONCURRENT_MODIFICATION")
+    try:
+        actual_sha256 = sha256_bytes(path.read_bytes())
+    except OSError as exc:
+        raise LawHistoryError("LAW_HISTORY_MANIFEST_CONCURRENT_MODIFICATION") from exc
+    if actual_sha256 != expected_sha256:
+        raise LawHistoryError("LAW_HISTORY_MANIFEST_CONCURRENT_MODIFICATION")
+    return _write_active_manifest(profile, manifest, replace=True)
+
+
 def bind_law_history_retrieval_strategy(
     *,
     strategy: Literal["rrf_lexical", "cross_encoder_rerank"],
@@ -2251,15 +2338,19 @@ def _manifest_from_sources(
     }
 
 
-def _load_active_manifest(profile: Path) -> tuple[dict[str, object], str]:
-    path = _active_manifest_path(profile)
-    if not path.is_file() or path.is_symlink():
-        raise LawHistoryError("LAW_HISTORY_MANIFEST_UNAVAILABLE")
-    try:
-        raw = path.read_bytes()
-        manifest = json.loads(raw.decode("utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise LawHistoryError("LAW_HISTORY_MANIFEST_INVALID") from exc
+def _validate_active_manifest_payload(
+    value: object,
+    *,
+    rebind_frozen_inputs: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Validate the active marker shape and its append-only receipt chain.
+
+    ``rebind_frozen_inputs`` is intentionally private and only used by the
+    explicit fixed-input receipt repair.  It accepts a marker only when its
+    sole frozen-input difference is the narrowly checked stale CCCT receipt.
+    """
+
+    manifest = value
     required = {
         "local_state_version",
         "profile",
@@ -2305,7 +2396,21 @@ def _load_active_manifest(profile: Path) -> tuple[dict[str, object], str]:
         and manifest["retrieval_strategy_benchmark_sha256"] is None
     ):
         raise LawHistoryError("LAW_HISTORY_MANIFEST_INVALID")
-    _validate_frozen_inputs_manifest(manifest["frozen_inputs"])
+    if rebind_frozen_inputs is None:
+        _validate_frozen_inputs_manifest(manifest["frozen_inputs"])
+    else:
+        try:
+            _validate_frozen_inputs_manifest(manifest["frozen_inputs"])
+        except LawHistoryError as exc:
+            if (
+                str(exc) != "LAW_HISTORY_FROZEN_INPUT_MANIFEST_INVALID"
+                or not _is_rebindable_stale_frozen_inputs(
+                    stale=manifest["frozen_inputs"], current=rebind_frozen_inputs
+                )
+            ):
+                raise LawHistoryError("LAW_HISTORY_FROZEN_INPUT_REBIND_NOT_PERMITTED") from exc
+        else:
+            raise LawHistoryError("LAW_HISTORY_FROZEN_INPUT_REBIND_NOT_REQUIRED")
     try:
         coverage_through = date.fromisoformat(cast(str, manifest["coverage_through"]))
     except (TypeError, ValueError) as exc:
@@ -2319,7 +2424,38 @@ def _load_active_manifest(profile: Path) -> tuple[dict[str, object], str]:
         source_assets=manifest["source_assets"],
         coverage_through=coverage_through,
     )
-    return manifest, sha256_bytes(raw)
+    return manifest
+
+
+def _load_active_manifest(profile: Path) -> tuple[dict[str, object], str]:
+    path = _active_manifest_path(profile)
+    if not path.is_file() or path.is_symlink():
+        raise LawHistoryError("LAW_HISTORY_MANIFEST_UNAVAILABLE")
+    try:
+        raw = path.read_bytes()
+        manifest = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise LawHistoryError("LAW_HISTORY_MANIFEST_INVALID") from exc
+    return _validate_active_manifest_payload(manifest), sha256_bytes(raw)
+
+
+def _load_rebindable_frozen_input_manifest(
+    *, profile: Path, current_frozen_inputs: Mapping[str, object]
+) -> tuple[dict[str, object], str]:
+    """Read only the narrowly stale marker accepted by the repair command."""
+
+    path = _active_manifest_path(profile)
+    if not path.is_file() or path.is_symlink():
+        raise LawHistoryError("LAW_HISTORY_MANIFEST_UNAVAILABLE")
+    try:
+        raw = path.read_bytes()
+        manifest = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise LawHistoryError("LAW_HISTORY_MANIFEST_INVALID") from exc
+    return (
+        _validate_active_manifest_payload(manifest, rebind_frozen_inputs=current_frozen_inputs),
+        sha256_bytes(raw),
+    )
 
 
 def _validated_refresh_records(
@@ -3219,24 +3355,86 @@ def recover_law_history_baseline(
         return _new_public_artifact(as_of=LAW_HISTORY_BASELINE_AS_OF, counts=counts, models=models)
 
 
-def validate_law_history_state(
-    *, local_root_override: Path | None = None
-) -> tuple[dict[str, object], str]:
-    """Verify active local source bytes, cached model revisions, and counts."""
+def rebind_law_history_frozen_inputs(
+    *, confirm_profile: str, local_root_override: Path | None = None
+) -> str:
+    """Replace only one stale fixed-input receipt after full local verification.
 
+    This is a network-free, explicit maintenance operation for a published
+    marker whose sole invalid condition is the bounded CCCT tracked-byte
+    receipt accepted by :func:`_is_rebindable_stale_frozen_inputs`.  It never
+    collects a law, downloads a model, discards refresh history, or repairs an
+    arbitrary manifest.  Every source, fixed-input, store, model, and temporal
+    projection gate must pass before the marker is atomically rebound.
+    """
+
+    if confirm_profile != LAW_HISTORY_PROFILE:
+        raise LawHistoryError("LAW_HISTORY_RECOVERY_CONFIRMATION_INVALID")
     try:
         profile = ensure_functional_uat_law_history_profile(root=local_root_override)
-        apply_functional_uat_law_history_runtime_environment(root=local_root_override)
     except LocalProfileError as exc:
         raise LawHistoryError("LAW_HISTORY_PROFILE_UNAVAILABLE") from exc
-    pending = _pending_refresh_path(profile)
-    if pending.exists() or pending.is_symlink():
-        # A journal means the stores can contain staged but not yet manifest-
-        # bound versions.  Serving through that state would hide a partial
-        # refresh, so only the explicit refresh resume path may proceed.
-        raise LawHistoryError("LAW_HISTORY_REFRESH_PENDING")
-    manifest, digest = _load_active_manifest(profile)
-    frozen_inputs = _validate_frozen_inputs_manifest(manifest["frozen_inputs"])
+    with _law_history_mutation_lock(profile):
+        try:
+            apply_functional_uat_law_history_runtime_environment(root=local_root_override)
+        except LocalProfileError as exc:
+            raise LawHistoryError("LAW_HISTORY_PROFILE_UNAVAILABLE") from exc
+        pending = _pending_refresh_path(profile)
+        if pending.exists() or pending.is_symlink():
+            raise LawHistoryError("LAW_HISTORY_REFRESH_JOURNAL_CONFLICT")
+
+        # Freshly attest the exact current fixed inputs before accepting even
+        # the constrained previous receipt layout.
+        attestation = build_frozen_input_attestation()
+        manifest, previous_digest = _load_rebindable_frozen_input_manifest(
+            profile=profile,
+            current_frozen_inputs=attestation.manifest,
+        )
+        _validate_loaded_law_history_state(
+            profile=profile,
+            manifest=manifest,
+            frozen_inputs=attestation.manifest,
+            local_root_override=local_root_override,
+        )
+        _verify_frozen_input_projections_full(attestation)
+
+        source_assets = manifest["source_assets"]
+        assert isinstance(source_assets, list)
+        source_projection_sha256 = _verify_source_article_projection(
+            profile=profile,
+            source_assets=cast(Sequence[Mapping[str, object]], source_assets),
+        )
+        if source_projection_sha256 != manifest["source_article_projection_sha256"]:
+            raise LawHistoryError("LAW_HISTORY_SOURCE_ARTICLE_PROJECTION_MISMATCH")
+        temporal_projection_sha256 = _verify_temporal_store_projection()
+        if temporal_projection_sha256 != manifest["temporal_store_projection_sha256"]:
+            raise LawHistoryError("LAW_HISTORY_TEMPORAL_STORE_MISMATCH")
+
+        updated = dict(manifest)
+        updated["frozen_inputs"] = dict(attestation.manifest)
+        published_digest = _replace_active_manifest_bytes_if_digest(
+            profile=profile,
+            expected_sha256=previous_digest,
+            manifest=updated,
+        )
+        _published, active_digest = validate_law_history_state(
+            local_root_override=local_root_override
+        )
+        verified = verify_law_history_store(local_root_override=local_root_override)
+        if active_digest != published_digest or verified.get("manifest_sha256") != published_digest:
+            raise LawHistoryError("LAW_HISTORY_FROZEN_INPUT_REBIND_POSTVERIFY_MISMATCH")
+        return published_digest
+
+
+def _validate_loaded_law_history_state(
+    *,
+    profile: Path,
+    manifest: Mapping[str, object],
+    frozen_inputs: Mapping[str, object],
+    local_root_override: Path | None,
+) -> None:
+    """Run every active-state gate after the marker shape was validated."""
+
     source_assets = manifest["source_assets"]
     assert isinstance(source_assets, list)
     refreshes = _validated_refresh_records(
@@ -3275,6 +3473,32 @@ def validate_law_history_state(
         raise LawHistoryError("LAW_HISTORY_MODEL_CACHE_MISMATCH")
     if manifest["store_counts"] != _history_store_counts():
         raise LawHistoryError("LAW_HISTORY_STORE_COUNT_MISMATCH")
+
+
+def validate_law_history_state(
+    *, local_root_override: Path | None = None
+) -> tuple[dict[str, object], str]:
+    """Verify active local source bytes, cached model revisions, and counts."""
+
+    try:
+        profile = ensure_functional_uat_law_history_profile(root=local_root_override)
+        apply_functional_uat_law_history_runtime_environment(root=local_root_override)
+    except LocalProfileError as exc:
+        raise LawHistoryError("LAW_HISTORY_PROFILE_UNAVAILABLE") from exc
+    pending = _pending_refresh_path(profile)
+    if pending.exists() or pending.is_symlink():
+        # A journal means the stores can contain staged but not yet manifest-
+        # bound versions.  Serving through that state would hide a partial
+        # refresh, so only the explicit refresh resume path may proceed.
+        raise LawHistoryError("LAW_HISTORY_REFRESH_PENDING")
+    manifest, digest = _load_active_manifest(profile)
+    frozen_inputs = _validate_frozen_inputs_manifest(manifest["frozen_inputs"])
+    _validate_loaded_law_history_state(
+        profile=profile,
+        manifest=manifest,
+        frozen_inputs=frozen_inputs,
+        local_root_override=local_root_override,
+    )
     return manifest, digest
 
 
@@ -4600,6 +4824,7 @@ __all__ = [
     "recover_law_history_build_lock",
     "recover_law_history_published_lock",
     "recover_law_history_refresh_lock",
+    "rebind_law_history_frozen_inputs",
     "refresh_law_history",
     "validate_law_history_state",
     "verify_law_history_store",

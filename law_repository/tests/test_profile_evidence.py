@@ -1051,6 +1051,30 @@ def test_law_history_reset_never_resets_volumes_for_an_unsafe_manifest_path(
     assert compose_calls == []
 
 
+def test_law_history_rebind_frozen_inputs_is_an_explicit_local_command(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    tool = _law_history_uat_tool()
+    observed: dict[str, object] = {}
+
+    parsed = tool.build_parser().parse_args(
+        ["rebind-frozen-inputs", "--confirm-profile", tool.LAW_HISTORY_PROFILE]
+    )
+    assert parsed.command == "rebind-frozen-inputs"
+    monkeypatch.setattr(
+        tool,
+        "rebind_law_history_frozen_inputs",
+        lambda **kwargs: observed.update(kwargs) or "ignored-local-digest",
+    )
+
+    assert tool.main(["rebind-frozen-inputs", "--confirm-profile", tool.LAW_HISTORY_PROFILE]) == 0
+    assert observed == {"confirm_profile": tool.LAW_HISTORY_PROFILE}
+    captured = capsys.readouterr()
+    assert captured.out == "law-history fixed-input receipt rebound after full local verification\n"
+    assert captured.err == ""
+
+
 @pytest.mark.parametrize(
     ("changed_manifest", "changed_digest"),
     [
