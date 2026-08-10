@@ -46,7 +46,7 @@ jobs:
       - name: Verify lockfile is current
         run: uv lock --check
       - name: Install locked development dependencies
-        run: uv sync --locked --group dev
+        run: uv sync --locked --group dev --extra store --extra rag --extra ingestion
       - name: Check Evidence V3 contract drift
         run: uv run --locked --no-sync --group dev python tools/check_contract_drift.py
       - name: Lint
