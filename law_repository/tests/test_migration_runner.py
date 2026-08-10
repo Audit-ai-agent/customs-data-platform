@@ -96,11 +96,12 @@ class FakeConnection:
 def test_repository_migrations_are_contiguous_and_checksum_attested() -> None:
     migrations = discover_migrations()
 
-    assert [item.number for item in migrations] == [1, 2, 3]
+    assert [item.number for item in migrations] == [1, 2, 3, 4]
     assert [item.filename for item in migrations] == [
         "001_init.sql",
         "002_parent_article_pk.sql",
         "003_ccct_requirements.sql",
+        "004_law_history_provenance.sql",
     ]
     assert all(
         hashlib.sha256(item.path.read_bytes()).hexdigest() == item.checksum_sha256

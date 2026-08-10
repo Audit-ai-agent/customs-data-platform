@@ -34,6 +34,7 @@ from typing import Iterable, Literal
 # intentionally match ``src.db.qdrant``; only store-backed calls import that
 # module at execution time.
 COLLECTION = "customs_law_current"
+TEMPORAL_COLLECTION = "customs_law_temporal"
 DENSE_VECTOR = "dense"
 BM25_VECTOR = "bm25"
 ARMS = (DENSE_VECTOR, BM25_VECTOR)
@@ -96,14 +97,18 @@ def resolve_as_of(
 # ------------------------------------------------------------------- arm 검색
 
 
-def _arm_query(qc, arm: str, query: str, limit: int):
+def _arm_query(qc, arm: str, query: str, limit: int, *, collection: str, query_filter=None):
     """단일 arm(dense|bm25) Qdrant 조회. 인코더는 적재와 동일 모듈 공유."""
     if arm == DENSE_VECTOR:
         from src.embed import dense
 
         dv = dense.encode([query])[0]
         return qc.query_points(
-            COLLECTION, query=dv.tolist(), using=DENSE_VECTOR, limit=limit
+            collection,
+            query=dv.tolist(),
+            using=DENSE_VECTOR,
+            limit=limit,
+            query_filter=query_filter,
         ).points
     if arm == BM25_VECTOR:
         from qdrant_client import models
@@ -112,16 +117,61 @@ def _arm_query(qc, arm: str, query: str, limit: int):
 
         sidx, sval = bm25.encode_query(query)
         return qc.query_points(
-            COLLECTION,
+            collection,
             query=models.SparseVector(indices=sidx, values=sval),
             using=BM25_VECTOR,
             limit=limit,
+            query_filter=query_filter,
         ).points
     raise ValueError(f"알 수 없는 arm: {arm!r} (dense|bm25)")
 
 
+def _article_pk_as_of(article_pk: int, as_of: date) -> dict | None:
+    """Return the exact temporal Qdrant candidate only when it is valid."""
+
+    from psycopg.rows import dict_row
+
+    from src.db.postgres import connect
+
+    pred, params = _temporal_predicate(as_of)
+    from psycopg import sql
+
+    with connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            sql.SQL(
+                """
+                SELECT id AS article_pk, content
+                FROM law_articles
+                WHERE id=%(article_pk)s AND {temporal_predicate}
+                """
+            ).format(temporal_predicate=sql.SQL(pred)),
+            {"article_pk": article_pk, **params},
+        )
+        return cur.fetchone()
+
+
+def _temporal_qdrant_filter(as_of: date):
+    """Build the pre-ranking half-open interval filter for temporal vectors."""
+
+    from qdrant_client import models
+
+    day = as_of.toordinal()
+    return models.Filter(
+        must=[
+            models.FieldCondition(key="valid_from_ordinal", range=models.Range(lte=day)),
+            models.FieldCondition(key="valid_to_ordinal", range=models.Range(gt=day)),
+        ]
+    )
+
+
 def search(
-    query: str, arm: str = DENSE_VECTOR, limit: int = 10, as_of: date | None = None
+    query: str,
+    arm: str = DENSE_VECTOR,
+    limit: int = 10,
+    as_of: date | None = None,
+    *,
+    collection: str = COLLECTION,
+    temporal: bool = False,
 ) -> list[Hit]:
     """의미검색 → arm 별 {article_pk, score, text}.
 
@@ -132,21 +182,40 @@ def search(
     """
     if arm not in ARMS:
         raise ValueError(f"알 수 없는 arm: {arm!r} (dense|bm25)")
+    if temporal and collection != TEMPORAL_COLLECTION:
+        raise ValueError("temporal search requires the temporal collection")
+    if temporal and as_of is None:
+        raise ValueError("temporal search requires as_of")
+    # The all-version collection is never a generic search surface.  Without
+    # this inverse check, an internal caller could accidentally retrieve
+    # every historical version without applying the pre-ranking interval
+    # filter that makes the law-history profile safe.
+    if collection == TEMPORAL_COLLECTION and (not temporal or as_of is None):
+        raise ValueError("temporal collection requires temporal search and as_of")
 
     from src.db.qdrant import client as qdrant_client
 
     qc = qdrant_client()
     recall = limit if as_of is None else max(limit * 3, limit)
-    points = _arm_query(qc, arm, query, recall)
+    if temporal:
+        assert as_of is not None
+        query_filter = _temporal_qdrant_filter(as_of)
+    else:
+        query_filter = None
+    points = _arm_query(qc, arm, query, recall, collection=collection, query_filter=query_filter)
     if as_of is None:
         return [Hit(p.payload["article_pk"], p.score, p.payload["text"]) for p in points][:limit]
     out: list[Hit] = []
     for p in points:
-        row = resolve_as_of(
-            p.payload["law_id"],
-            p.payload["article_no"],
-            p.payload.get("paragraph_no"),
-            as_of,
+        row = (
+            _article_pk_as_of(int(p.payload["article_pk"]), as_of)
+            if temporal
+            else resolve_as_of(
+                p.payload["law_id"],
+                p.payload["article_no"],
+                p.payload.get("paragraph_no"),
+                as_of,
+            )
         )
         if row:
             out.append(Hit(row["article_pk"], p.score, row["content"]))
@@ -289,7 +358,9 @@ def hsk_requirements(code: str, trade_type: str | None = None, as_of: date | Non
         "chapter2": code10[:2],
     }
     as_of_str = (as_of or date.today()).isoformat()
-    wire_trade_type = {"수입": "import", "수출": "export"}.get(trade_type, trade_type)
+    wire_trade_type = (
+        "import" if trade_type == "수입" else "export" if trade_type == "수출" else trade_type
+    )
 
     from src.db.neo4j import driver as make_driver
 

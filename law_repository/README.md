@@ -22,7 +22,16 @@ uv run --locked --no-sync --group dev python tools/dev_store.py compose up
 # After a complete law/HSK/CCCT build only: full current-law/index/graph comparison.
 uv run --locked --no-sync --group dev --extra store python tools/dev_store.py verify
 
-# Real three-law functional UAT
+# Default real 65-law Evidence-history UAT
+uv sync --locked --group dev --extra store --extra rag --extra ingestion --python 3.11
+uv run --locked --no-sync --group dev --extra store --extra rag --extra ingestion python tools/functional_uat_law_history.py init
+# Add only your personal LAW_API_OC to this new ignored profile config.
+uv run --locked --no-sync --group dev --extra store --extra rag --extra ingestion python tools/functional_uat_law_history.py compose up
+uv run --locked --no-sync --group dev --extra store --extra rag --extra ingestion python tools/functional_uat_law_history.py build --as-of 2026-08-05
+uv run --locked --no-sync --group dev --extra store --extra rag --extra ingestion python tools/functional_uat_law_history.py verify-store
+uv run --locked --no-sync --group dev --extra store --extra rag --extra ingestion python tools/functional_uat_law_history.py serve --host 127.0.0.1 --port 18083
+
+# Legacy three-law compatibility UAT
 uv sync --locked --group dev --extra store --extra rag --extra ingestion --python 3.11
 uv run --locked --no-sync --group dev --extra store --extra rag --extra ingestion python tools/functional_uat_3law.py init
 # Add only your personal LAW_API_OC to the ignored _local profile config.
@@ -50,12 +59,23 @@ data and a generated local token. Its base setup requires only FastAPI,
 Pydantic, Uvicorn, and the development test tools; it does not install store
 clients or model packages.
 
-The functional UAT builder uses the official Law API only for the bounded
-three-law source collection. It requires a personal `LAW_API_OC` placed in its
-ignored profile config, stores raw official responses below that profile and
-models at `_local/cache/huggingface`, and records only profile, date, law IDs,
-source hashes, model revisions, store counts, and build time in the shareable
-UAT manifest. The full source inventory remains in ignored local state.
+The default law-history builder uses the official Law API only for the fixed
+65-law candidate registry and its explicit refresh window. It requires a
+personal `LAW_API_OC` placed in its own ignored profile config, stores raw
+official responses below that profile and models at `_local/cache/huggingface`,
+and records only safe profile/date/count/model summaries outside local state.
+Every version receipt retains the official URI, hash, collection time,
+effective date, and article count locally. HSK and CCCT remain the fixed
+`2026-08-05` snapshot and their mismatch with a later legal date is returned
+as `partial` with explicit `temporal_context`; no current law text is
+substituted for an unavailable historical date.
+
+The HSK/CCCT date is a contract baseline, not a claimed external collection
+timestamp. The profile verifies the exact tracked input bytes and their local
+PostgreSQL/Neo4j projections; it does not fabricate a separate agency receipt
+that is absent from those source files.
+
+The full source inventory remains in ignored local state.
 `verify-store` is the explicit full ID/hash comparison for Data maintenance;
 the regular UAT server uses lightweight source/cache/count checks. The CCCT
 reference input is already tracked, so no second API credential or bulk
@@ -66,8 +86,9 @@ its process environment and settings before accepting any Evidence request.
 ## Korean trade guidance source-build boundary
 
 The broader `functional-uat-kr-trade` profile is deliberately separate from
-this three-law profile. It may be initialized and inspected without changing
-the existing three-law source files, stores, model cache, or manifests:
+both Evidence profiles. It may be initialized and inspected without changing
+the law-history or legacy three-law source files, stores, model cache, or
+manifests:
 
 ```powershell
 uv run --locked --no-sync --group dev python tools/functional_uat_kr_trade.py init

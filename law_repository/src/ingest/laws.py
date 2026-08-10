@@ -27,8 +27,10 @@ from src.db.qdrant import (
     BM25_VECTOR,
     COLLECTION,
     DENSE_VECTOR,
+    TEMPORAL_COLLECTION,
     client as qdrant_client,
     ensure_collection,
+    ensure_temporal_collection,
 )
 from src.embed import bm25
 from src.functional_uat_spec import FUNCTIONAL_UAT_TARGET_LAWS
@@ -40,6 +42,7 @@ TARGET_LAWS = [dict(law) for law in FUNCTIONAL_UAT_TARGET_LAWS]
 SPLIT_THRESHOLD = 6000  # bge-m3 8192 토큰 대비 여유. 현행 관세 3법 최장 5,325자 → 분할 0건 예상
 
 _POINT_NS = uuid.uuid5(uuid.NAMESPACE_URL, "trade-doc-auditor/law-article")
+_TEMPORAL_POINT_NS = uuid.uuid5(uuid.NAMESPACE_URL, "customs-law-history/temporal-article")
 
 
 def _hierarchy(name: str) -> str:
@@ -60,6 +63,12 @@ def _content_hash(text: str) -> str:
 
 def point_id(law_id: str, article_no: int, paragraph_no: int | None, mst: str) -> str:
     return str(uuid.uuid5(_POINT_NS, f"{law_id}:{article_no}:{paragraph_no or 0}:{mst}"))
+
+
+def temporal_point_id(article_pk: int, mst: str) -> str:
+    """Stable all-version Qdrant point identity for the law-history profile."""
+
+    return str(uuid.uuid5(_TEMPORAL_POINT_NS, f"{article_pk}:{mst}"))
 
 
 # ---------------------------------------------------------------- 파싱/청킹
@@ -172,6 +181,49 @@ def upsert_law(cur, meta: dict) -> None:
     )
 
 
+def upsert_law_history(cur, meta: dict) -> None:
+    """Insert an immutable source-version display identity for law history.
+
+    The retained legacy loader intentionally keeps one mutable law master.
+    History queries instead use these per-version values so a later rename
+    cannot relabel a past Evidence citation.
+    """
+
+    law_name = meta.get("law_name")
+    ministry = meta.get("ministry")
+    if not isinstance(law_name, str) or not law_name or not isinstance(ministry, str):
+        raise ValueError("law-history source has invalid version metadata")
+    hierarchy = _hierarchy(law_name)
+    cur.execute(
+        """
+        INSERT INTO laws (law_id, law_name, hierarchy, ministry)
+        VALUES (%(law_id)s, %(law_name)s, %(hierarchy)s, %(ministry)s)
+        ON CONFLICT (law_id) DO UPDATE
+          SET law_name = EXCLUDED.law_name, ministry = EXCLUDED.ministry
+        """,
+        {**meta, "hierarchy": hierarchy},
+    )
+    cur.execute(
+        """
+        INSERT INTO law_versions
+          (law_id, mst, promulgation_date, enforcement_date, revision_type,
+           law_name, hierarchy, ministry)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (law_id, mst) DO NOTHING
+        """,
+        (
+            meta["law_id"],
+            meta["mst"],
+            _to_date(meta["promulgation_date"]),
+            _to_date(meta["enforcement_date"]),
+            meta["revision_type"],
+            law_name,
+            hierarchy,
+            ministry,
+        ),
+    )
+
+
 def _upsert_article_row(
     cur, law_id: str, mst: str, row: dict, parent_pk: int | None = None
 ) -> tuple[int, str]:
@@ -240,6 +292,196 @@ def load_law(cur, meta: dict, rows: list[dict]) -> dict:
     return stats
 
 
+def _insert_temporal_article_row(
+    cur,
+    *,
+    law_id: str,
+    mst: str,
+    row: dict,
+    parent_pk: int | None = None,
+) -> int:
+    """Insert one immutable law-history article version.
+
+    The law-history builder only appends versions at an explicitly validated
+    effective date.  It never mutates the historical body in place, unlike
+    the retained three-law loader above.
+    """
+
+    cur.execute(
+        """
+        INSERT INTO law_articles
+          (law_id, article_no, paragraph_no, title, content, content_hash,
+           version_mst, valid_from, valid_to, is_current, parent_article_pk)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL, false, %s)
+        RETURNING id
+        """,
+        (
+            law_id,
+            row["article_no"],
+            row["paragraph_no"],
+            row["title"],
+            row["content"],
+            _content_hash(row["content"]),
+            mst,
+            row["valid_from"],
+            parent_pk,
+        ),
+    )
+    return int(cur.fetchone()[0])
+
+
+def load_law_history_version(cur, meta: dict, rows: list[dict]) -> dict[str, int | bool]:
+    """Append one official law version to the temporal ledger.
+
+    A refresh is idempotent by ``(law_id, mst)``.  The Law API can expose a
+    source-wide effective date *and* article-specific future effective dates,
+    so intervals are advanced per article.  A whole law-version date closes
+    only articles that disappear from the complete official body.  This
+    prevents a future-provision row from replacing its still-effective text
+    too early and never lets a current row stand in for older legal text.
+    """
+
+    is_repealed = meta.get("is_repealed") is True
+    if not rows and not is_repealed:
+        raise ValueError("law-history source has no articles")
+    if rows and is_repealed:
+        raise ValueError("law-history repeal source has articles")
+    try:
+        enforcement = _to_date(meta["enforcement_date"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("law-history source has an invalid enforcement date") from exc
+
+    # Keep parent/child identity explicit.  Child rows are indexed separately
+    # when a long article is split, but their interval and parent link remain
+    # part of the same immutable official version.
+    incoming: list[tuple[tuple[int, int | None], dict, tuple[int, int | None] | None]] = []
+    seen: set[tuple[int, int | None]] = set()
+    for parent in rows:
+        parent_row_key: tuple[int, int | None] = (int(parent["article_no"]), None)
+        if parent_row_key in seen or not isinstance(parent.get("valid_from"), date):
+            raise ValueError("law-history source has duplicate or invalid articles")
+        seen.add(parent_row_key)
+        incoming.append((parent_row_key, parent, None))
+        children = parent.get("children")
+        if not isinstance(children, list):
+            raise ValueError("law-history source has invalid article children")
+        for child in children:
+            child_key = (int(child["article_no"]), int(child["paragraph_no"]))
+            if child_key in seen or not isinstance(child.get("valid_from"), date):
+                raise ValueError("law-history source has duplicate or invalid articles")
+            seen.add(child_key)
+            incoming.append((child_key, child, parent_row_key))
+
+    cur.execute(
+        "SELECT 1 FROM law_versions WHERE law_id=%s AND mst=%s",
+        (meta["law_id"], meta["mst"]),
+    )
+    already_loaded = cur.fetchone() is not None
+    if already_loaded:
+        return {"inserted": 0, "already_loaded": True}
+
+    cur.execute(
+        "SELECT max(enforcement_date) FROM law_versions WHERE law_id=%s",
+        (meta["law_id"],),
+    )
+    previous_version_date = cur.fetchone()[0]
+    if previous_version_date is not None and enforcement <= previous_version_date:
+        raise ValueError("law-history version effective date is not append-only")
+
+    cur.execute(
+        """
+        SELECT id, article_no, paragraph_no, content_hash, valid_from, parent_article_pk
+        FROM law_articles
+        WHERE law_id=%s AND valid_to IS NULL AND item_no IS NULL
+        """,
+        (meta["law_id"],),
+    )
+    open_rows = {
+        (int(article_no), int(paragraph_no) if paragraph_no is not None else None): {
+            "id": int(article_id),
+            "content_hash": str(content_hash),
+            "valid_from": valid_from,
+            "parent_article_pk": int(parent_pk) if parent_pk is not None else None,
+        }
+        for article_id, article_no, paragraph_no, content_hash, valid_from, parent_pk in cur.fetchall()
+    }
+
+    upsert_law_history(cur, meta)
+
+    if is_repealed:
+        if previous_version_date is None:
+            raise ValueError("law-history repeal has no predecessor")
+        for open_article in open_rows.values():
+            if enforcement <= open_article["valid_from"]:
+                raise ValueError("law-history repeal precedes an open article")
+            cur.execute(
+                "UPDATE law_articles SET valid_to=%s, is_current=false "
+                "WHERE id=%s AND valid_to IS NULL",
+                (enforcement, open_article["id"]),
+            )
+        return {"inserted": 0, "already_loaded": False}
+
+    selected_pks: dict[tuple[int, int | None], int] = {}
+    replaced_or_retained: set[tuple[int, int | None]] = set()
+    inserted = 0
+    # Parents precede children in ``incoming``, so an unchanged parent can be
+    # reused and a replacement parent has a new immutable key before a child
+    # is inserted.  This deliberately avoids an UPDATE of historical rows.
+    for key, row, parent_key in incoming:
+        parent_pk = selected_pks.get(parent_key) if parent_key is not None else None
+        if parent_key is not None and parent_pk is None:
+            raise ValueError("law-history source has an unresolved article parent")
+        row_hash = _content_hash(row["content"])
+        existing = open_rows.get(key)
+        if (
+            existing is not None
+            and existing["content_hash"] == row_hash
+            and existing["parent_article_pk"] == parent_pk
+        ):
+            if existing["valid_from"] != row["valid_from"]:
+                raise ValueError("law-history source changes an immutable article effective date")
+            selected_pks[key] = int(existing["id"])
+            replaced_or_retained.add(key)
+            continue
+
+        if existing is not None:
+            if row["valid_from"] <= existing["valid_from"]:
+                raise ValueError("law-history article effective date is not append-only")
+            cur.execute(
+                "UPDATE law_articles SET valid_to=%s, is_current=false WHERE id=%s AND valid_to IS NULL",
+                (row["valid_from"], existing["id"]),
+            )
+        elif previous_version_date is not None and row["valid_from"] < enforcement:
+            # After the baseline every previously effective article must have
+            # had an open predecessor.  A missing predecessor would create a
+            # gap that cannot safely be inferred from a later full-text body.
+            raise ValueError("law-history source omits a prior effective article")
+
+        selected_pks[key] = _insert_temporal_article_row(
+            cur,
+            law_id=meta["law_id"],
+            mst=meta["mst"],
+            row=row,
+            parent_pk=parent_pk,
+        )
+        replaced_or_retained.add(key)
+        inserted += 1
+
+    # An article absent from a complete official body is repealed or replaced
+    # at the body version's effective date.  Do not close a row at or before
+    # its own start date; that would manufacture an invalid empty interval.
+    for key, existing in open_rows.items():
+        if key in replaced_or_retained:
+            continue
+        if enforcement <= existing["valid_from"]:
+            raise ValueError("law-history source removes an article before it takes effect")
+        cur.execute(
+            "UPDATE law_articles SET valid_to=%s, is_current=false WHERE id=%s AND valid_to IS NULL",
+            (enforcement, existing["id"]),
+        )
+    return {"inserted": inserted, "already_loaded": False}
+
+
 # ---------------------------------------------------------------- Qdrant 인덱싱
 
 
@@ -303,6 +545,89 @@ def index_qdrant(batch_size: int = 64) -> int:
             cur.executemany("UPDATE law_articles SET qdrant_point_id = %s WHERE id = %s", ids)
         total += len(points)
         print(f"[qdrant] {total}/{len(pending)} upsert")
+    return total
+
+
+def index_temporal_qdrant(batch_size: int = 64) -> int:
+    """Rebuild/update the law-history all-version Qdrant collection.
+
+    Every point includes its half-open validity interval.  The repository
+    applies the same interval as a Qdrant filter before RRF and checks the
+    exact PostgreSQL row afterwards.  No current-only vector is reused.
+    """
+
+    from qdrant_client import models
+
+    from src.embed import dense
+
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT a.id, a.law_id, version.law_name, version.hierarchy, a.article_no,
+                   a.paragraph_no, a.item_no, a.valid_from, a.valid_to,
+                   a.content, a.version_mst, a.content_hash
+            FROM law_articles a
+            JOIN law_versions version
+              ON version.law_id=a.law_id AND version.mst=a.version_mst
+            JOIN law_version_sources src
+              ON src.law_id=a.law_id AND src.mst=a.version_mst
+            WHERE NOT EXISTS (SELECT 1 FROM law_articles c WHERE c.parent_article_pk=a.id)
+            ORDER BY a.id
+            """
+        )
+        rows = cur.fetchall()
+    qc = qdrant_client()
+    ensure_temporal_collection(qc)
+    total = 0
+    for index in range(0, len(rows), batch_size):
+        batch = rows[index : index + batch_size]
+        vectors = dense.encode([row[9] for row in batch])
+        points = []
+        for row, vector in zip(batch, vectors):
+            (
+                article_pk,
+                law_id,
+                law_name,
+                hierarchy,
+                article_no,
+                paragraph_no,
+                item_no,
+                valid_from,
+                valid_to,
+                text,
+                mst,
+                content_hash,
+            ) = row
+            sparse_indices, sparse_values = bm25.encode_doc(text)
+            points.append(
+                models.PointStruct(
+                    id=temporal_point_id(int(article_pk), str(mst)),
+                    vector={
+                        DENSE_VECTOR: vector.tolist(),
+                        BM25_VECTOR: models.SparseVector(
+                            indices=sparse_indices, values=sparse_values
+                        ),
+                    },
+                    payload={
+                        "article_pk": int(article_pk),
+                        "law_id": law_id,
+                        "law_name": law_name,
+                        "hierarchy": hierarchy,
+                        "article_no": article_no,
+                        "paragraph_no": paragraph_no,
+                        "item_no": item_no,
+                        "valid_from_ordinal": valid_from.toordinal(),
+                        "valid_to_ordinal": (
+                            valid_to.toordinal() if valid_to is not None else date.max.toordinal()
+                        ),
+                        "version_mst": str(mst),
+                        "content_hash": str(content_hash),
+                        "text": text,
+                    },
+                )
+            )
+        qc.upsert(collection_name=TEMPORAL_COLLECTION, points=points)
+        total += len(points)
     return total
 
 

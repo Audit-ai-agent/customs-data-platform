@@ -701,6 +701,7 @@ def test_cli_measurement_requires_the_active_coverage_date_in_the_approval(
         "verify_law_history_store",
         lambda: {
             "manifest_sha256": "a" * 64,
+            "source_article_projection_sha256": "s" * 64,
             "temporal_store_projection_sha256": "p" * 64,
         },
     )
@@ -709,6 +710,7 @@ def test_cli_measurement_requires_the_active_coverage_date_in_the_approval(
         "validate_law_history_state",
         lambda: (
             {
+                "source_article_projection_sha256": "s" * 64,
                 "temporal_store_projection_sha256": "p" * 64,
                 "coverage_through": "2026-08-06",
             },
@@ -738,6 +740,7 @@ def test_cli_measurement_uses_active_coverage_date_for_every_law_retriever(
         "verify_law_history_store",
         lambda: {
             "manifest_sha256": "a" * 64,
+            "source_article_projection_sha256": "s" * 64,
             "temporal_store_projection_sha256": "p" * 64,
         },
     )
@@ -746,6 +749,7 @@ def test_cli_measurement_uses_active_coverage_date_for_every_law_retriever(
         "validate_law_history_state",
         lambda: (
             {
+                "source_article_projection_sha256": "s" * 64,
                 "temporal_store_projection_sha256": "p" * 64,
                 "coverage_through": "2026-08-06",
             },
@@ -870,6 +874,7 @@ def test_strategy_binding_requires_a_full_temporal_projection_audit(
     manifest = {
         "retrieval_strategy": "rrf_lexical",
         "retrieval_strategy_benchmark_sha256": None,
+        "source_article_projection_sha256": "s" * 64,
         "temporal_store_projection_sha256": "p" * 64,
     }
     monkeypatch.setattr(
@@ -877,6 +882,7 @@ def test_strategy_binding_requires_a_full_temporal_projection_audit(
         "verify_law_history_store",
         lambda **_kwargs: {
             "manifest_sha256": "a" * 64,
+            "source_article_projection_sha256": "s" * 64,
             "temporal_store_projection_sha256": "p" * 64,
         },
     )
@@ -917,6 +923,7 @@ def test_strategy_binding_rejects_a_benchmark_without_matching_full_projection(
         "verify_law_history_store",
         lambda **_kwargs: {
             "manifest_sha256": "a" * 64,
+            "source_article_projection_sha256": "s" * 64,
             "temporal_store_projection_sha256": "p" * 64,
         },
     )
@@ -924,7 +931,10 @@ def test_strategy_binding_rejects_a_benchmark_without_matching_full_projection(
         law_history,
         "validate_law_history_state",
         lambda **_kwargs: (
-            {"temporal_store_projection_sha256": "q" * 64},
+            {
+                "source_article_projection_sha256": "s" * 64,
+                "temporal_store_projection_sha256": "q" * 64,
+            },
             "a" * 64,
         ),
     )
@@ -948,13 +958,20 @@ def test_cli_measurement_rejects_a_full_projection_that_is_not_the_active_manife
         "verify_law_history_store",
         lambda: {
             "manifest_sha256": "b" * 64,
+            "source_article_projection_sha256": "s" * 64,
             "temporal_store_projection_sha256": "p" * 64,
         },
     )
     monkeypatch.setattr(
         tool,
         "validate_law_history_state",
-        lambda: ({"temporal_store_projection_sha256": "p" * 64}, "a" * 64),
+        lambda: (
+            {
+                "source_article_projection_sha256": "s" * 64,
+                "temporal_store_projection_sha256": "p" * 64,
+            },
+            "a" * 64,
+        ),
     )
 
     assert (

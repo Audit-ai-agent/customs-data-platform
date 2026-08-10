@@ -41,6 +41,10 @@ class ProfileEvidenceError(RuntimeError):
     """A local Evidence profile cannot safely start or serve."""
 
 
+class ProfileEvidenceRestartRequired(ProfileEvidenceError):
+    """The running backend no longer matches its active local profile state."""
+
+
 def _single_header(request: Request, name: str) -> str | None:
     values = tuple(request.headers.getlist(name))
     if len(values) > 1:
@@ -104,7 +108,12 @@ def create_profile_evidence_application(
 
     @app.exception_handler(ProfileEvidenceError)
     async def profile_error(_request: Request, _error: ProfileEvidenceError) -> JSONResponse:
-        return JSONResponse({"detail": "local Evidence profile is unavailable"}, status_code=503)
+        detail = (
+            "local Evidence profile restart required"
+            if isinstance(_error, ProfileEvidenceRestartRequired)
+            else "local Evidence profile is unavailable"
+        )
+        return JSONResponse({"detail": detail}, status_code=503)
 
     @app.get("/internal/rag/v3/health/live")
     def live() -> dict[str, str]:
@@ -123,6 +132,8 @@ def create_profile_evidence_application(
             return EvidenceRuntimeReadinessV3(status="ready")
         except HTTPException:
             raise
+        except ProfileEvidenceRestartRequired:
+            raise
         except Exception as exc:
             # Store failures can contain paths/connection strings.  The HTTP
             # body remains a stable classification only.
@@ -135,10 +146,23 @@ def create_profile_evidence_application(
         response: Response,
     ) -> RetrieveResponseV3:
         _authenticate_and_check_mode(request, token=service_token, mode=mode)
-        result = retrieve_evidence_v3(
-            payload,
-            backend,
-        )
+        try:
+            # Readiness is not a permanent authorization to serve evidence.
+            # Functional profiles can be mutated after startup, so each
+            # authenticated retrieval performs its profile-owned fail-closed
+            # state check before any store query or Evidence response.
+            if runtime_state_validator is not None:
+                runtime_state_validator()
+            result = retrieve_evidence_v3(
+                payload,
+                backend,
+            )
+        except HTTPException:
+            raise
+        except ProfileEvidenceRestartRequired:
+            raise
+        except Exception as exc:
+            raise ProfileEvidenceError(type(exc).__name__) from None
         response.headers["X-Request-ID"] = payload.request_id
         return result
 
@@ -271,6 +295,7 @@ __all__ = [
     "LITERAL_LOOPBACK_HOSTS",
     "LOCAL_DEVELOPMENT_MODE",
     "ProfileEvidenceError",
+    "ProfileEvidenceRestartRequired",
     "SERVICE_MODE_HEADER",
     "create_guidance_snapshot_application",
     "create_dev_fixture_application",

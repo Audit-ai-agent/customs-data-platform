@@ -13,6 +13,8 @@ from src.evidence import (
     LawArticleMatch,
     RequirementLookup,
     RetrieveRequest,
+    TemporalContext,
+    TemporalEvidenceSupport,
     _effective_query_intent,
     retrieve_evidence,
 )
@@ -90,6 +92,36 @@ class FakeBackend:
         return ()
 
 
+class LawHistoryFakeBackend(FakeBackend):
+    def __init__(self, *, covered: bool = True) -> None:
+        self.covered = covered
+        self.requirement_as_of: date | None = None
+        self.law_as_of: date | None = None
+
+    def temporal_evidence_support(self, snapshot_id, review_as_of):
+        # Law-history context must be available even when the mutable CCCT
+        # snapshot lookup fails, so Data asks this profile-owned capability
+        # before it has a snapshot ID.
+        assert snapshot_id is None
+        return TemporalEvidenceSupport(
+            context=TemporalContext(
+                law_as_of=review_as_of,
+                hsk_snapshot_as_of=date(2026, 8, 5),
+                requirements_snapshot_as_of=date(2026, 8, 5),
+            ),
+            law_coverage_available=self.covered,
+            requirements_lookup_as_of=date(2026, 8, 5),
+        )
+
+    def lookup_requirements(self, snapshot_id, hsk10, trade_type, as_of):
+        self.requirement_as_of = as_of
+        return super().lookup_requirements(snapshot_id, hsk10, trade_type, as_of)
+
+    def search_law_articles(self, query, top_k, as_of):
+        self.law_as_of = as_of
+        return ()
+
+
 def test_exact_hsk_returns_complete_structured_evidence():
     response = retrieve_evidence(_request(), FakeBackend())
     assert response.status == "ok"
@@ -107,6 +139,65 @@ def test_exact_hsk_returns_complete_structured_evidence():
     assert evidence.article_no is None  # CCCT만으로 조문을 조작하지 않음
     expected_id = "ev_" + hashlib.sha256(("ccct_src_1\x1f" + "a" * 64).encode("utf-8")).hexdigest()
     assert evidence.evidence_id == expected_id
+    assert response.temporal_context is None
+
+
+def test_law_history_keeps_law_and_requirement_dates_explicit_and_partial() -> None:
+    backend = LawHistoryFakeBackend()
+    response = retrieve_evidence(
+        _request(
+            review_as_of=date(2026, 8, 7),
+            query_intent="required_import_documents_and_law_support",
+        ),
+        backend,
+    )
+
+    assert response.status == "partial"
+    assert response.temporal_context == TemporalContext(
+        law_as_of=date(2026, 8, 7),
+        hsk_snapshot_as_of=date(2026, 8, 5),
+        requirements_snapshot_as_of=date(2026, 8, 5),
+    )
+    assert backend.requirement_as_of == date(2026, 8, 5)
+    assert backend.law_as_of == date(2026, 8, 7)
+    assert response.results[0].coverage == "partial"
+    assert "TEMPORAL_REQUIREMENT_SNAPSHOT_MISMATCH" in {
+        error.code for error in response.results[0].errors
+    }
+
+
+def test_law_history_missing_date_skips_law_search_without_substituting_current_text() -> None:
+    backend = LawHistoryFakeBackend(covered=False)
+    response = retrieve_evidence(
+        _request(
+            review_as_of=date(2026, 8, 7),
+            query_intent="required_import_documents_and_law_support",
+        ),
+        backend,
+    )
+
+    assert response.status == "partial"
+    assert backend.requirement_as_of == date(2026, 8, 5)
+    assert backend.law_as_of is None
+    assert "LAW_HISTORY_COVERAGE_MISSING" in {error.code for error in response.results[0].errors}
+
+
+def test_law_history_availability_failure_keeps_three_date_context() -> None:
+    class SnapshotFailingHistoryBackend(LawHistoryFakeBackend):
+        def current_snapshot_id(self):
+            raise RuntimeError("controlled store failure")
+
+    response = retrieve_evidence(
+        _request(review_as_of=date(2026, 8, 7)),
+        SnapshotFailingHistoryBackend(),
+    )
+
+    assert response.status == "failed"
+    assert response.temporal_context == TemporalContext(
+        law_as_of=date(2026, 8, 7),
+        hsk_snapshot_as_of=date(2026, 8, 5),
+        requirements_snapshot_as_of=date(2026, 8, 5),
+    )
 
 
 def test_no_requirement_is_complete_only_when_query_was_covered():
@@ -462,6 +553,7 @@ def test_hybrid_law_support_is_packaged_but_not_counted_as_requirement():
                         "version_mst": "mst-1",
                         "valid_from": date(2026, 1, 1),
                         "valid_to": None,
+                        "official_uri": "https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=123",
                     },
                     retrieval_methods=("dense", "bm25", "graph"),
                     score=0.88,
@@ -483,6 +575,7 @@ def test_hybrid_law_support_is_packaged_but_not_counted_as_requirement():
     assert evidence.eligibility == "supporting"
     assert evidence.article_no == "제226조"
     assert evidence.retrieval_methods == ["dense", "bm25", "graph"]
+    assert str(evidence.source_uri) == "https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=123"
 
 
 def test_law_support_query_uses_issue_meaning_without_product_noise():

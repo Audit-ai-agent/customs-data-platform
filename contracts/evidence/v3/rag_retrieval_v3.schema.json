@@ -122,7 +122,8 @@
               "exact_hs",
               "dense",
               "bm25",
-              "graph"
+              "graph",
+              "rerank"
             ],
             "type": "string"
           },
@@ -559,6 +560,17 @@
           ],
           "title": "Status",
           "type": "string"
+        },
+        "temporal_context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemporalContext"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -569,6 +581,34 @@
         "results"
       ],
       "title": "RetrieveResponseV3",
+      "type": "object"
+    },
+    "TemporalContext": {
+      "additionalProperties": false,
+      "description": "The independently versioned inputs used for one Evidence result.\n\nLaw text can be retrieved at the review date in the law-history profile,\nwhile the retained HSK and CCCT requirement snapshots have one verified\nbaseline date.  Keeping all three dates explicit prevents a consumer from\npresenting that mixed coverage as one time-complete result.",
+      "properties": {
+        "hsk_snapshot_as_of": {
+          "format": "date",
+          "title": "Hsk Snapshot As Of",
+          "type": "string"
+        },
+        "law_as_of": {
+          "format": "date",
+          "title": "Law As Of",
+          "type": "string"
+        },
+        "requirements_snapshot_as_of": {
+          "format": "date",
+          "title": "Requirements Snapshot As Of",
+          "type": "string"
+        }
+      },
+      "required": [
+        "law_as_of",
+        "hsk_snapshot_as_of",
+        "requirements_snapshot_as_of"
+      ],
+      "title": "TemporalContext",
       "type": "object"
     }
   },

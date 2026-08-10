@@ -433,8 +433,16 @@ def prefetch_models(
     profile_directory: Path,
     cache_directory: Path | None = None,
     downloader: Callable[..., str] | None = None,
+    include_reranker: bool = True,
 ) -> dict[str, dict[str, str]]:
-    """Download immutable model revisions into the ignored UAT cache once."""
+    """Download immutable model revisions into the ignored UAT cache once.
+
+    The retained three-law profile keeps the historical dense+rereanker
+    default.  The 65-law history baseline needs a dense encoder to build its
+    temporal collection, while cross-encoder reranking is an optional
+    runtime enhancement with a deterministic fallback; it can therefore
+    explicitly request dense-only preparation.
+    """
 
     cache = cache_directory or shared_model_cache_directory(root=profile_directory.parents[1])
     cache = _safe_directory(cache)
@@ -447,7 +455,9 @@ def prefetch_models(
         except ImportError as exc:
             raise FunctionalUatError("FUNCTIONAL_UAT_MODEL_DOWNLOADER_UNAVAILABLE") from exc
         downloader = snapshot_download
-    inventory = {"dense": DENSE_MODEL, "reranker": RERANK_MODEL}
+    inventory = {"dense": DENSE_MODEL}
+    if include_reranker:
+        inventory["reranker"] = RERANK_MODEL
     try:
         for identity in inventory.values():
             downloader(
@@ -467,6 +477,7 @@ def _verify_cached_models(
     profile_directory: Path,
     *,
     cache_directory: Path | None = None,
+    include_reranker: bool = True,
 ) -> dict[str, dict[str, str]]:
     cache = cache_directory or shared_model_cache_directory(root=profile_directory.parents[1])
     cache = _safe_directory(cache)
@@ -476,7 +487,9 @@ def _verify_cached_models(
         from huggingface_hub import snapshot_download
     except ImportError as exc:
         raise FunctionalUatError("FUNCTIONAL_UAT_MODEL_DOWNLOADER_UNAVAILABLE") from exc
-    inventory = {"dense": DENSE_MODEL, "reranker": RERANK_MODEL}
+    inventory = {"dense": DENSE_MODEL}
+    if include_reranker:
+        inventory["reranker"] = RERANK_MODEL
     try:
         for identity in inventory.values():
             snapshot_download(

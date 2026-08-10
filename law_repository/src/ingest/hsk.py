@@ -207,10 +207,18 @@ def verify(drv: Driver) -> None:
         print("[샘플 traverse]", dict(sample) if sample else "없음")
 
 
-def main() -> int:
-    levels = load_level_names()
-    leaf_attrs = load_leaf_attrs()
-    nodes = build_nodes(levels, leaf_attrs)
+def main(nodes: list[dict] | None = None) -> int:
+    """Load HSK nodes, or project one already-attested in-memory snapshot.
+
+    The optional value lets the law-history builder validate exact tracked
+    bytes and then project the same parsed nodes without a second file read.
+    Existing CLI/no-argument callers preserve their previous behaviour.
+    """
+
+    if nodes is None:
+        levels = load_level_names()
+        leaf_attrs = load_leaf_attrs()
+        nodes = build_nodes(levels, leaf_attrs)
     print(f"파일 로드: 코드 {len(nodes)}건 (leaf {sum(n['is_leaf'] for n in nodes)}건)")
 
     drv = make_driver()

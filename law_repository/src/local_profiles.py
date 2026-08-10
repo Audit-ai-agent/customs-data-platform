@@ -16,19 +16,62 @@ import secrets
 import sys
 import tempfile
 from pathlib import Path
+from threading import Lock
 from typing import Mapping
 
 PROFILE_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,63}$")
 DEV_FIXTURE_PROFILE = "dev-fixture"
 DEV_STORE_PROFILE = "dev-store"
 FUNCTIONAL_UAT_PROFILE = "functional-uat-3law"
+FUNCTIONAL_UAT_LAW_HISTORY_PROFILE = "functional-uat-law-history"
 FUNCTIONAL_UAT_KR_TRADE_PROFILE = "functional-uat-kr-trade"
 SERVICE_TOKEN_FILENAME = "evidence-service-token"
 CONFIG_FILENAME = "config.env"
 
+# CUDA is deliberately not an environment/configuration value.  A launcher
+# must enter the scoped helper below in the local process; a terminal-exported
+# value or an HTTP request cannot switch the law-history profile to GPU.
+_law_history_cuda_opt_in_depth = 0
+_law_history_cuda_opt_in_lock = Lock()
+
 
 class LocalProfileError(RuntimeError):
     """A local profile is missing, malformed, or unsafe to use."""
+
+
+def law_history_profile_is_active() -> bool:
+    """Whether this process currently runs the isolated 65-law profile."""
+
+    return os.environ.get("CUSTOMS_DATA_PROFILE") == FUNCTIONAL_UAT_LAW_HISTORY_PROFILE
+
+
+def law_history_cuda_opt_in_enabled() -> bool:
+    """Return true only for an explicit in-process law-history CUDA scope."""
+
+    with _law_history_cuda_opt_in_lock:
+        return law_history_profile_is_active() and _law_history_cuda_opt_in_depth > 0
+
+
+@contextmanager
+def functional_uat_law_history_cuda_opt_in() -> Iterator[None]:
+    """Temporarily permit CUDA for one local law-history operator command.
+
+    The opt-in is process-local and nest-safe. It is intentionally not
+    serialized into ``config.env`` or exposed through the Evidence API, so a
+    normal build, refresh, service, or benchmark always starts on CPU.
+    """
+
+    global _law_history_cuda_opt_in_depth
+    with _law_history_cuda_opt_in_lock:
+        _law_history_cuda_opt_in_depth += 1
+    try:
+        yield
+    finally:
+        with _law_history_cuda_opt_in_lock:
+            _law_history_cuda_opt_in_depth -= 1
+            if _law_history_cuda_opt_in_depth < 0:
+                _law_history_cuda_opt_in_depth = 0
+                raise LocalProfileError("law-history CUDA scope is invalid")
 
 
 def workspace_root() -> Path:
@@ -220,6 +263,22 @@ def ensure_functional_uat_profile(*, root: Path | None = None) -> Path:
     return directory
 
 
+def ensure_functional_uat_law_history_profile(*, root: Path | None = None) -> Path:
+    """Create the isolated 65-law temporal Evidence profile configuration.
+
+    This profile intentionally has its own stores, local token, and source
+    directory.  It never mutates or adopts the retained three-law profile.
+    """
+
+    directory = _ensure_data_store_profile(
+        FUNCTIONAL_UAT_LAW_HISTORY_PROFILE,
+        ports=(55472, 6363, 6364, 7504, 7717),
+        root=root,
+    )
+    ensure_service_token(FUNCTIONAL_UAT_LAW_HISTORY_PROFILE, root=root)
+    return directory
+
+
 def ensure_functional_uat_kr_trade_profile(*, root: Path | None = None) -> Path:
     """Create an isolated future official-trade guidance profile.
 
@@ -350,6 +409,13 @@ def apply_functional_uat_runtime_environment(*, root: Path | None = None) -> Pat
     return apply_data_store_environment(FUNCTIONAL_UAT_PROFILE, root=root)
 
 
+def apply_functional_uat_law_history_runtime_environment(*, root: Path | None = None) -> Path:
+    """Load the 65-law temporal profile without its collection credential."""
+
+    ensure_functional_uat_law_history_profile(root=root)
+    return apply_data_store_environment(FUNCTIONAL_UAT_LAW_HISTORY_PROFILE, root=root)
+
+
 def validate_functional_uat_law_api_credential(*, root: Path | None = None) -> Path:
     """Fail before expensive UAT setup without exporting the collection key."""
 
@@ -358,6 +424,17 @@ def validate_functional_uat_law_api_credential(*, root: Path | None = None) -> P
     values = load_config(profile / CONFIG_FILENAME)
     if not values.get("LAW_API_OC", "").strip():
         raise LocalProfileError("functional UAT law API credential is unavailable")
+    return profile
+
+
+def validate_functional_uat_law_history_api_credential(*, root: Path | None = None) -> Path:
+    """Fail before an explicit 65-law collection without exporting its key."""
+
+    _clear_law_api_credential()
+    profile = ensure_functional_uat_law_history_profile(root=root)
+    values = load_config(profile / CONFIG_FILENAME)
+    if not values.get("LAW_API_OC", "").strip():
+        raise LocalProfileError("functional UAT law-history API credential is unavailable")
     return profile
 
 
@@ -379,6 +456,24 @@ def apply_functional_uat_collection_environment(*, root: Path | None = None) -> 
         raise
 
 
+def apply_functional_uat_law_history_collection_environment(*, root: Path | None = None) -> Path:
+    """Load the Law API credential only while collecting the approved 65 laws."""
+
+    ensure_functional_uat_law_history_profile(root=root)
+    try:
+        profile = apply_data_store_environment(
+            FUNCTIONAL_UAT_LAW_HISTORY_PROFILE,
+            root=root,
+            include_law_api_credential=True,
+        )
+        if not os.environ.get("LAW_API_OC", "").strip():
+            raise LocalProfileError("functional UAT law-history API credential is unavailable")
+        return profile
+    except Exception:
+        _clear_law_api_credential()
+        raise
+
+
 @contextmanager
 def functional_uat_law_collection_environment(
     *,
@@ -387,6 +482,19 @@ def functional_uat_law_collection_environment(
     """Expose ``LAW_API_OC`` only while fetching the approved three laws."""
 
     profile = apply_functional_uat_collection_environment(root=root)
+    try:
+        yield profile
+    finally:
+        _clear_law_api_credential()
+
+
+@contextmanager
+def functional_uat_law_history_collection_environment(
+    *, root: Path | None = None
+) -> Iterator[Path]:
+    """Expose the collection credential only for one explicit 65-law run."""
+
+    profile = apply_functional_uat_law_history_collection_environment(root=root)
     try:
         yield profile
     finally:
@@ -409,18 +517,26 @@ __all__ = [
     "DEV_FIXTURE_PROFILE",
     "DEV_STORE_PROFILE",
     "FUNCTIONAL_UAT_KR_TRADE_PROFILE",
+    "FUNCTIONAL_UAT_LAW_HISTORY_PROFILE",
     "FUNCTIONAL_UAT_PROFILE",
     "LocalProfileError",
     "SERVICE_TOKEN_FILENAME",
     "apply_functional_uat_collection_environment",
+    "apply_functional_uat_law_history_collection_environment",
     "apply_functional_uat_runtime_environment",
+    "apply_functional_uat_law_history_runtime_environment",
     "apply_data_store_environment",
     "artifact_root",
     "ensure_functional_uat_profile",
+    "ensure_functional_uat_law_history_profile",
     "ensure_functional_uat_kr_trade_profile",
     "ensure_dev_store_profile",
     "ensure_service_token",
     "functional_uat_law_collection_environment",
+    "functional_uat_law_history_cuda_opt_in",
+    "functional_uat_law_history_collection_environment",
+    "law_history_cuda_opt_in_enabled",
+    "law_history_profile_is_active",
     "load_config",
     "local_root",
     "profile_directory",
@@ -428,5 +544,6 @@ __all__ = [
     "read_service_token",
     "shared_model_cache_directory",
     "validate_functional_uat_law_api_credential",
+    "validate_functional_uat_law_history_api_credential",
     "workspace_root",
 ]

@@ -334,12 +334,15 @@ def main(argv: list[str] | None = None) -> int:
         # preserve counts while changing the benchmark corpus.
         verified = verify_law_history_store()
         verified_digest = verified.get("manifest_sha256")
+        verified_source_projection = verified.get("source_article_projection_sha256")
         verified_projection = verified.get("temporal_store_projection_sha256")
         manifest, _digest = validate_law_history_state()
         if (
             not isinstance(verified_digest, str)
+            or not isinstance(verified_source_projection, str)
             or not isinstance(verified_projection, str)
             or _digest != verified_digest
+            or manifest.get("source_article_projection_sha256") != verified_source_projection
             or manifest.get("temporal_store_projection_sha256") != verified_projection
         ):
             raise LawHistoryBenchmarkError("LAW_HISTORY_BENCHMARK_MANIFEST_STALE")
