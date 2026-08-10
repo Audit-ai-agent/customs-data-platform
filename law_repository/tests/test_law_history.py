@@ -24,6 +24,8 @@ from src.law_history import (
     _candidate_as_of,
     _candidate_group_as_of,
     _canonicalize_coeffective_candidates,
+    _combined_refresh_assets,
+    _finish_pending_refresh,
     _catalog_for_law,
     _journal_refresh_sources,
     _neo4j_property_projection,
@@ -34,6 +36,9 @@ from src.law_history import (
     _source_article_projection_records,
     _updated_refresh_manifest,
     _validated_refresh_records,
+    _validate_refresh_receipt_assets,
+    _validate_refresh_ledger,
+    _validate_ready_refresh_manifest_binding,
     collect_law_history_baseline,
     collect_law_history_refresh,
     recover_law_history_baseline,
@@ -794,6 +799,312 @@ def test_refresh_chain_is_contiguous_and_receipt_bound_to_manifest_assets(tmp_pa
         )
 
 
+def test_refresh_variant_receipt_requires_equal_legal_projection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A changed raw receipt may prove coverage only when legal content agrees."""
+
+    import src.law_history as history
+
+    canonical_sources = _complete_refresh_sources(
+        effective_date=date(2026, 8, 6), digest="a" * 64, mst_offset=10_000
+    )
+    refreshed_sources = _complete_refresh_sources(
+        effective_date=date(2026, 8, 6), digest="b" * 64, mst_offset=10_000
+    )
+    canonical_assets = [
+        source.local_state(profile=tmp_path, source_root=tmp_path) for source in canonical_sources
+    ]
+    receipt_assets = [
+        source.local_state(profile=tmp_path, source_root=tmp_path) for source in refreshed_sources
+    ]
+    refresh = _refresh_record(
+        from_date=date(2026, 8, 6), to_date=date(2026, 8, 6), sources=refreshed_sources
+    )
+    refresh_with_receipts = {**refresh, "receipt_assets": receipt_assets}
+
+    assert _validated_refresh_records(
+        refreshes=[refresh_with_receipts],
+        source_assets=canonical_assets,
+        coverage_through=date(2026, 8, 6),
+    ) == (refresh_with_receipts,)
+    with pytest.raises(LawHistoryError, match="REFRESH_CHAIN_INVALID"):
+        _validated_refresh_records(
+            refreshes=[refresh],
+            source_assets=canonical_assets,
+            coverage_through=date(2026, 8, 6),
+        )
+    monkeypatch.setattr(history, "_validate_source_asset", lambda *_args: None)
+    monkeypatch.setattr(history, "_source_receipt_content_sha256", lambda *_args: "c" * 64)
+    _validate_refresh_receipt_assets(
+        profile=tmp_path,
+        refreshes=[refresh_with_receipts],
+        source_assets=canonical_assets,
+    )
+    combined, new_assets = _combined_refresh_assets(
+        manifest={"source_assets": canonical_assets},
+        staged_assets=receipt_assets,
+        profile=tmp_path,
+    )
+    assert combined == canonical_assets
+    assert new_assets == ()
+
+    def divergent_projection(_profile: Path, asset: object) -> str:
+        raw = asset if isinstance(asset, dict) else {}
+        return "c" * 64 if raw.get("effective_sha256") == "a" * 64 else "d" * 64
+
+    monkeypatch.setattr(history, "_source_receipt_content_sha256", divergent_projection)
+    with pytest.raises(LawHistoryError, match="REFRESH_SOURCE_CONFLICT"):
+        _validate_refresh_receipt_assets(
+            profile=tmp_path,
+            refreshes=[refresh_with_receipts],
+            source_assets=canonical_assets,
+        )
+    with pytest.raises(LawHistoryError, match="REFRESH_SOURCE_CONFLICT"):
+        _combined_refresh_assets(
+            manifest={"source_assets": canonical_assets},
+            staged_assets=receipt_assets,
+            profile=tmp_path,
+        )
+
+
+def test_ready_refresh_manifest_is_bound_to_the_prior_manifest_and_receipts(tmp_path: Path) -> None:
+    """A durable ready journal cannot substitute sources or its final receipt row."""
+
+    sources = _complete_refresh_sources(
+        effective_date=date(2026, 8, 6), digest="a" * 64, mst_offset=10_000
+    )
+    assets = [source.local_state(profile=tmp_path, source_root=tmp_path) for source in sources]
+    refresh = _refresh_record(from_date=date(2026, 8, 6), to_date=date(2026, 8, 6), sources=sources)
+    previous = {"source_assets": assets, "refreshes": []}
+    ready = {
+        "source_assets": assets,
+        "refreshes": [{**refresh, "receipt_assets": assets}],
+    }
+
+    _validate_ready_refresh_manifest_binding(
+        profile=tmp_path,
+        previous_manifest=previous,
+        staged_assets=assets,
+        refresh=refresh,
+        ready_manifest=ready,
+    )
+
+    substituted_sources = dict(ready)
+    substituted_sources["source_assets"] = [*assets[:-1], {**assets[-1], "law_name": "다른 법령"}]
+    with pytest.raises(LawHistoryError, match="REFRESH_JOURNAL_CONFLICT"):
+        _validate_ready_refresh_manifest_binding(
+            profile=tmp_path,
+            previous_manifest=previous,
+            staged_assets=assets,
+            refresh=refresh,
+            ready_manifest=substituted_sources,
+        )
+
+    substituted_receipts = dict(ready)
+    substituted_receipts["refreshes"] = [{**refresh, "receipt_assets": list(reversed(assets))}]
+    with pytest.raises(LawHistoryError, match="REFRESH_JOURNAL_CONFLICT"):
+        _validate_ready_refresh_manifest_binding(
+            profile=tmp_path,
+            previous_manifest=previous,
+            staged_assets=assets,
+            refresh=refresh,
+            ready_manifest=substituted_receipts,
+        )
+
+
+def test_refresh_ledger_allows_only_the_prepublication_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ready-journal preflight can precede one exact ledger insertion only."""
+
+    from src.db import postgres
+
+    refresh = {
+        "refresh_id": "a" * 64,
+        "from": "2026-08-06",
+        "to": "2026-08-06",
+        "source_sha256": "b" * 64,
+    }
+    rows: list[tuple[object, ...]] = []
+
+    class Cursor:
+        def __enter__(self) -> "Cursor":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def execute(self, *_args: object) -> None:
+            return None
+
+        def fetchall(self) -> list[tuple[object, ...]]:
+            return rows
+
+    class Connection:
+        def __enter__(self) -> "Connection":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def cursor(self) -> Cursor:
+            return Cursor()
+
+    monkeypatch.setattr(postgres, "connect", lambda: Connection())
+
+    _validate_refresh_ledger([refresh], allow_unrecorded_final=True)
+    with pytest.raises(LawHistoryError, match="REFRESH_LEDGER_MISMATCH"):
+        _validate_refresh_ledger([refresh])
+
+    rows[:] = [("a" * 64, date(2026, 8, 6), date(2026, 8, 6), "b" * 64)]
+    _validate_refresh_ledger([refresh])
+    rows.append(("c" * 64, date(2026, 8, 7), date(2026, 8, 7), "d" * 64))
+    with pytest.raises(LawHistoryError, match="REFRESH_LEDGER_MISMATCH"):
+        _validate_refresh_ledger([refresh], allow_unrecorded_final=True)
+
+
+def test_ready_refresh_preflight_cannot_write_a_ledger_row(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A malformed ready manifest must fail before the idempotent ledger write."""
+
+    import src.law_history as history
+
+    refresh = {"refresh_id": "a" * 64, "source_sha256": "b" * 64}
+    journal = {
+        "phase": "ready",
+        "previous_manifest_sha256": "c" * 64,
+        "refresh": refresh,
+        "source_assets": [],
+        "updated_manifest": {},
+    }
+    recorded: list[dict[str, object]] = []
+    monkeypatch.setattr(history, "_load_pending_refresh", lambda _profile: journal)
+    monkeypatch.setattr(history, "_journal_refresh_sources", lambda **_kwargs: ((), (), refresh))
+    monkeypatch.setattr(history, "_load_active_manifest", lambda _profile: ({}, "c" * 64))
+    monkeypatch.setattr(history, "_validate_ready_refresh_manifest_binding", lambda **_kwargs: None)
+
+    def reject_preflight(**_kwargs: object) -> None:
+        raise LawHistoryError("LAW_HISTORY_REFRESH_JOURNAL_INVALID")
+
+    monkeypatch.setattr(history, "_validate_publishable_refresh_manifest", reject_preflight)
+    monkeypatch.setattr(history, "_record_refresh", lambda **kwargs: recorded.append(kwargs))
+
+    with pytest.raises(LawHistoryError, match="REFRESH_JOURNAL_INVALID"):
+        _finish_pending_refresh(
+            profile=tmp_path,
+            current_manifest_sha256="c" * 64,
+            from_date=date(2026, 8, 6),
+            to_date=date(2026, 8, 6),
+        )
+    assert recorded == []
+
+
+def test_refresh_variant_receipt_allows_only_contact_department_metadata(tmp_path: Path) -> None:
+    """Raw receipt variance is limited to one documented non-legal subtree."""
+
+    def body(
+        *,
+        contact_name: str,
+        promulgation_date: str = "20260801",
+        revision_type: str = "일부개정",
+        article_content: str = "검증 조문",
+    ) -> dict[str, object]:
+        return {
+            "법령": {
+                "기본정보": {
+                    "법령ID": "001556",
+                    "법령명_한글": "관세법",
+                    "시행일자": "20260806",
+                    "공포일자": promulgation_date,
+                    "제개정구분": revision_type,
+                    "소관부처": "관세청",
+                    "연락부서": {"부서명": contact_name, "전화번호": "000"},
+                },
+                "조문": {
+                    "조문단위": {
+                        "조문여부": "조문",
+                        "조문번호": "0001",
+                        "조문가지번호": "00",
+                        "조문제목": "목적",
+                        "조문내용": article_content,
+                    }
+                },
+            }
+        }
+
+    def asset(filename: str, value: dict[str, object]) -> dict[str, object]:
+        path = tmp_path / filename
+        raw = json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        path.write_bytes(raw)
+        digest = hashlib.sha256(raw).hexdigest()
+        return LawHistorySource(
+            law_id="001556",
+            current_mst="100",
+            current_file=filename,
+            current_sha256=digest,
+            effective_mst="100",
+            effective_file=filename,
+            effective_sha256=digest,
+            effective_date=date(2026, 8, 6),
+            article_count=1,
+            is_repealed=False,
+            law_name="관세법",
+            hierarchy="법률",
+            ministry="관세청",
+            official_uri="https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=100",
+            collected_at=datetime(2026, 8, 9, tzinfo=timezone.utc).isoformat(),
+            source_kind="refresh",
+        ).local_state(profile=tmp_path, source_root=tmp_path)
+
+    canonical = asset("canonical.json", body(contact_name="담당부서-A"))
+    contact_variant = asset("contact.json", body(contact_name="담당부서-B"))
+    refreshes = [{"receipt_assets": [contact_variant]}]
+
+    _validate_refresh_receipt_assets(
+        profile=tmp_path,
+        refreshes=refreshes,
+        source_assets=[canonical],
+    )
+    combined, new_assets = _combined_refresh_assets(
+        manifest={"source_assets": [canonical]},
+        staged_assets=[contact_variant],
+        profile=tmp_path,
+    )
+    assert combined == [canonical]
+    assert new_assets == ()
+
+    for index, variant in enumerate(
+        (
+            body(contact_name="담당부서-A", promulgation_date="20260802"),
+            body(contact_name="담당부서-A", revision_type="전부개정"),
+            body(contact_name="담당부서-A", article_content="변경 조문"),
+        )
+    ):
+        rejected = asset(f"rejected-{index}.json", variant)
+        with pytest.raises(LawHistoryError, match="REFRESH_SOURCE_CONFLICT"):
+            _validate_refresh_receipt_assets(
+                profile=tmp_path,
+                refreshes=[{"receipt_assets": [rejected]}],
+                source_assets=[canonical],
+            )
+        with pytest.raises(LawHistoryError, match="REFRESH_SOURCE_CONFLICT"):
+            _combined_refresh_assets(
+                manifest={"source_assets": [canonical]},
+                staged_assets=[rejected],
+                profile=tmp_path,
+            )
+
+    (tmp_path / "contact.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(LawHistoryError, match="SOURCE_HASH_MISMATCH"):
+        _validate_refresh_receipt_assets(
+            profile=tmp_path,
+            refreshes=refreshes,
+            source_assets=[canonical],
+        )
+
+
 def test_staged_refresh_receipt_is_revalidated_before_any_resume_mutation(tmp_path) -> None:
     """A retry can use only the exact local raw receipt staged before loading."""
 
@@ -866,7 +1177,7 @@ def test_staged_refresh_receipt_is_revalidated_before_any_resume_mutation(tmp_pa
     assert parsed == refresh
 
 
-def test_refresh_invalidates_a_pre_refresh_benchmark_binding() -> None:
+def test_refresh_invalidates_a_pre_refresh_benchmark_binding(tmp_path: Path) -> None:
     baseline_sources = _complete_refresh_sources(
         effective_date=date(2026, 8, 5), digest="a" * 64, mst_offset=10_000
     )
@@ -874,26 +1185,10 @@ def test_refresh_invalidates_a_pre_refresh_benchmark_binding() -> None:
         effective_date=date(2026, 8, 6), digest="b" * 64, mst_offset=20_000
     )
     baseline_assets = [
-        {
-            "law_id": source.law_id,
-            "effective_mst": source.effective_mst,
-            "version_key": source.version_key,
-            "effective_date": source.effective_date.isoformat(),
-            "effective_sha256": source.effective_sha256,
-            "is_repealed": source.is_repealed,
-        }
-        for source in baseline_sources
+        source.local_state(profile=tmp_path, source_root=tmp_path) for source in baseline_sources
     ]
     staged_assets = [
-        {
-            "law_id": source.law_id,
-            "effective_mst": source.effective_mst,
-            "version_key": source.version_key,
-            "effective_date": source.effective_date.isoformat(),
-            "effective_sha256": source.effective_sha256,
-            "is_repealed": source.is_repealed,
-        }
-        for source in refresh_sources
+        source.local_state(profile=tmp_path, source_root=tmp_path) for source in refresh_sources
     ]
     refresh = _refresh_record(
         from_date=date(2026, 8, 6), to_date=date(2026, 8, 6), sources=refresh_sources
@@ -918,6 +1213,7 @@ def test_refresh_invalidates_a_pre_refresh_benchmark_binding() -> None:
     assert updated["retrieval_strategy_benchmark_sha256"] is None
     assert updated["coverage_through"] == "2026-08-06"
     assert len(updated["source_assets"]) == 130
+    assert updated["refreshes"][0]["receipt_assets"] == staged_assets
 
 
 def test_refresh_receipt_requires_an_as_of_selection_for_every_registry_law() -> None:
@@ -1201,6 +1497,53 @@ def test_refresh_recovery_releases_only_a_verified_dead_owner_lock(
         is True
     )
     assert not lock.exists()
+
+
+def test_refresh_recovery_keeps_lock_for_an_unbound_ready_journal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Operator recovery cannot release a lock for a substituted ready state."""
+
+    from src import law_history as history
+    from src.local_profiles import ensure_functional_uat_law_history_profile
+
+    profile = ensure_functional_uat_law_history_profile(root=tmp_path)
+    lock = profile / "state" / ".law-history-mutation.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text(
+        json.dumps(
+            {
+                "profile": LAW_HISTORY_PROFILE,
+                "pid": 123456,
+                "created_at": "2026-08-10T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    journal = {
+        "phase": "ready",
+        "previous_manifest_sha256": "a" * 64,
+        "refresh": {},
+        "source_assets": [{}],
+        "updated_manifest": {},
+    }
+    monkeypatch.setattr(history, "_load_pending_refresh", lambda _profile: journal)
+    monkeypatch.setattr(history, "_journal_refresh_sources", lambda **_kwargs: ((), (), {}))
+    monkeypatch.setattr(history, "_load_active_manifest", lambda _profile: ({}, "a" * 64))
+    monkeypatch.setattr(history, "_mutation_owner_is_live", lambda _pid: False)
+
+    def reject_binding(**_kwargs: object) -> None:
+        raise LawHistoryError("LAW_HISTORY_REFRESH_JOURNAL_CONFLICT")
+
+    monkeypatch.setattr(history, "_validate_ready_refresh_manifest_binding", reject_binding)
+    with pytest.raises(LawHistoryError, match="REFRESH_JOURNAL_CONFLICT"):
+        history.recover_law_history_refresh_lock(
+            from_date=date(2026, 8, 6),
+            to_date=date(2026, 8, 6),
+            confirm_profile=LAW_HISTORY_PROFILE,
+            local_root_override=tmp_path,
+        )
+    assert lock.exists()
 
 
 def test_refresh_recovery_refuses_to_remove_a_live_or_unverified_lock(

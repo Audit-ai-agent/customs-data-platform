@@ -9,6 +9,7 @@ profile directory, and verified again before serving.
 
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import os
 import re
@@ -1838,20 +1839,34 @@ def recover_law_history_refresh_lock(
     previous = journal.get("previous_manifest_sha256")
     if not isinstance(previous, str) or _SHA256.fullmatch(previous) is None:
         raise LawHistoryError("LAW_HISTORY_REFRESH_JOURNAL_INVALID")
-    _assets, _sources, _refresh = _journal_refresh_sources(
+    staged_assets, _sources, refresh = _journal_refresh_sources(
         profile=profile,
         journal=journal,
         from_date=from_date,
         to_date=to_date,
     )
-    _manifest, active_digest = _load_active_manifest(profile)
+    active_manifest, active_digest = _load_active_manifest(profile)
     if journal.get("phase") == "staged":
         allowed_digests = {previous}
     elif journal.get("phase") == "ready":
         updated = journal.get("updated_manifest")
         if not isinstance(updated, dict):
             raise LawHistoryError("LAW_HISTORY_REFRESH_JOURNAL_INVALID")
-        allowed_digests = {previous, sha256_bytes(canonical_json_bytes(updated))}
+        updated_digest = sha256_bytes(canonical_json_bytes(updated))
+        if active_digest == previous:
+            _validate_ready_refresh_manifest_binding(
+                profile=profile,
+                previous_manifest=active_manifest,
+                staged_assets=staged_assets,
+                refresh=refresh,
+                ready_manifest=updated,
+            )
+        elif active_digest == updated_digest:
+            if active_manifest != updated:
+                raise LawHistoryError("LAW_HISTORY_REFRESH_JOURNAL_CONFLICT")
+        else:
+            raise LawHistoryError("LAW_HISTORY_REFRESH_JOURNAL_CONFLICT")
+        allowed_digests = {previous, updated_digest}
     else:
         raise LawHistoryError("LAW_HISTORY_REFRESH_JOURNAL_INVALID")
     if active_digest not in allowed_digests:
@@ -2355,7 +2370,7 @@ def _validated_refresh_records(
     parsed: list[dict[str, object]] = []
     seen_ids: set[str] = set()
     for raw in refreshes:
-        expected_keys = {
+        required_keys = {
             "refresh_id",
             "from",
             "to",
@@ -2364,7 +2379,8 @@ def _validated_refresh_records(
             "sources",
             "as_of_sources",
         }
-        if not isinstance(raw, dict) or set(raw) != expected_keys:
+        allowed_keys = {frozenset(required_keys), frozenset({*required_keys, "receipt_assets"})}
+        if not isinstance(raw, dict) or frozenset(raw) not in allowed_keys:
             raise LawHistoryError("LAW_HISTORY_REFRESH_CHAIN_INVALID")
         refresh_id = raw["refresh_id"]
         source_sha256 = raw["source_sha256"]
@@ -2390,6 +2406,49 @@ def _validated_refresh_records(
             raise LawHistoryError("LAW_HISTORY_REFRESH_CHAIN_INVALID") from exc
         if from_date != expected_from or to_date < from_date:
             raise LawHistoryError("LAW_HISTORY_REFRESH_CHAIN_INVALID")
+        receipt_by_key: dict[tuple[str, str], tuple[str, str, str, bool]] = {}
+        raw_receipt_assets = raw.get("receipt_assets")
+        if raw_receipt_assets is not None:
+            if not isinstance(raw_receipt_assets, list) or len(raw_receipt_assets) != len(
+                source_rows
+            ):
+                raise LawHistoryError("LAW_HISTORY_REFRESH_CHAIN_INVALID")
+            for receipt_asset in raw_receipt_assets:
+                if not isinstance(receipt_asset, dict) or set(receipt_asset) != {
+                    "law_id",
+                    "current_mst",
+                    "current_file",
+                    "current_sha256",
+                    "effective_mst",
+                    "version_key",
+                    "effective_file",
+                    "effective_sha256",
+                    "effective_date",
+                    "article_count",
+                    "is_repealed",
+                    "law_name",
+                    "hierarchy",
+                    "ministry",
+                    "official_uri",
+                    "collected_at",
+                    "source_kind",
+                }:
+                    raise LawHistoryError("LAW_HISTORY_REFRESH_CHAIN_INVALID")
+                try:
+                    receipt = _source_from_asset(receipt_asset)
+                except LawHistoryError as exc:
+                    raise LawHistoryError("LAW_HISTORY_REFRESH_CHAIN_INVALID") from exc
+                if receipt.source_kind != "refresh":
+                    raise LawHistoryError("LAW_HISTORY_REFRESH_CHAIN_INVALID")
+                receipt_key = (receipt.law_id, receipt.version_key)
+                if receipt_key in receipt_by_key:
+                    raise LawHistoryError("LAW_HISTORY_REFRESH_CHAIN_INVALID")
+                receipt_by_key[receipt_key] = (
+                    receipt.effective_mst,
+                    receipt.effective_date.isoformat(),
+                    receipt.effective_sha256,
+                    receipt.is_repealed,
+                )
         normalized_rows: list[dict[str, object]] = []
         for row in source_rows:
             if not isinstance(row, dict) or set(row) != {
@@ -2427,7 +2486,20 @@ def _validated_refresh_records(
                 version_key,
                 mst=mst,
                 effective_date=parsed_effective_date,
-            ) or assets_by_key.get((law_id, version_key)) != (effective_date, raw_sha, is_repealed):
+            ):
+                raise LawHistoryError("LAW_HISTORY_REFRESH_CHAIN_INVALID")
+            canonical = assets_by_key.get((law_id, version_key))
+            if canonical is None or canonical[0] != effective_date or canonical[2] != is_repealed:
+                raise LawHistoryError("LAW_HISTORY_REFRESH_CHAIN_INVALID")
+            if receipt_by_key:
+                if receipt_by_key.get((law_id, version_key)) != (
+                    mst,
+                    effective_date,
+                    raw_sha,
+                    is_repealed,
+                ):
+                    raise LawHistoryError("LAW_HISTORY_REFRESH_CHAIN_INVALID")
+            elif canonical[1] != raw_sha:
                 raise LawHistoryError("LAW_HISTORY_REFRESH_CHAIN_INVALID")
             normalized_rows.append(
                 {
@@ -2446,6 +2518,10 @@ def _validated_refresh_records(
         if normalized_rows != sorted_rows or len(
             {(row["law_id"], row["version_key"]) for row in sorted_rows}
         ) != len(sorted_rows):
+            raise LawHistoryError("LAW_HISTORY_REFRESH_CHAIN_INVALID")
+        if receipt_by_key and set(receipt_by_key) != {
+            (cast(str, row["law_id"]), cast(str, row["version_key"])) for row in sorted_rows
+        }:
             raise LawHistoryError("LAW_HISTORY_REFRESH_CHAIN_INVALID")
         if sha256_bytes(canonical_json_bytes(sorted_rows)) != source_sha256:
             raise LawHistoryError("LAW_HISTORY_REFRESH_CHAIN_INVALID")
@@ -2491,8 +2567,80 @@ def _validated_refresh_records(
     return tuple(parsed)
 
 
-def _validate_refresh_ledger(refreshes: Sequence[Mapping[str, object]]) -> None:
-    """Require the persistent refresh ledger to match the active chain exactly."""
+def _validate_refresh_receipt_assets(
+    *,
+    profile: Path,
+    refreshes: Sequence[Mapping[str, object]],
+    source_assets: Sequence[Mapping[str, object]],
+) -> None:
+    """Verify retained refresh receipts when one legal version has raw variants.
+
+    A canonical source asset owns the indexed legal version and its first
+    immutable raw receipt. A refresh can retain another official response for
+    that exact version only when its contact-redacted, hash-verified body is
+    equal; a raw-body difference alone must never hide an article or legal-
+    metadata change.
+    """
+
+    canonical_by_key: dict[tuple[str, str], Mapping[str, object]] = {}
+    for asset in source_assets:
+        law_id = asset.get("law_id")
+        version_key = asset.get("version_key")
+        if not isinstance(law_id, str) or not isinstance(version_key, str):
+            raise LawHistoryError("LAW_HISTORY_REFRESH_CHAIN_INVALID")
+        canonical_by_key[(law_id, version_key)] = asset
+    receipt_content_cache: dict[tuple[str, str, str], str] = {}
+
+    def receipt_content(asset: Mapping[str, object]) -> str:
+        law_id = cast(str, asset["law_id"])
+        version_key = cast(str, asset["version_key"])
+        raw_sha256 = cast(str, asset["effective_sha256"])
+        key = (law_id, version_key, raw_sha256)
+        cached = receipt_content_cache.get(key)
+        if cached is None:
+            cached = _source_receipt_content_sha256(profile, asset)
+            receipt_content_cache[key] = cached
+        return cached
+
+    for refresh in refreshes:
+        raw_receipt_assets = refresh.get("receipt_assets")
+        if raw_receipt_assets is None:
+            continue
+        if not isinstance(raw_receipt_assets, list):
+            raise LawHistoryError("LAW_HISTORY_REFRESH_CHAIN_INVALID")
+        for raw_receipt in raw_receipt_assets:
+            if not isinstance(raw_receipt, dict):
+                raise LawHistoryError("LAW_HISTORY_REFRESH_CHAIN_INVALID")
+            _validate_source_asset(profile, raw_receipt)
+            receipt = _source_from_asset(raw_receipt)
+            if receipt.source_kind != "refresh":
+                raise LawHistoryError("LAW_HISTORY_REFRESH_CHAIN_INVALID")
+            canonical = canonical_by_key.get((receipt.law_id, receipt.version_key))
+            if canonical is None:
+                raise LawHistoryError("LAW_HISTORY_REFRESH_CHAIN_INVALID")
+            _validate_source_asset(profile, canonical)
+            if (
+                canonical.get("effective_mst") != receipt.effective_mst
+                or canonical.get("effective_date") != receipt.effective_date.isoformat()
+                or canonical.get("is_repealed") != receipt.is_repealed
+            ):
+                raise LawHistoryError("LAW_HISTORY_REFRESH_SOURCE_CONFLICT")
+            if canonical.get("effective_sha256") != receipt.effective_sha256 and receipt_content(
+                canonical
+            ) != receipt_content(raw_receipt):
+                raise LawHistoryError("LAW_HISTORY_REFRESH_SOURCE_CONFLICT")
+
+
+def _validate_refresh_ledger(
+    refreshes: Sequence[Mapping[str, object]], *, allow_unrecorded_final: bool = False
+) -> None:
+    """Require the durable ledger to match an active or pre-publish chain.
+
+    A ready refresh journal is fully verified before its ledger row is written.
+    During that short transaction boundary, the ledger may validly contain the
+    immediately preceding chain, but it may never contain a partial or extra
+    record.  Once the row is recorded, callers use the default exact mode.
+    """
 
     from src.db.postgres import connect
 
@@ -2523,7 +2671,19 @@ def _validate_refresh_ledger(refreshes: Sequence[Mapping[str, object]]) -> None:
         for row in rows
         if isinstance(row, tuple) and len(row) == 4
     }
-    if len(observed) != len(rows) or observed != expected:
+    allowed = {frozenset(expected)}
+    if allow_unrecorded_final and refreshes:
+        preceding = {
+            (
+                cast(str, record["refresh_id"]),
+                date.fromisoformat(cast(str, record["from"])),
+                date.fromisoformat(cast(str, record["to"])),
+                cast(str, record["source_sha256"]),
+            )
+            for record in refreshes[:-1]
+        }
+        allowed.add(frozenset(preceding))
+    if len(observed) != len(rows) or frozenset(observed) not in allowed:
         raise LawHistoryError("LAW_HISTORY_REFRESH_LEDGER_MISMATCH")
 
 
@@ -3102,6 +3262,11 @@ def validate_law_history_state(
                 raise LawHistoryError("LAW_HISTORY_MANIFEST_INVALID")
     if baseline_laws != set(LAW_HISTORY_LAW_IDS) or baseline_count != len(LAW_HISTORY_LAW_IDS):
         raise LawHistoryError("LAW_HISTORY_MANIFEST_INVALID")
+    _validate_refresh_receipt_assets(
+        profile=profile,
+        refreshes=refreshes,
+        source_assets=cast(Sequence[Mapping[str, object]], source_assets),
+    )
     _validate_store_source_provenance(source_assets)
     _validate_refresh_ledger(refreshes)
     _validate_frozen_input_projections(frozen_inputs)
@@ -3317,6 +3482,30 @@ def _read_history_source_asset(
         cast(dict[str, object], meta),
         cast(list[dict[str, object]], rows),
     )
+
+
+def _source_receipt_content_sha256(profile: Path, asset: Mapping[str, object]) -> str:
+    """Hash a receipt after removing only its non-legal contact-department field.
+
+    The full official body remains the default identity.  The service is
+    allowed to revise the direct ``법령.기본정보.연락부서`` subtree without a
+    new MST or effective date, but no other metadata, article, or legal field
+    is treated as interchangeable.  This deliberately does *not* reuse the
+    narrower parsed-article projection: publication/revision metadata remains
+    part of the immutable receipt boundary.
+    """
+
+    _validate_source_asset(profile, asset)
+    body, _path = _load_source_body(profile, asset)
+    normalized = deepcopy(body)
+    law = normalized.get("법령")
+    if not isinstance(law, dict):
+        raise LawHistoryError("LAW_HISTORY_SOURCE_INVALID")
+    basic_info = law.get("기본정보")
+    if not isinstance(basic_info, dict):
+        raise LawHistoryError("LAW_HISTORY_SOURCE_INVALID")
+    basic_info.pop("연락부서", None)
+    return sha256_bytes(canonical_json_bytes(normalized))
 
 
 def _flatten_history_source_rows(
@@ -3762,6 +3951,7 @@ def _combined_refresh_assets(
     *,
     manifest: Mapping[str, object],
     staged_assets: Sequence[Mapping[str, object]],
+    profile: Path | None = None,
 ) -> tuple[list[dict[str, object]], tuple[dict[str, object], ...]]:
     """Merge immutable new versions while requiring duplicates to agree.
 
@@ -3796,14 +3986,27 @@ def _combined_refresh_assets(
             continue
         if any(
             current.get(field) != asset.get(field)
-            for field in ("effective_mst", "effective_date", "effective_sha256", "is_repealed")
+            for field in ("effective_mst", "effective_date", "is_repealed")
         ):
             raise LawHistoryError("LAW_HISTORY_REFRESH_SOURCE_CONFLICT")
+        if current.get("effective_sha256") != asset.get("effective_sha256"):
+            # The official API can amend non-legal contact metadata without a
+            # new MST or enforcement date.  Keep the original immutable
+            # version receipt in the source ledger, but allow the refresh
+            # receipt only when both hash-verified bodies project to exactly
+            # the same legal metadata and articles.  Without a profile-local
+            # body reader, a raw-hash variance remains fail-closed.
+            if profile is None or (
+                _source_receipt_content_sha256(profile, current)
+                != _source_receipt_content_sha256(profile, asset)
+            ):
+                raise LawHistoryError("LAW_HISTORY_REFRESH_SOURCE_CONFLICT")
     return combined, tuple(new_assets)
 
 
 def _updated_refresh_manifest(
     *,
+    profile: Path | None = None,
     manifest: Mapping[str, object],
     staged_assets: Sequence[Mapping[str, object]],
     refresh: Mapping[str, object],
@@ -3817,17 +4020,26 @@ def _updated_refresh_manifest(
     combined_assets, _new_assets = _combined_refresh_assets(
         manifest=manifest,
         staged_assets=staged_assets,
+        profile=profile,
     )
     raw_refreshes = manifest.get("refreshes")
     if not isinstance(raw_refreshes, list):
         raise LawHistoryError("LAW_HISTORY_MANIFEST_INVALID")
+    refresh_with_receipts = {
+        **dict(refresh),
+        # ``source_assets`` retains one immutable canonical receipt per legal
+        # version.  Refreshes additionally retain the exact local receipt
+        # metadata used to prove their date coverage when an API response
+        # changes only non-legal fields under the same MST/effective date.
+        "receipt_assets": [dict(asset) for asset in staged_assets],
+    }
     updated = dict(manifest)
     updated["coverage_through"] = to_date.isoformat()
     updated["source_assets"] = combined_assets
     updated["store_counts"] = dict(counts)
     updated["source_article_projection_sha256"] = source_article_projection_sha256
     updated["temporal_store_projection_sha256"] = temporal_store_projection_sha256
-    updated["refreshes"] = [*raw_refreshes, dict(refresh)]
+    updated["refreshes"] = [*raw_refreshes, refresh_with_receipts]
     # A benchmark is bound to one exact manifest/projection.  Any source or
     # coverage change invalidates it; a later explicit held-out run may bind
     # a new deployable strategy.
@@ -3892,6 +4104,11 @@ def _validate_publishable_refresh_manifest(
         if not isinstance(asset, dict):
             raise LawHistoryError("LAW_HISTORY_REFRESH_JOURNAL_INVALID")
         _validate_source_asset(profile, asset)
+    _validate_refresh_receipt_assets(
+        profile=profile,
+        refreshes=refreshes,
+        source_assets=cast(Sequence[Mapping[str, object]], source_assets),
+    )
     baseline_assets = [asset for asset in source_assets if asset.get("source_kind") == "baseline"]
     if (
         len(baseline_assets) != len(LAW_HISTORY_LAW_IDS)
@@ -3916,7 +4133,44 @@ def _validate_publishable_refresh_manifest(
     projection = _verify_temporal_store_projection()
     if updated.get("temporal_store_projection_sha256") != projection:
         raise LawHistoryError("LAW_HISTORY_TEMPORAL_STORE_MISMATCH")
-    _validate_refresh_ledger(refreshes)
+    _validate_refresh_ledger(refreshes, allow_unrecorded_final=True)
+
+
+def _validate_ready_refresh_manifest_binding(
+    *,
+    profile: Path,
+    previous_manifest: Mapping[str, object],
+    staged_assets: Sequence[Mapping[str, object]],
+    refresh: Mapping[str, object],
+    ready_manifest: Mapping[str, object],
+) -> None:
+    """Bind a ready journal to the exact staged receipts and prior manifest.
+
+    A ready journal is durable across a process crash.  Before it may record a
+    ledger row or replace the active marker, prove that its source inventory
+    and final refresh entry are exactly the deterministic result of the staged
+    receipt set.  This prevents a stale or edited ready file from affecting
+    either persistent boundary.
+    """
+
+    previous_refreshes = previous_manifest.get("refreshes")
+    if not isinstance(previous_refreshes, list) or any(
+        not isinstance(item, dict) for item in previous_refreshes
+    ):
+        raise LawHistoryError("LAW_HISTORY_REFRESH_JOURNAL_CONFLICT")
+    expected_source_assets, _new_assets = _combined_refresh_assets(
+        manifest=previous_manifest,
+        staged_assets=staged_assets,
+        profile=profile,
+    )
+    expected_refresh = {
+        **dict(refresh),
+        "receipt_assets": [dict(asset) for asset in staged_assets],
+    }
+    if ready_manifest.get("source_assets") != expected_source_assets or ready_manifest.get(
+        "refreshes"
+    ) != [*previous_refreshes, expected_refresh]:
+        raise LawHistoryError("LAW_HISTORY_REFRESH_JOURNAL_CONFLICT")
 
 
 def _finish_pending_refresh(
@@ -3952,15 +4206,18 @@ def _finish_pending_refresh(
         _combined_assets, new_assets = _combined_refresh_assets(
             manifest=manifest,
             staged_assets=staged_assets,
+            profile=profile,
         )
-        _load_history_source_assets(profile=profile, source_assets=new_assets)
-        from src.ingest.laws import index_temporal_qdrant
+        if new_assets:
+            _load_history_source_assets(profile=profile, source_assets=new_assets)
+            from src.ingest.laws import index_temporal_qdrant
 
-        index_temporal_qdrant()
+            index_temporal_qdrant()
         counts = _history_store_counts()
         combined_assets, _new_assets = _combined_refresh_assets(
             manifest=manifest,
             staged_assets=staged_assets,
+            profile=profile,
         )
         source_projection = _verify_source_article_projection(
             profile=profile,
@@ -3968,6 +4225,7 @@ def _finish_pending_refresh(
         )
         projection = _verify_temporal_store_projection()
         updated = _updated_refresh_manifest(
+            profile=profile,
             manifest=manifest,
             staged_assets=staged_assets,
             refresh=refresh,
@@ -3996,15 +4254,39 @@ def _finish_pending_refresh(
     if not isinstance(ready_manifest, dict):
         raise LawHistoryError("LAW_HISTORY_REFRESH_JOURNAL_INVALID")
     updated_digest = sha256_bytes(canonical_json_bytes(ready_manifest))
-    if current_manifest_sha256 not in {previous, updated_digest}:
+    if current_manifest_sha256 == previous:
+        previous_manifest, active_digest = _load_active_manifest(profile)
+        if active_digest != previous:
+            raise LawHistoryError("LAW_HISTORY_REFRESH_JOURNAL_CONFLICT")
+        _validate_ready_refresh_manifest_binding(
+            profile=profile,
+            previous_manifest=previous_manifest,
+            staged_assets=staged_assets,
+            refresh=refresh,
+            ready_manifest=ready_manifest,
+        )
+    elif current_manifest_sha256 == updated_digest:
+        active_manifest, active_digest = _load_active_manifest(profile)
+        if active_digest != updated_digest or active_manifest != ready_manifest:
+            raise LawHistoryError("LAW_HISTORY_REFRESH_JOURNAL_CONFLICT")
+    else:
         raise LawHistoryError("LAW_HISTORY_REFRESH_JOURNAL_CONFLICT")
+    # Verify the ready journal and either the preceding or already-recorded
+    # ledger chain *before* adding an idempotent ledger row.  This ordering
+    # leaves malformed journals unable to mutate PostgreSQL.
+    _validate_publishable_refresh_manifest(profile=profile, updated=ready_manifest)
     _record_refresh(
         refresh_id=cast(str, refresh["refresh_id"]),
         from_date=from_date,
         to_date=to_date,
         refresh_sha256=cast(str, refresh["source_sha256"]),
     )
-    _validate_publishable_refresh_manifest(profile=profile, updated=ready_manifest)
+    ready_refreshes = ready_manifest.get("refreshes")
+    if not isinstance(ready_refreshes, list) or any(
+        not isinstance(item, dict) for item in ready_refreshes
+    ):
+        raise LawHistoryError("LAW_HISTORY_REFRESH_JOURNAL_INVALID")
+    _validate_refresh_ledger(cast(Sequence[Mapping[str, object]], ready_refreshes))
     if current_manifest_sha256 == previous:
         _replace_active_manifest_if_digest(
             profile=profile,
