@@ -37,6 +37,7 @@ from src.law_history import (  # noqa: E402
     recover_law_history_build_lock,
     recover_law_history_published_lock,
     recover_law_history_refresh_lock,
+    rebind_law_history_frozen_inputs,
     refresh_law_history,
     validate_law_history_state,
     verify_law_history_store,
@@ -189,6 +190,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     recover_baseline.add_argument("--source-batch", required=True)
     recover_baseline.add_argument("--confirm-profile", required=True)
+    rebind_frozen_inputs = commands.add_parser(
+        "rebind-frozen-inputs",
+        help="replace only a verified stale fixed-input receipt without collection",
+    )
+    rebind_frozen_inputs.add_argument("--confirm-profile", required=True)
     recover_published = commands.add_parser(
         "recover-published",
         help="release a verified crash-left lock after a fully published active manifest",
@@ -381,6 +387,10 @@ def main(argv: list[str] | None = None) -> int:
                 confirm_profile=args.confirm_profile,
             )
             print("law-history verified baseline receipt batch was published")
+            return 0
+        if args.command == "rebind-frozen-inputs":
+            rebind_law_history_frozen_inputs(confirm_profile=args.confirm_profile)
+            print("law-history fixed-input receipt rebound after full local verification")
             return 0
         if args.command == "recover-published":
             released = recover_law_history_published_lock(confirm_profile=args.confirm_profile)

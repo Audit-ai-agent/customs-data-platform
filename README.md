@@ -105,6 +105,16 @@ baseline batch name and `--confirm-profile functional-uat-law-history`; any
 mismatch leaves the marker absent and requires the explicit reset/build path
 instead.
 
+If a later code correction changes only the canonical fixed-input receipt of
+an already published marker, use `rebind-frozen-inputs --confirm-profile
+functional-uat-law-history`. This is not a general manifest repair: it accepts
+only the bounded stale CCCT receipt layout, preserves the existing source and
+refresh chain, and runs the complete local source, fixed-input, model,
+PostgreSQL, Neo4j, and temporal-Qdrant verification gates before an atomic
+marker replacement. It never calls the Law API or downloads a model. Any
+other marker difference remains fail-closed and requires the normal explicit
+operator path.
+
 If the active manifest was already published when the host stopped (including
 an explicit benchmark-strategy bind), use `recover-published --confirm-profile
 functional-uat-law-history` instead.  It releases nothing unless the dead
