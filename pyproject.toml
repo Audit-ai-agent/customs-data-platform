@@ -59,6 +59,7 @@ testpaths = [
   "law_repository/tests/test_evidence_v3.py",
   "law_repository/tests/test_evidence_v3_contract.py",
   "law_repository/tests/test_guidance_v3.py",
+  "law_repository/tests/test_guidance_v2.py",
   "law_repository/tests/test_profile_evidence.py",
   "law_repository/tests/test_local_compose_security.py",
   "law_repository/tests/test_migration_runner.py",

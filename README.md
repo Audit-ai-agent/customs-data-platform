@@ -288,13 +288,72 @@ listed page-level official source has a hash-verified receipt and at least one
 matching excerpt record.
 
 ```powershell
-# This never fetches: an operator explicitly stages exact allowlisted sources
-# under the ignored profile first.
+# This build command never fetches: an operator explicitly stages exact
+# allowlisted sources under the ignored profile first.
 uv run --locked --no-sync --group dev python tools/functional_uat_kr_trade.py build-v2 `
   --source-manifest data/guidance-sources/<staging>/source-build-v2.json
 uv run --locked --no-sync --group dev python tools/functional_uat_kr_trade.py verify-v2
 uv run --locked --no-sync --group dev python tools/functional_uat_kr_trade.py serve-guidance-v2 `
   --host 127.0.0.1 --port 18094
+```
+
+### V2 변경 감지와 수동 승인
+
+`build-v2`는 계속 네트워크에 접속하지 않습니다. 공식 페이지의 변경을 확인해야
+할 때만 운영자가 아래처럼 명시적으로 `--confirm-network`를 붙여 실행합니다.
+감지기는 registry의 정확한 HTTPS URL만 GET하고, proxy·redirect·credential·자동
+활성화를 사용하지 않습니다. 응답 원문은 Git·일반 로그에 남기지 않고, 변경·새
+출처·수집 실패가 있을 때에만 ignored local candidate 아래에 둡니다.
+
+```powershell
+uv run --locked --no-sync --group dev python tools/functional_uat_kr_trade.py `
+  detect-v2-source-changes --confirm-network
+```
+
+출력의 `candidate`와 `candidate_sha256`은 검토 대상의 정확한 식별자입니다.
+candidate 내부 `approval-v2.json`은 다음 필드를 모두 가져야 합니다. 이 파일은
+운영자가 출처별 bindings·법령 시행일 근거·발췌문을 검토한 뒤에만 작성합니다.
+
+```text
+schema_version = functional-uat-kr-trade-v2-source-candidate-approval/v1
+approval_id, candidate_id, candidate_sha256, snapshot_id, as_of
+source_receipts, guidance_records
+```
+
+`source_receipts`의 `source_uri`, `relative_path`, `sha256`은 candidate의 같은
+source 항목과 정확히 일치해야 합니다. PDF의 text projection도 같은 candidate
+디렉터리에 hash-bound 상태로 두어야 합니다. 승인 명령은 CLI 인자·approval
+manifest·candidate manifest의 ID와 hash가 모두 일치하고 기존 V2 검증을 통과할
+때에만 immutable snapshot을 만든 뒤 active pointer를 원자적으로 교체합니다.
+
+```powershell
+uv run --locked --no-sync --group dev python tools/functional_uat_kr_trade.py `
+  approve-v2-source-changes `
+  --candidate-id <candidate-id> `
+  --candidate-sha256 <candidate-sha256> `
+  --approval-id <approval-id>
+```
+
+새 대화는 active snapshot을 사용합니다. 기존 대화는 그 응답의 `snapshot_id`를
+`expected_snapshot_id`로 다시 보내면 해당 immutable snapshot만 재검증하여
+선택합니다. 선택한 snapshot이 없거나 변조되면 active snapshot으로 대체하지 않고
+안전하게 실패합니다. 운영자는 원문 경로를 노출하지 않는 목록과 단일 snapshot
+상태도 확인할 수 있습니다.
+
+```powershell
+uv run --locked --no-sync --group dev python tools/functional_uat_kr_trade.py `
+  list-v2-snapshot-history
+uv run --locked --no-sync --group dev python tools/functional_uat_kr_trade.py `
+  status-v2 --snapshot-id <snapshot-id>
+```
+
+주간 감지는 자동으로 설치되지 않습니다. 의존성을 이미 `setup`으로 준비한 Windows
+운영자만 아래 명령으로 월요일 03:00 로컬 시간의 detection-only task를 명시적으로
+만들 수 있습니다. installer는 기존 같은 이름의 task를 교체하지 않으며, runner는
+approve·build·serve를 호출하지 않습니다.
+
+```powershell
+.\tools\install_v2_snapshot_detection_task.ps1 -ConfirmInstall
 ```
 
 V2 build input binds one `topic` plus `scope` on every source receipt and

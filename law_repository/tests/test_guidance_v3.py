@@ -385,6 +385,19 @@ def test_guidance_snapshot_and_search_failures_are_safe_and_distinct() -> None:
     assert "secret-marker" not in serialized
 
 
+def test_v1_guidance_never_ignores_an_unselectable_v2_snapshot_pin() -> None:
+    response = query_general_guidance_v3(
+        _request(expected_snapshot_id="krtrade-v2-history-one"),
+        _FunctionalBackend(matches=(_match(),)),
+        profile_mode="functional-uat",  # type: ignore[arg-type]
+    )
+
+    assert response.status == "failed"
+    assert response.coverage == "unavailable"
+    assert response.snapshot_id == "functional-guidance-snapshot"
+    assert response.errors[0].code == "KNOWLEDGE_SNAPSHOT_MISMATCH"
+
+
 def test_guidance_request_bounds_are_enforced_before_profile_execution() -> None:
     try:
         _request(top_k=4)

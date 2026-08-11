@@ -1,9 +1,12 @@
 """Build and serve a bounded local Korean trade guidance snapshot.
 
-This command never collects from the internet, starts Docker, or adopts the
-legacy three-law Data profile.  Operators stage only registry-approved official
-source bytes below the ignored local profile, then use ``build`` to verify
-their hashes and derive a small guidance-only projection.
+Normal build/serve commands never collect from the internet, start Docker, or
+adopt the legacy three-law Data profile. Operators stage only registry-approved
+official source bytes below the ignored local profile, then use ``build`` to
+verify their hashes and derive a small guidance-only projection. The separately
+named V2 detector performs a bounded allowlisted GET only after its explicit
+``--confirm-network`` acknowledgement; it creates a non-active local candidate
+and never approves, builds, or activates it.
 """
 
 from __future__ import annotations
@@ -27,8 +30,11 @@ from src.functional_uat_kr_trade import (  # noqa: E402
     require_kr_trade_retrieval_snapshot,
 )
 from src.functional_uat_kr_trade_v2 import (  # noqa: E402
+    approve_kr_trade_v2_source_changes,
     build_kr_trade_v2_guidance_snapshot,
+    detect_kr_trade_v2_source_changes,
     inspect_kr_trade_v2_snapshot,
+    list_kr_trade_v2_snapshot_history,
     query_kr_trade_v2_guidance_v3,
     require_kr_trade_v2_retrieval_snapshot,
 )
@@ -87,10 +93,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="relative V2 build manifest below data/guidance-sources in the ignored profile",
     )
     subparsers.add_parser("verify", help="revalidate active source hashes and local projection")
-    subparsers.add_parser("status-v2", help="show safe V2 snapshot readiness metadata")
+    status_v2 = subparsers.add_parser("status-v2", help="show safe V2 snapshot readiness metadata")
+    status_v2.add_argument(
+        "--snapshot-id",
+        help="inspect one immutable local V2 snapshot instead of the active pointer",
+    )
+    subparsers.add_parser(
+        "list-v2-snapshot-history",
+        help="list safe metadata for immutable local V2 snapshots without source paths",
+    )
     subparsers.add_parser(
         "verify-v2", help="revalidate active V2 page-level source hashes and projection"
     )
+    detect_v2 = subparsers.add_parser(
+        "detect-v2-source-changes",
+        help="explicitly GET registry allowlisted sources and stage a non-active local candidate",
+    )
+    detect_v2.add_argument(
+        "--confirm-network",
+        action="store_true",
+        help="required acknowledgement before any official-source GET request",
+    )
+    approve_v2 = subparsers.add_parser(
+        "approve-v2-source-changes",
+        help="build and atomically activate an operator-approved local source candidate",
+    )
+    approve_v2.add_argument("--candidate-id", required=True)
+    approve_v2.add_argument("--candidate-sha256", required=True)
+    approve_v2.add_argument("--approval-id", required=True)
     serve = subparsers.add_parser(
         "serve-guidance",
         help="serve only /guidance/query from a verified snapshot; it is not an Evidence store",
@@ -203,6 +233,31 @@ def main(argv: list[str] | None = None) -> int:
                 "V2 guidance-only snapshot verified"
             )
             return 0
+        if args.command == "detect-v2-source-changes":
+            detection = detect_kr_trade_v2_source_changes(
+                confirm_network=args.confirm_network,
+            )
+            print(
+                f"profile={FUNCTIONAL_UAT_KR_TRADE_PROFILE} registry=2.0 "
+                f"status={detection.status} sources={detection.source_count} "
+                f"changed={detection.changed_source_count} unavailable={detection.unavailable_source_count} "
+                f"active_snapshot={detection.active_snapshot_id or 'none'} "
+                f"candidate={detection.candidate_id or 'none'} "
+                f"candidate_sha256={detection.candidate_sha256 or 'none'}"
+            )
+            return 0
+        if args.command == "approve-v2-source-changes":
+            approved_status = approve_kr_trade_v2_source_changes(
+                candidate_id=args.candidate_id,
+                candidate_sha256=args.candidate_sha256,
+                approval_id=args.approval_id,
+            )
+            print(
+                f"profile={FUNCTIONAL_UAT_KR_TRADE_PROFILE} registry=2.0 status={approved_status.status} "
+                f"snapshot={approved_status.snapshot_id} sources={approved_status.source_count} "
+                "V2 candidate approval activated atomically"
+            )
+            return 0
         if args.command == "verify":
             status = inspect_kr_trade_snapshot()
             if status.status != "ready":
@@ -229,13 +284,26 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "serve-guidance-v2":
             return _serve_guidance_v2(args.host, args.port)
         if args.command == "status-v2":
-            v2_status = inspect_kr_trade_v2_snapshot()
+            v2_status = inspect_kr_trade_v2_snapshot(snapshot_id=args.snapshot_id)
             print(
                 f"profile={FUNCTIONAL_UAT_KR_TRADE_PROFILE} registry=2.0 "
                 f"status={v2_status.status} sources={v2_status.source_count} records={v2_status.record_count} "
                 f"covered_bundles={v2_status.covered_bundle_count}/{v2_status.coverage_count} "
-                f"registry={v2_status.registry_sha256[:12]}"
+                f"snapshot={v2_status.snapshot_id or 'none'} registry={v2_status.registry_sha256[:12]}"
             )
+            return 0
+        if args.command == "list-v2-snapshot-history":
+            history = list_kr_trade_v2_snapshot_history()
+            for entry in history:
+                snapshot = entry.snapshot
+                print(
+                    f"snapshot={snapshot.snapshot_id} active={str(entry.is_active).lower()} "
+                    f"as_of={snapshot.as_of} sources={snapshot.source_count} "
+                    f"records={snapshot.record_count} "
+                    f"covered_bundles={snapshot.covered_bundle_count}/{snapshot.coverage_count}"
+                )
+            if not history:
+                print("snapshot_history=empty")
             return 0
         status = inspect_kr_trade_snapshot()
         print(

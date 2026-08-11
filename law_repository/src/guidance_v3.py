@@ -42,6 +42,10 @@ GuidanceUri = Annotated[str, Field(min_length=1, max_length=2000)]
 VersionHash = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
 GuidanceSourceId = Annotated[str, Field(pattern=r"^guide_[a-f0-9]{64}$")]
 RegistrySourceId = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{2,63}$")]
+GuidanceSnapshotId = Annotated[
+    str,
+    Field(min_length=3, max_length=81, pattern=r"^[a-z0-9][a-z0-9-]{2,80}$"),
+]
 
 
 class ContractModel(BaseModel):
@@ -62,6 +66,11 @@ class GeneralGuidanceQueryRequestV3(ContractModel):
     # V1 remains compatible: a V1 runtime simply cannot claim V2 scope
     # coverage and returns no coverage rather than silently broadening it.
     scope_hint: GuidanceScope | None = None
+    # A V2 caller may pin a prior immutable local snapshot for an existing
+    # conversation.  It is a selector, not a free-form query, and the V2
+    # profile rejects a missing or invalid selected snapshot rather than
+    # silently falling back to today's active pointer.
+    expected_snapshot_id: GuidanceSnapshotId | None = None
     top_k: int = Field(default=3, ge=1, le=3)
 
 
@@ -266,6 +275,17 @@ def _validated_snapshot(
             request,
             code="KNOWLEDGE_SNAPSHOT_MISSING",
             message="현재 법령 근거 스냅샷이 없습니다.",
+        )
+    # V1 has no immutable history selector.  Accepting the additive field in
+    # the common wire shape is useful for a shared caller, but it must never
+    # be ignored: an unexpected pin is a fail-closed mismatch, not permission
+    # to answer from the active V1 snapshot.
+    if request.expected_snapshot_id is not None and request.expected_snapshot_id != snapshot_id:
+        return "", _snapshot_failure(
+            request,
+            code="KNOWLEDGE_SNAPSHOT_MISMATCH",
+            message="요청한 공식 지식 스냅샷을 현재 V1 저장소에서 선택할 수 없습니다.",
+            snapshot_id=snapshot_id,
         )
     try:
         supported_as_of = backend.snapshot_effective_date(snapshot_id)
