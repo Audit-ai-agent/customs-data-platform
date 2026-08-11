@@ -14,6 +14,12 @@ import numpy as np
 import pytest
 
 from src.functional_uat import canonical_json_bytes
+from src.hsk_ccct_history import (
+    ActiveArchiveCatalog,
+    ArchiveAsset,
+    ArchiveManifest,
+    CcctArchiveReceipt,
+)
 from src.law_history import (
     LAW_HISTORY_BASELINE_AS_OF,
     LAW_HISTORY_PROFILE,
@@ -968,6 +974,93 @@ def test_temporal_backend_exposes_fixed_hsk_and_requirement_baseline() -> None:
 
     missing = backend.temporal_evidence_support("snapshot", date(2026, 8, 11))
     assert missing.law_coverage_available is False
+
+
+def _archive_catalog_at(archive_as_of: date) -> ActiveArchiveCatalog:
+    asset = ArchiveAsset(
+        relative_path="hsk/levels.xlsx",
+        official_uri="https://www.data.go.kr/data/15049722/fileData.do",
+        sha256="a" * 64,
+        byte_size=1,
+        published_at=archive_as_of,
+        effective_at=archive_as_of,
+    )
+    leaf_asset = ArchiveAsset(
+        relative_path="hsk/leaf-attributes.xlsx",
+        official_uri="https://www.data.go.kr/data/15130660/fileData.do",
+        sha256="b" * 64,
+        byte_size=1,
+        published_at=archive_as_of,
+        effective_at=archive_as_of,
+    )
+    receipt_asset = ArchiveAsset(
+        relative_path="ccct/query-receipts.jsonl",
+        official_uri="https://apis.data.go.kr/1220000/retrieveCcctLworCd/getRetrieveCcctLworCd",
+        sha256="c" * 64,
+        byte_size=1,
+        published_at=archive_as_of,
+        effective_at=archive_as_of,
+    )
+    manifest = ArchiveManifest(
+        archive_id="hsk_ccct_" + "d" * 64,
+        archive_as_of=archive_as_of,
+        collected_at=datetime(2026, 8, 8, tzinfo=timezone.utc),
+        manifest_sha256="e" * 64,
+        directory=Path("archive-fixture"),
+        level_names=asset,
+        leaf_attributes=leaf_asset,
+        ccct=CcctArchiveReceipt(
+            official_uri=receipt_asset.official_uri,
+            query_receipts=receipt_asset,
+            snapshot_id="ccct_" + "f" * 64,
+            query_count=1,
+            empty_query_count=0,
+            raw_row_count=1,
+        ),
+    )
+    return ActiveArchiveCatalog(pointer_sha256="0" * 64, archives=(manifest,))
+
+
+def test_temporal_backend_requires_an_exact_active_hsk_ccct_archive_after_baseline() -> None:
+    requested = date(2026, 8, 8)
+    backend = FunctionalLawHistoryEvidenceBackend(
+        coverage_from=LAW_HISTORY_BASELINE_AS_OF,
+        coverage_through=date(2026, 8, 10),
+        archive_catalog=ActiveArchiveCatalog(pointer_sha256="a" * 64, archives=()),
+    )
+
+    support = backend.temporal_evidence_support("snapshot", requested)
+
+    assert support.context.hsk_snapshot_as_of == LAW_HISTORY_BASELINE_AS_OF
+    assert support.context.requirements_snapshot_as_of == LAW_HISTORY_BASELINE_AS_OF
+    assert support.hsk_coverage_available is False
+    assert support.requirements_coverage_available is False
+    assert support.temporal_coverage is not None
+    assert support.temporal_coverage.model_dump() == {
+        "law": "covered",
+        "hsk": "unavailable",
+        "requirements": "unavailable",
+    }
+
+
+def test_temporal_backend_binds_exact_active_hsk_ccct_archive_to_requested_date() -> None:
+    requested = date(2026, 8, 8)
+    catalog = _archive_catalog_at(requested)
+    backend = FunctionalLawHistoryEvidenceBackend(
+        coverage_from=LAW_HISTORY_BASELINE_AS_OF,
+        coverage_through=date(2026, 8, 10),
+        archive_catalog=catalog,
+    )
+
+    support = backend.temporal_evidence_support("snapshot", requested)
+    archive = catalog.for_date(requested)
+    assert archive is not None
+    assert support.context.hsk_snapshot_as_of == requested
+    assert support.context.requirements_snapshot_as_of == requested
+    assert support.hsk_coverage_available is True
+    assert support.requirements_coverage_available is True
+    assert support.hsk_snapshot_id == archive.hsk_snapshot_id
+    assert support.requirements_snapshot_id == archive.ccct.snapshot_id
 
 
 def test_law_history_rejects_coverage_before_the_promised_baseline() -> None:

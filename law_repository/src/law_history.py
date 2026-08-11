@@ -27,9 +27,11 @@ from src import repository
 from src.evidence import (
     DatabaseEvidenceBackend,
     LawArticleMatch,
+    TemporalCoverage,
     TemporalContext,
     TemporalEvidenceSupport,
 )
+from src.hsk_ccct_history import ActiveArchiveCatalog
 from src.functional_uat import (
     _safe_directory,
     _verify_cached_models,
@@ -4650,6 +4652,7 @@ class FunctionalLawHistoryEvidenceBackend(DatabaseEvidenceBackend):
         coverage_through: date,
         use_rerank: bool = False,
         rerank_device: Literal["cpu", "cuda"] = "cpu",
+        archive_catalog: ActiveArchiveCatalog | None = None,
     ) -> None:
         if coverage_from != LAW_HISTORY_BASELINE_AS_OF or coverage_through < coverage_from:
             raise LawHistoryError("LAW_HISTORY_COVERAGE_RANGE_INVALID")
@@ -4658,6 +4661,11 @@ class FunctionalLawHistoryEvidenceBackend(DatabaseEvidenceBackend):
         self._coverage_through = coverage_through
         self._use_rerank = use_rerank
         self._rerank_device = rerank_device
+        # ``None`` retains direct/unit caller compatibility with the earlier
+        # fixed-input profile.  The actual service always captures a catalog,
+        # including an explicit empty catalog, and therefore fails closed for
+        # HSK/CCCT dates without an activated official archive.
+        self._archive_catalog = archive_catalog
 
     def snapshot_effective_date(self, _snapshot_id: str) -> date:
         # HSK and CCCT are deliberately retained at the baseline date.
@@ -4666,15 +4674,61 @@ class FunctionalLawHistoryEvidenceBackend(DatabaseEvidenceBackend):
     def temporal_evidence_support(
         self, _snapshot_id: str | None, review_as_of: date
     ) -> TemporalEvidenceSupport:
+        law_covered = self._coverage_from <= review_as_of <= self._coverage_through
+        archive = self._archive_catalog.for_date(review_as_of) if self._archive_catalog else None
+        if self._archive_catalog is None or review_as_of == LAW_HISTORY_BASELINE_AS_OF:
+            hsk_as_of = LAW_HISTORY_BASELINE_AS_OF
+            requirements_as_of = LAW_HISTORY_BASELINE_AS_OF
+            hsk_covered = True
+            requirements_covered = True
+            hsk_snapshot_id = None
+            requirements_snapshot_id = None
+        elif archive is not None:
+            hsk_as_of = archive.archive_as_of
+            requirements_as_of = archive.archive_as_of
+            hsk_covered = True
+            requirements_covered = True
+            hsk_snapshot_id = archive.hsk_snapshot_id
+            requirements_snapshot_id = archive.ccct.snapshot_id
+        else:
+            # Keep the previous known baseline date explicit, but never use it
+            # as a substitute for the requested archive date.
+            hsk_as_of = LAW_HISTORY_BASELINE_AS_OF
+            requirements_as_of = LAW_HISTORY_BASELINE_AS_OF
+            hsk_covered = False
+            requirements_covered = False
+            hsk_snapshot_id = None
+            requirements_snapshot_id = None
         return TemporalEvidenceSupport(
             context=TemporalContext(
                 law_as_of=review_as_of,
-                hsk_snapshot_as_of=LAW_HISTORY_BASELINE_AS_OF,
-                requirements_snapshot_as_of=LAW_HISTORY_BASELINE_AS_OF,
+                hsk_snapshot_as_of=hsk_as_of,
+                requirements_snapshot_as_of=requirements_as_of,
             ),
-            law_coverage_available=self._coverage_from <= review_as_of <= self._coverage_through,
-            requirements_lookup_as_of=LAW_HISTORY_BASELINE_AS_OF,
+            law_coverage_available=law_covered,
+            requirements_lookup_as_of=requirements_as_of,
+            temporal_coverage=TemporalCoverage(
+                law="covered" if law_covered else "unavailable",
+                hsk="covered" if hsk_covered else "unavailable",
+                requirements="covered" if requirements_covered else "unavailable",
+            ),
+            hsk_coverage_available=hsk_covered,
+            requirements_coverage_available=requirements_covered,
+            hsk_snapshot_id=hsk_snapshot_id,
+            requirements_snapshot_id=requirements_snapshot_id,
         )
+
+    def resolve_hsk_as_of(self, code: str | None, review_as_of: date) -> repository.HskResolution:
+        """Resolve only against the selected archive; never substitute current HSK."""
+
+        if self._archive_catalog is None or review_as_of == LAW_HISTORY_BASELINE_AS_OF:
+            return super().resolve_hsk(code)
+        archive = self._archive_catalog.for_date(review_as_of)
+        if archive is None:
+            raise LawHistoryError("HSK_CCCT_ARCHIVE_COVERAGE_MISSING")
+        from src.hsk_ccct_history import resolve_hsk_snapshot
+
+        return resolve_hsk_snapshot(archive.hsk_snapshot_id, code)
 
     def search_law_articles(
         self, query: str, top_k: int, as_of: date
@@ -4799,10 +4853,16 @@ def backend_from_active_law_history(
     *, local_root_override: Path | None = None
 ) -> FunctionalLawHistoryEvidenceBackend:
     manifest, _digest = validate_law_history_state(local_root_override=local_root_override)
+    from src.hsk_ccct_history import capture_active_archive_catalog
+
     return FunctionalLawHistoryEvidenceBackend(
         coverage_from=LAW_HISTORY_BASELINE_AS_OF,
         coverage_through=date.fromisoformat(cast(str, manifest["coverage_through"])),
         use_rerank=manifest["retrieval_strategy"] == "cross_encoder_rerank",
+        archive_catalog=capture_active_archive_catalog(
+            local_root_override=local_root_override,
+            verify_assets=True,
+        ),
     )
 
 

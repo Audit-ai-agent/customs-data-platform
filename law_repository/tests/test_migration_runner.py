@@ -96,7 +96,7 @@ class FakeConnection:
 def test_repository_migrations_are_contiguous_and_checksum_attested() -> None:
     migrations = discover_migrations()
 
-    assert [item.number for item in migrations] == [1, 2, 3, 4, 5, 6]
+    assert [item.number for item in migrations] == [1, 2, 3, 4, 5, 6, 7]
     assert [item.filename for item in migrations] == [
         "001_init.sql",
         "002_parent_article_pk.sql",
@@ -104,6 +104,7 @@ def test_repository_migrations_are_contiguous_and_checksum_attested() -> None:
         "004_law_history_provenance.sql",
         "005_law_history_version_identity.sql",
         "006_law_history_official_uri_constraint.sql",
+        "007_hsk_ccct_archive_history.sql",
     ]
     assert all(
         hashlib.sha256(item.path.read_bytes()).hexdigest() == item.checksum_sha256
@@ -111,14 +112,19 @@ def test_repository_migrations_are_contiguous_and_checksum_attested() -> None:
     )
     assert all(item.byte_size > 0 for item in migrations)
 
-    identity = migrations[-2].sql
+    identity = migrations[-3].sql
     assert "version_key" in identity
     assert "law_versions_law_id_mst_key" in identity
     assert "law_version_sources_law_id_version_key_fkey" in identity
 
-    uri_constraint = migrations[-1].sql
+    uri_constraint = migrations[-2].sql
     assert "law_version_sources_official_uri_check" in uri_constraint
     assert "www[.]law[.]go[.]kr" in uri_constraint
+
+    archive_history = migrations[-1].sql
+    assert "hsk_ccct_archives" in archive_history
+    assert "hsk_node_versions" in archive_history
+    assert "hsk_ccct_archive_ccct_bindings" in archive_history
 
 
 def test_discovery_rejects_gap_and_non_utf8(tmp_path: Path) -> None:

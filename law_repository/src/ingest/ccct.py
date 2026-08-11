@@ -284,8 +284,19 @@ def _iter_progress():
     yield from _iter_progress_from_path(PROGRESS)
 
 
-def persist_postgres(dataset: CcctDataset) -> None:
-    """스냅샷을 하나의 PG 트랜잭션으로 적재하고 현행으로 승격."""
+def persist_postgres(
+    dataset: CcctDataset,
+    *,
+    make_current: bool = True,
+    cursor=None,
+) -> None:
+    """Persist one CCCT snapshot, optionally without changing the current projection.
+
+    The historical archive importer supplies its own cursor so the CCCT rows,
+    HSK-version rows, and archive binding become visible atomically.  Such an
+    import must never clear or replace the live Neo4j/current-CCCT snapshot.
+    Existing callers keep the original current-snapshot behaviour.
+    """
 
     from psycopg.types.json import Jsonb
 
@@ -296,12 +307,14 @@ def persist_postgres(dataset: CcctDataset) -> None:
         for start in range(0, len(rows), size):
             yield rows[start : start + size]
 
-    with connect() as conn, conn.cursor() as cur:
-        # partial load가 current로 노출되지 않도록 모든 insert와 승격을 단일 tx로 묶는다.
-        cur.execute(
-            "UPDATE knowledge_snapshots SET is_current=false "
-            "WHERE source_type='ccct' AND is_current"
-        )
+    def persist(cur) -> None:
+        # Current loads make the switch only after all rows are present.  An
+        # archive load leaves any existing current snapshot untouched.
+        if make_current:
+            cur.execute(
+                "UPDATE knowledge_snapshots SET is_current=false "
+                "WHERE source_type='ccct' AND is_current"
+            )
         cur.execute(
             """
             INSERT INTO knowledge_snapshots
@@ -313,7 +326,10 @@ def persist_postgres(dataset: CcctDataset) -> None:
               query_count=EXCLUDED.query_count,
               raw_row_count=EXCLUDED.raw_row_count,
               source_uri=EXCLUDED.source_uri,
-              is_current=false
+              is_current=CASE
+                WHEN %s THEN false
+                ELSE knowledge_snapshots.is_current
+              END
             """,
             (
                 dataset.snapshot_id,
@@ -321,6 +337,7 @@ def persist_postgres(dataset: CcctDataset) -> None:
                 len(dataset.queries),
                 len(dataset.source_records),
                 URL,
+                make_current,
             ),
         )
         for batch in batches(dataset.documents):
@@ -406,10 +423,17 @@ def persist_postgres(dataset: CcctDataset) -> None:
                 """,
                 (dataset.snapshot_id, Jsonb(batch)),
             )
-        cur.execute(
-            "UPDATE knowledge_snapshots SET is_current=true WHERE snapshot_id=%s",
-            (dataset.snapshot_id,),
-        )
+        if make_current:
+            cur.execute(
+                "UPDATE knowledge_snapshots SET is_current=true WHERE snapshot_id=%s",
+                (dataset.snapshot_id,),
+            )
+
+    if cursor is not None:
+        persist(cursor)
+        return
+    with connect() as conn, conn.cursor() as cur:
+        persist(cur)
 
 
 def project_neo4j(dataset: CcctDataset) -> None:

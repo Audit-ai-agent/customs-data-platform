@@ -1,0 +1,153 @@
+{
+  "$id": "https://customs-data-platform.invalid/law_repository/schemas/hsk_ccct_official_archive.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Verified official HSK and CCCT archive manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "archive_as_of",
+    "collected_at",
+    "hsk",
+    "ccct"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "hsk-ccct-official-archive/v1"
+    },
+    "archive_as_of": {
+      "type": "string",
+      "format": "date"
+    },
+    "collected_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "hsk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "level_names",
+        "leaf_attributes"
+      ],
+      "properties": {
+        "level_names": {
+          "$ref": "#/$defs/hsk_asset"
+        },
+        "leaf_attributes": {
+          "$ref": "#/$defs/hsk_asset"
+        }
+      }
+    },
+    "ccct": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "official_uri",
+        "query_receipts",
+        "snapshot_id",
+        "query_count",
+        "empty_query_count",
+        "raw_row_count"
+      ],
+      "properties": {
+        "official_uri": {
+          "type": "string",
+          "pattern": "^https://apis[.]data[.]go[.]kr/1220000/retrieveCcctLworCd/[^?#]+$"
+        },
+        "query_receipts": {
+          "$ref": "#/$defs/local_receipt_asset"
+        },
+        "snapshot_id": {
+          "type": "string",
+          "pattern": "^ccct_[0-9a-f]{64}$"
+        },
+        "query_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "empty_query_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "raw_row_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  },
+  "$defs": {
+    "hsk_asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "official_uri",
+        "sha256",
+        "byte_size",
+        "published_at",
+        "effective_at"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "official_uri": {
+          "type": "string",
+          "pattern": "^https://(www[.])?data[.]go[.]kr/data/"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "byte_size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "published_at": {
+          "type": "string",
+          "format": "date"
+        },
+        "effective_at": {
+          "type": "string",
+          "format": "date"
+        }
+      }
+    },
+    "local_receipt_asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "byte_size",
+        "published_at",
+        "effective_at"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "byte_size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "published_at": {
+          "type": "string",
+          "format": "date"
+        },
+        "effective_at": {
+          "type": "string",
+          "format": "date"
+        }
+      }
+    }
+  }
+}

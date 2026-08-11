@@ -18,6 +18,7 @@ from src.evidence import (
     ItemEvidenceResult,
     RetrieveItem,
     RetrieveRequest,
+    TemporalCoverage,
     TemporalContext,
     retrieve_evidence,
 )
@@ -74,6 +75,7 @@ class RetrieveResponseV3(ContractModel):
     status: Literal["ok", "partial", "failed"]
     knowledge_snapshot_id: str | None
     temporal_context: TemporalContext | None = None
+    temporal_coverage: TemporalCoverage | None = None
     results: list[ItemEvidenceResult] = Field(max_length=100)
     errors: list[EvidenceError] = Field(default_factory=list)
 

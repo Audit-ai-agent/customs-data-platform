@@ -571,6 +571,17 @@
             }
           ],
           "default": null
+        },
+        "temporal_coverage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TemporalCoverage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -609,6 +620,43 @@
         "requirements_snapshot_as_of"
       ],
       "title": "TemporalContext",
+      "type": "object"
+    },
+    "TemporalCoverage": {
+      "additionalProperties": false,
+      "description": "Whether each independently dated source is verified for this request.\n\nDates alone are not a coverage claim.  In particular an unavailable\nhistorical HSK/CCCT archive keeps the retained baseline date visible in\n``temporal_context`` while this object prevents consumers from presenting\nit as an answer for the requested date.",
+      "properties": {
+        "hsk": {
+          "enum": [
+            "covered",
+            "unavailable"
+          ],
+          "title": "Hsk",
+          "type": "string"
+        },
+        "law": {
+          "enum": [
+            "covered",
+            "unavailable"
+          ],
+          "title": "Law",
+          "type": "string"
+        },
+        "requirements": {
+          "enum": [
+            "covered",
+            "unavailable"
+          ],
+          "title": "Requirements",
+          "type": "string"
+        }
+      },
+      "required": [
+        "law",
+        "hsk",
+        "requirements"
+      ],
+      "title": "TemporalCoverage",
       "type": "object"
     }
   },

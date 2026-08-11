@@ -55,6 +55,7 @@ pythonpath = [".", "law_repository"]
 testpaths = [
   "law_repository/tests/test_evidence.py",
   "law_repository/tests/test_ccct_p0.py",
+  "law_repository/tests/test_hsk_ccct_history.py",
   "law_repository/tests/test_evidence_v3.py",
   "law_repository/tests/test_evidence_v3_contract.py",
   "law_repository/tests/test_guidance_v3.py",
@@ -91,6 +92,7 @@ files = [
   "law_repository/src/conformance.py",
   "law_repository/src/evidence.py",
   "law_repository/src/evidence_v3.py",
+  "law_repository/src/hsk_ccct_history.py",
   "law_repository/src/guidance_registry.py",
   "law_repository/src/guidance_registry_v2.py",
   "law_repository/src/guidance_v3.py",
@@ -112,6 +114,7 @@ files = [
   "tools/dev_store.py",
   "tools/functional_uat_3law.py",
   "tools/functional_uat_law_history.py",
+  "tools/hsk_ccct_archive.py",
   "tools/functional_uat_kr_trade.py",
   "tools/benchmark_law_history_retrieval.py",
   "tools/run_dev_fixture_evidence.py",

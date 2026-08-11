@@ -42,6 +42,11 @@ from src.law_history import (  # noqa: E402
     validate_law_history_state,
     verify_law_history_store,
 )
+from src.hsk_ccct_history import (  # noqa: E402
+    ActiveArchiveCatalog,
+    HskCcctArchiveError,
+    capture_active_archive_catalog,
+)
 from src.local_profiles import (  # noqa: E402
     apply_functional_uat_law_history_runtime_environment,
     ensure_functional_uat_law_history_profile,
@@ -68,18 +73,30 @@ class _LawHistoryServiceBinding:
     manifest_sha256: str
     coverage_through: date
     retrieval_strategy: LawHistoryRetrievalStrategy
+    archive_catalog: ActiveArchiveCatalog
 
     def build_backend(self) -> FunctionalLawHistoryEvidenceBackend:
         return FunctionalLawHistoryEvidenceBackend(
             coverage_from=LAW_HISTORY_BASELINE_AS_OF,
             coverage_through=self.coverage_through,
             use_rerank=self.retrieval_strategy == "cross_encoder_rerank",
+            archive_catalog=self.archive_catalog,
         )
 
     def validate_runtime(self) -> None:
         """Refuse requests once the active manifest no longer matches startup."""
 
-        current = _capture_law_history_service_binding()
+        try:
+            # Startup already hash-verifies every large local XLSX/receipt.
+            # Request-time validation must remain bounded: the running
+            # backend reads PostgreSQL only, so compare the activation pointer
+            # and canonical manifests rather than rereading complete raw
+            # archive bytes for every Evidence request.
+            current = _capture_law_history_service_binding(verify_archive_assets=False)
+        except HskCcctArchiveError as exc:
+            # The activation pointer or a bound manifest is no longer valid.
+            # Expose a restart-only 503 without leaking a local path/error.
+            raise ProfileEvidenceRestartRequired("LAW_HISTORY_SERVICE_RESTART_REQUIRED") from exc
         if current != self:
             # Do not put manifest values or paths in the HTTP response.  The
             # profile layer maps this stable class to a restart-only 503.
@@ -87,7 +104,9 @@ class _LawHistoryServiceBinding:
 
 
 def _binding_from_manifest(
-    manifest: Mapping[str, object], manifest_sha256: str
+    manifest: Mapping[str, object],
+    manifest_sha256: str,
+    archive_catalog: ActiveArchiveCatalog,
 ) -> _LawHistoryServiceBinding:
     """Extract only the backend-affecting fields from an already verified manifest."""
 
@@ -103,14 +122,21 @@ def _binding_from_manifest(
         manifest_sha256=manifest_sha256,
         coverage_through=coverage_through,
         retrieval_strategy=cast(LawHistoryRetrievalStrategy, strategy_raw),
+        archive_catalog=archive_catalog,
     )
 
 
-def _capture_law_history_service_binding() -> _LawHistoryServiceBinding:
+def _capture_law_history_service_binding(
+    *, verify_archive_assets: bool = True
+) -> _LawHistoryServiceBinding:
     """Read a validated active manifest once, without mutating any profile state."""
 
     manifest, manifest_sha256 = validate_law_history_state()
-    return _binding_from_manifest(manifest, manifest_sha256)
+    return _binding_from_manifest(
+        manifest,
+        manifest_sha256,
+        capture_active_archive_catalog(verify_assets=verify_archive_assets),
+    )
 
 
 def _date(value: str) -> date:

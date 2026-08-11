@@ -75,6 +75,39 @@ timestamp. The profile verifies the exact tracked input bytes and their local
 PostgreSQL/Neo4j projections; it does not fabricate a separate agency receipt
 that is absent from those source files.
 
+### Dated HSK/CCCT archives
+
+An operator may add a genuinely dated official HSK/CCCT archive under the
+ignored `_local/data/official-archives/hsk-ccct/YYYY-MM-DD/` location. Its
+canonical `archive.manifest.json` binds two official HSK XLSX files and one
+complete page-by-page CCCT query-receipt file to official URI, byte size,
+SHA-256, published/effective dates, query count, empty-query count, and
+raw-row count. The importer has no downloader, service key, clone fallback,
+or current-ledger backfill:
+
+The exact safe input shape is checked in as
+`law_repository/schemas/hsk_ccct_official_archive.schema.json`; its runtime
+validator additionally requires canonical JSON bytes, local non-symlink
+paths, receipt hashes, page completeness, and provenance dates at or before
+the archive date. The schema is metadata only—no archive body or API key is
+tracked.
+
+```powershell
+uv run --locked --no-sync --group dev --extra store --extra ingestion python tools/hsk_ccct_archive.py validate --as-of 2026-01-01
+uv run --locked --no-sync --group dev --extra store --extra ingestion python tools/hsk_ccct_archive.py import --as-of 2026-01-01
+# An explicit second action is required before a service can use that date.
+uv run --locked --no-sync --group dev --extra store --extra ingestion python tools/hsk_ccct_archive.py activate --as-of 2026-01-01
+```
+
+Import writes immutable PostgreSQL HSK node versions and binds them to an
+archive CCCT snapshot; it never overwrites the current Neo4j HSK/Requirement
+projection. The service captures the active archive-pointer hash at startup
+and returns restart-required 503 if it changes. A date without an activated
+official archive is returned as `partial` with additive `temporal_coverage`
+(`law`, `hsk`, `requirements`); HSK/CCCT evidence is not substituted from the
+2026-08-05 baseline. The baseline itself remains the retained fixed-input
+compatibility date.
+
 The full source inventory remains in ignored local state.
 `verify-store` is the explicit full ID/hash comparison for Data maintenance;
 the regular UAT server uses lightweight source/cache/count checks. The CCCT
