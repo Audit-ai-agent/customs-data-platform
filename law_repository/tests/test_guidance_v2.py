@@ -10,8 +10,12 @@ import pytest
 
 from src.functional_uat_kr_trade import FunctionalUatKrTradeError
 from src.functional_uat_kr_trade_v2 import (
+    KR_TRADE_V2_CANDIDATE_APPROVAL_VERSION,
+    approve_kr_trade_v2_source_changes,
     build_kr_trade_v2_guidance_snapshot,
+    detect_kr_trade_v2_source_changes,
     inspect_kr_trade_v2_snapshot,
+    list_kr_trade_v2_snapshot_history,
     query_kr_trade_v2_guidance_v3,
     require_kr_trade_v2_retrieval_snapshot,
 )
@@ -428,3 +432,343 @@ def test_dev_fixture_can_return_v2_scope_without_calling_an_open_search() -> Non
     assert response.guidance_scope == "cost_risk_delivery_terms"
     assert response.results[0].source_kind == "development_fixture"
     assert response.results[0].uri.endswith("/trade_terms/cost_risk_delivery_terms")
+
+
+def _limit_detector_to_trade_terms(monkeypatch: pytest.MonkeyPatch) -> bytes:
+    """Keep detector tests local while preserving the registry-bound shape."""
+
+    import src.functional_uat_kr_trade_v2 as v2_module
+
+    source_id = "v2_kotra_trade_terms"
+    source = REGISTRY_V2_SOURCES_BY_ID[source_id]
+    raw = (
+        "공식 공개 안내\n인코텀즈는 비용과 위험 및 인도조건을 정리하는 정형화된 거래 조건입니다.\n"
+    ).encode("utf-8")
+    monkeypatch.setattr(v2_module, "REGISTRY_V2_SOURCES_BY_ID", {source_id: source})
+    monkeypatch.setattr(v2_module, "_fetch_allowlisted_official_source", lambda _source_id: raw)
+    return raw
+
+
+def test_v2_expected_snapshot_selects_immutable_history_instead_of_active_pointer(
+    tmp_path: Path,
+) -> None:
+    profile = ensure_functional_uat_kr_trade_profile(root=tmp_path)
+    first = _stage_trade_terms_build(profile, snapshot_id="krtrade-v2-history-one")
+    build_kr_trade_v2_guidance_snapshot(
+        staged_manifest_relative=first,
+        local_root_override=tmp_path,
+    )
+    second = _stage_trade_terms_build(profile, snapshot_id="krtrade-v2-history-two")
+    build_kr_trade_v2_guidance_snapshot(
+        staged_manifest_relative=second,
+        local_root_override=tmp_path,
+    )
+
+    selected = query_kr_trade_v2_guidance_v3(
+        _request(expected_snapshot_id="krtrade-v2-history-one"),
+        local_root_override=tmp_path,
+    )
+    active = query_kr_trade_v2_guidance_v3(_request(), local_root_override=tmp_path)
+    history = list_kr_trade_v2_snapshot_history(local_root_override=tmp_path)
+
+    assert selected.status == "covered"
+    assert selected.snapshot_id == "krtrade-v2-history-one"
+    assert active.snapshot_id == "krtrade-v2-history-two"
+    assert [(entry.snapshot.snapshot_id, entry.is_active) for entry in history] == [
+        ("krtrade-v2-history-one", False),
+        ("krtrade-v2-history-two", True),
+    ]
+
+
+def test_v2_expected_snapshot_fails_closed_when_its_immutable_manifest_is_missing(
+    tmp_path: Path,
+) -> None:
+    profile = ensure_functional_uat_kr_trade_profile(root=tmp_path)
+    staged_relative = _stage_trade_terms_build(profile)
+    build_kr_trade_v2_guidance_snapshot(
+        staged_manifest_relative=staged_relative,
+        local_root_override=tmp_path,
+    )
+
+    response = query_kr_trade_v2_guidance_v3(
+        _request(expected_snapshot_id="krtrade-v2-missing"),
+        local_root_override=tmp_path,
+    )
+
+    assert response.status == "failed"
+    assert response.coverage == "unavailable"
+    assert response.snapshot_id == "krtrade-v2-missing"
+    assert response.errors[0].code == "GUIDANCE_EXPECTED_SNAPSHOT_UNAVAILABLE"
+
+
+def test_v2_pointer_remains_on_the_prior_snapshot_when_activation_write_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import src.functional_uat_kr_trade_v2 as v2_module
+
+    profile = ensure_functional_uat_kr_trade_profile(root=tmp_path)
+    first = _stage_trade_terms_build(profile, snapshot_id="krtrade-v2-pointer-old")
+    build_kr_trade_v2_guidance_snapshot(
+        staged_manifest_relative=first,
+        local_root_override=tmp_path,
+    )
+    second = _stage_trade_terms_build(profile, snapshot_id="krtrade-v2-pointer-new")
+    original_replace = v2_module._replace_json
+
+    def _fail_active_pointer(path: Path, payload: dict[str, object]) -> None:
+        if path.name == "active-guidance-v2-snapshot.json":
+            raise FunctionalUatKrTradeError("KR_TRADE_V2_SNAPSHOT_WRITE_FAILED")
+        original_replace(path, payload)
+
+    monkeypatch.setattr(v2_module, "_replace_json", _fail_active_pointer)
+    with pytest.raises(FunctionalUatKrTradeError, match="KR_TRADE_V2_SNAPSHOT_WRITE_FAILED"):
+        build_kr_trade_v2_guidance_snapshot(
+            staged_manifest_relative=second,
+            local_root_override=tmp_path,
+        )
+
+    active = require_kr_trade_v2_retrieval_snapshot(local_root_override=tmp_path)
+    assert active.snapshot_id == "krtrade-v2-pointer-old"
+
+
+def test_v2_detector_requires_explicit_network_confirmation(tmp_path: Path) -> None:
+    with pytest.raises(
+        FunctionalUatKrTradeError,
+        match="KR_TRADE_V2_NETWORK_CONFIRMATION_REQUIRED",
+    ):
+        detect_kr_trade_v2_source_changes(
+            confirm_network=False,
+            local_root_override=tmp_path,
+        )
+
+
+def test_v2_detector_fetch_rejects_redirect_mime_and_oversized_responses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.functional_uat_kr_trade_v2 as v2_module
+
+    source_id = "v2_kotra_trade_terms"
+    source_uri = REGISTRY_V2_SOURCES_BY_ID[source_id].official_uri
+
+    class _Response:
+        def __init__(self, *, headers: dict[str, str], url: str, body: bytes) -> None:
+            self.headers = headers
+            self.status = 200
+            self._url = url
+            self._body = body
+            self._read = False
+
+        def __enter__(self) -> "_Response":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def geturl(self) -> str:
+            return self._url
+
+        def read(self, _size: int) -> bytes:
+            if self._read:
+                return b""
+            self._read = True
+            return self._body
+
+    class _Opener:
+        def __init__(self, response: _Response) -> None:
+            self.response = response
+
+        def open(self, *_args: object, **_kwargs: object) -> _Response:
+            return self.response
+
+    cases = [
+        (
+            _Response(
+                headers={"Content-Type": "text/html"},
+                url="https://redirect.invalid/target",
+                body=b"official text",
+            ),
+            "REDIRECT_REJECTED",
+        ),
+        (
+            _Response(
+                headers={"Content-Type": "application/json"},
+                url=source_uri,
+                body=b"{}",
+            ),
+            "MIME_INVALID",
+        ),
+        (
+            _Response(
+                headers={"Content-Type": "text/html", "Content-Length": str(16 * 1024 * 1024 + 1)},
+                url=source_uri,
+                body=b"",
+            ),
+            "SOURCE_TOO_LARGE",
+        ),
+    ]
+    for response, code in cases:
+        monkeypatch.setattr(
+            v2_module, "build_opener", lambda *_args, response=response: _Opener(response)
+        )
+        with pytest.raises(v2_module._SourceFetchError, match=code):
+            v2_module._fetch_allowlisted_official_source(source_id)
+
+
+def test_v2_detector_reports_unchanged_without_writing_a_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    profile = ensure_functional_uat_kr_trade_profile(root=tmp_path)
+    _limit_detector_to_trade_terms(monkeypatch)
+    # Reuse the normal build helper, which writes the same source bytes and
+    # establishes the active receipt hash that the detector compares.
+    staged_relative = _stage_trade_terms_build(profile)
+    build_kr_trade_v2_guidance_snapshot(
+        staged_manifest_relative=staged_relative,
+        local_root_override=tmp_path,
+    )
+
+    status = detect_kr_trade_v2_source_changes(
+        confirm_network=True,
+        local_root_override=tmp_path,
+        candidate_id="candidate-v2-unchanged",
+    )
+
+    assert status.status == "unchanged"
+    assert status.changed_source_count == 0
+    assert status.unavailable_source_count == 0
+    assert not (profile / "data" / "guidance-source-candidates" / "candidate-v2-unchanged").exists()
+
+
+def test_v2_detector_stages_unavailable_source_without_changing_active_pointer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import src.functional_uat_kr_trade_v2 as v2_module
+
+    profile = ensure_functional_uat_kr_trade_profile(root=tmp_path)
+    _limit_detector_to_trade_terms(monkeypatch)
+
+    def _unavailable(_source_id: str) -> bytes:
+        raise v2_module._SourceFetchError("MIME_INVALID")
+
+    monkeypatch.setattr(v2_module, "_fetch_allowlisted_official_source", _unavailable)
+    status = detect_kr_trade_v2_source_changes(
+        confirm_network=True,
+        local_root_override=tmp_path,
+        candidate_id="candidate-v2-unavailable",
+    )
+
+    assert status.status == "candidate_ready"
+    assert status.changed_source_count == 0
+    assert status.unavailable_source_count == 1
+    assert (
+        inspect_kr_trade_v2_snapshot(local_root_override=tmp_path).status == "source_build_required"
+    )
+    candidate = json.loads(
+        (
+            profile
+            / "data"
+            / "guidance-source-candidates"
+            / "candidate-v2-unavailable"
+            / "candidate.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert candidate["sources"][0]["status"] == "unavailable"
+    assert candidate["sources"][0]["error_code"] == "MIME_INVALID"
+
+
+def test_v2_candidate_approval_binds_exact_hash_and_activates_only_after_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    profile = ensure_functional_uat_kr_trade_profile(root=tmp_path)
+    _limit_detector_to_trade_terms(monkeypatch)
+    candidate_id = "candidate-v2-approval"
+    detection = detect_kr_trade_v2_source_changes(
+        confirm_network=True,
+        local_root_override=tmp_path,
+        candidate_id=candidate_id,
+    )
+    assert detection.status == "candidate_ready"
+    assert detection.candidate_sha256 is not None
+    candidate_manifest = json.loads(
+        (
+            profile / "data" / "guidance-source-candidates" / candidate_id / "candidate.json"
+        ).read_text(encoding="utf-8")
+    )
+    source_receipt = next(
+        item
+        for item in candidate_manifest["sources"]
+        if item["source_id"] == "v2_kotra_trade_terms"
+    )
+    excerpt = "인코텀즈는 비용과 위험 및 인도조건을 정리하는 정형화된 거래 조건입니다."
+    approval = {
+        "schema_version": KR_TRADE_V2_CANDIDATE_APPROVAL_VERSION,
+        "approval_id": "operator-approval-001",
+        "candidate_id": candidate_id,
+        "candidate_sha256": detection.candidate_sha256,
+        "snapshot_id": "krtrade-v2-approved",
+        "as_of": AS_OF.isoformat(),
+        "source_receipts": [
+            {
+                "source_id": "v2_kotra_trade_terms",
+                "source_uri": source_receipt["source_uri"],
+                "relative_path": source_receipt["relative_path"],
+                "sha256": source_receipt["sha256"],
+                "collected_at": "2026-08-11T00:00:00+00:00",
+                "bindings": [
+                    {
+                        "topic": "trade_terms",
+                        "scope": "cost_risk_delivery_terms",
+                        "directions": ["import", "export"],
+                    }
+                ],
+            }
+        ],
+        "guidance_records": [
+            {
+                "source_id": "v2_kotra_trade_terms",
+                "topic": "trade_terms",
+                "scope": "cost_risk_delivery_terms",
+                "direction": "both",
+                "excerpt": excerpt,
+            }
+        ],
+    }
+    _write(
+        profile,
+        f"data/guidance-source-candidates/{candidate_id}/approval-v2.json",
+        json.dumps(approval, ensure_ascii=False),
+    )
+
+    with pytest.raises(FunctionalUatKrTradeError, match="KR_TRADE_V2_APPROVAL_HASH_MISMATCH"):
+        approve_kr_trade_v2_source_changes(
+            candidate_id=candidate_id,
+            candidate_sha256="0" * 64,
+            approval_id="operator-approval-001",
+            local_root_override=tmp_path,
+        )
+    assert (
+        inspect_kr_trade_v2_snapshot(local_root_override=tmp_path).status == "source_build_required"
+    )
+
+    status = approve_kr_trade_v2_source_changes(
+        candidate_id=candidate_id,
+        candidate_sha256=detection.candidate_sha256,
+        approval_id="operator-approval-001",
+        local_root_override=tmp_path,
+    )
+
+    assert status.status == "ready"
+    assert status.snapshot_id == "krtrade-v2-approved"
+    snapshot = require_kr_trade_v2_retrieval_snapshot(local_root_override=tmp_path)
+    assert snapshot.approval_id == "operator-approval-001"
+    assert snapshot.candidate_id == candidate_id
+    assert snapshot.candidate_sha256 == detection.candidate_sha256
+
+    candidate_source = profile.joinpath(*Path(source_receipt["relative_path"]).parts)
+    candidate_source.write_text("변조", encoding="utf-8")
+    with pytest.raises(FunctionalUatKrTradeError, match="KR_TRADE_V2_SOURCE_HASH_MISMATCH"):
+        inspect_kr_trade_v2_snapshot(local_root_override=tmp_path)

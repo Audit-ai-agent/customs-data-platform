@@ -73,3 +73,12 @@ support the requested topic; it does not mean that no legal rule exists.
 The response `as_of` identifies the selected knowledge-snapshot reference
 date. It is not, by itself, a legal-effective-date assertion for a non-law
 agency guide; user interfaces must label it accordingly and must not infer one.
+
+For the V2 `functional-uat-kr-trade` profile, a caller may add
+`expected_snapshot_id` to pin an existing conversation to the immutable local
+snapshot that produced its earlier citation. When omitted, the active pointer
+remains the default for a new conversation. A missing, invalid, or changed
+selected snapshot fails closed; the provider never silently substitutes the
+current active snapshot. The V1 guidance profile accepts the additive request
+field for wire compatibility but returns a snapshot mismatch if it cannot
+select that exact ID.
