@@ -159,8 +159,7 @@ def test_manifest_rejects_malformed_port_and_pre_history_date(tmp_path: Path) ->
     official_host = ".".join(("a" + "pis", "data", "go", "kr"))
     malformed_port = "".join(("b", "ad"))
     ccct_manifest["official_uri"] = (
-        f"https://{official_host}:{malformed_port}/"
-        "1220000/retrieveCcctLworCd/getRetrieveCcctLworCd"
+        f"https://{official_host}:{malformed_port}/1220000/retrieveCcctLworCd/getRetrieveCcctLworCd"
     )
     _rewrite_manifest(archive, manifest)
 
