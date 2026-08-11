@@ -13,6 +13,7 @@ from src.evidence import (
     LawArticleMatch,
     RequirementLookup,
     RetrieveRequest,
+    TemporalCoverage,
     TemporalContext,
     TemporalEvidenceSupport,
     _effective_query_intent,
@@ -198,6 +199,158 @@ def test_law_history_availability_failure_keeps_three_date_context() -> None:
         hsk_snapshot_as_of=date(2026, 8, 5),
         requirements_snapshot_as_of=date(2026, 8, 5),
     )
+
+
+def test_archive_aware_history_never_substitutes_baseline_hsk_or_ccct_for_missing_date() -> None:
+    class ArchiveMissingBackend(FakeBackend):
+        def current_snapshot_id(self):
+            raise AssertionError("missing archive coverage must not query mutable CCCT state")
+
+        def temporal_evidence_support(self, _snapshot_id, review_as_of):
+            return TemporalEvidenceSupport(
+                context=TemporalContext(
+                    law_as_of=review_as_of,
+                    hsk_snapshot_as_of=date(2026, 8, 5),
+                    requirements_snapshot_as_of=date(2026, 8, 5),
+                ),
+                law_coverage_available=True,
+                requirements_lookup_as_of=date(2026, 8, 5),
+                temporal_coverage=TemporalCoverage(
+                    law="covered", hsk="unavailable", requirements="unavailable"
+                ),
+                hsk_coverage_available=False,
+                requirements_coverage_available=False,
+            )
+
+        def resolve_hsk(self, _code):
+            raise AssertionError("current HSK must not be used for an unavailable archive date")
+
+        def lookup_requirements(self, *_args):
+            raise AssertionError("baseline CCCT must not be substituted")
+
+    response = retrieve_evidence(_request(review_as_of=date(2026, 8, 7)), ArchiveMissingBackend())
+
+    assert response.status == "partial"
+    assert response.temporal_coverage == TemporalCoverage(
+        law="covered", hsk="unavailable", requirements="unavailable"
+    )
+    assert response.results[0].evidence == []
+    assert response.results[0].hs_resolution == "missing"
+    assert {error.code for error in response.results[0].errors} == {
+        "HSK_HISTORY_COVERAGE_MISSING",
+        "CCCT_HISTORY_COVERAGE_MISSING",
+    }
+
+
+def test_archive_missing_hsk_keeps_independently_covered_law_support() -> None:
+    class ArchiveMissingBackend(FakeBackend):
+        def current_snapshot_id(self):
+            raise AssertionError("missing archive coverage must not query mutable CCCT state")
+
+        def temporal_evidence_support(self, _snapshot_id, review_as_of):
+            return TemporalEvidenceSupport(
+                context=TemporalContext(
+                    law_as_of=review_as_of,
+                    hsk_snapshot_as_of=date(2026, 8, 5),
+                    requirements_snapshot_as_of=date(2026, 8, 5),
+                ),
+                law_coverage_available=True,
+                requirements_lookup_as_of=date(2026, 8, 5),
+                temporal_coverage=TemporalCoverage(
+                    law="covered", hsk="unavailable", requirements="unavailable"
+                ),
+                hsk_coverage_available=False,
+                requirements_coverage_available=False,
+            )
+
+        def resolve_hsk(self, _code):
+            raise AssertionError("current HSK must not be used for an unavailable archive date")
+
+        def lookup_requirements(self, *_args):
+            raise AssertionError("baseline CCCT must not be substituted")
+
+        def search_law_articles(self, _query, _top_k, as_of):
+            assert as_of == date(2026, 8, 7)
+            return (
+                LawArticleMatch(
+                    row={
+                        "article_pk": 226,
+                        "law_id": "001556",
+                        "law_name": "관세법",
+                        "hierarchy": "법률",
+                        "article_no": 22600,
+                        "paragraph_no": None,
+                        "item_no": None,
+                        "title": "허가·승인 등의 증명 및 확인",
+                        "content": "세관장은 수출입 요건을 확인하여야 한다.",
+                        "content_hash": "f" * 64,
+                        "version_mst": "mst-1",
+                        "valid_from": date(2026, 1, 1),
+                        "valid_to": None,
+                        "official_uri": "https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=123",
+                    },
+                    retrieval_methods=("dense", "bm25"),
+                    score=0.88,
+                    raw_scores={"dense": 0.7, "bm25": 2.1, "rrf": 0.03},
+                ),
+            )
+
+    response = retrieve_evidence(
+        _request(
+            review_as_of=date(2026, 8, 7),
+            query_intent="required_import_documents_and_law_support",
+        ),
+        ArchiveMissingBackend(),
+    )
+
+    assert response.status == "partial"
+    assert response.knowledge_snapshot_id is None
+    assert response.results[0].hs_resolution == "missing"
+    assert [evidence.source_type for evidence in response.results[0].evidence] == ["law_article"]
+    assert response.results[0].requirements_found is False
+
+
+def test_archive_aware_history_uses_bound_hsk_and_ccct_snapshot_at_requested_date() -> None:
+    class ArchiveBackend(FakeBackend):
+        def current_snapshot_id(self):
+            raise AssertionError("historical binding must not query mutable current snapshot")
+
+        def temporal_evidence_support(self, _snapshot_id, review_as_of):
+            return TemporalEvidenceSupport(
+                context=TemporalContext(
+                    law_as_of=review_as_of,
+                    hsk_snapshot_as_of=review_as_of,
+                    requirements_snapshot_as_of=review_as_of,
+                ),
+                law_coverage_available=True,
+                requirements_lookup_as_of=review_as_of,
+                temporal_coverage=TemporalCoverage(
+                    law="covered", hsk="covered", requirements="covered"
+                ),
+                hsk_snapshot_id="hsk_" + "b" * 64,
+                requirements_snapshot_id="ccct_archive_snapshot",
+            )
+
+        def resolve_hsk_as_of(self, code, review_as_of):
+            assert code == "0303540000"
+            assert review_as_of == date(2026, 8, 7)
+            return self.resolution
+
+        def lookup_requirements(self, snapshot_id, hsk10, trade_type, as_of):
+            assert snapshot_id == "ccct_archive_snapshot"
+            assert hsk10 == "0303540000"
+            assert trade_type == "import"
+            assert as_of == date(2026, 8, 7)
+            return self.lookup
+
+    response = retrieve_evidence(_request(review_as_of=date(2026, 8, 7)), ArchiveBackend())
+
+    assert response.status == "ok"
+    assert response.knowledge_snapshot_id == "ccct_archive_snapshot"
+    assert response.temporal_coverage == TemporalCoverage(
+        law="covered", hsk="covered", requirements="covered"
+    )
+    assert response.results[0].requirements_found is True
 
 
 def test_no_requirement_is_complete_only_when_query_was_covered():

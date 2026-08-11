@@ -69,12 +69,19 @@ def test_v3_response_accepts_only_a_complete_temporal_context() -> None:
             "hsk_snapshot_as_of": "2026-08-05",
             "requirements_snapshot_as_of": "2026-08-05",
         },
+        "temporal_coverage": {
+            "law": "covered",
+            "hsk": "unavailable",
+            "requirements": "unavailable",
+        },
         "results": [],
         "errors": [],
     }
     response = RetrieveResponseV3.model_validate(payload)
     assert response.temporal_context is not None
     assert response.temporal_context.law_as_of.isoformat() == "2026-08-06"
+    assert response.temporal_coverage is not None
+    assert response.temporal_coverage.requirements == "unavailable"
 
     payload["temporal_context"].pop("requirements_snapshot_as_of")
     try:

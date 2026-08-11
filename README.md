@@ -75,11 +75,14 @@ uv run --locked --no-sync --group dev --extra store --extra rag --extra ingestio
 Raw official bodies, version receipts, temporal vectors, and local model cache
 remain below `_local`; Git contains only the fixed candidate registry, schema,
 and verification code. Each response includes `temporal_context`: the legal
-date, the fixed `2026-08-05` HSK snapshot date, and the fixed requirements
-snapshot date. For a later legal date the latter two remain explicit and the
-Evidence result is `partial`; Data never disguises this as a same-date complete
-answer. `refresh --from YYYY-MM-DD --to YYYY-MM-DD` is an explicit operator
-operation only—there is no scheduler or polling path.
+date and selected HSK/requirements snapshot dates. Its additive
+`temporal_coverage` labels law, HSK, and requirements independently as
+`covered` or `unavailable`. The retained `2026-08-05` HSK/CCCT baseline remains
+explicit; a verified, explicitly activated official HSK/CCCT archive may cover
+only its exact archive date. Any uncovered date is `partial`, and Data never
+disguises it as a same-date complete answer. `refresh --from YYYY-MM-DD --to
+YYYY-MM-DD` is an explicit operator operation only—there is no scheduler or
+polling path.
 
 If a host is forcibly stopped during a refresh, serving remains fail-closed.
 The operator may run `recover-refresh --from ... --to ... --confirm-profile

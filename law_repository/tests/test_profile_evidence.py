@@ -1164,3 +1164,60 @@ def test_law_history_server_binding_returns_restart_503_before_evidence_dispatch
     assert response.status_code == 503
     assert response.json() == {"detail": "local Evidence profile restart required"}
     assert backend.retrieve_calls == 0
+
+
+def test_law_history_server_binding_rejects_active_hsk_ccct_pointer_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool = _law_history_uat_tool()
+    from src.hsk_ccct_history import ActiveArchiveCatalog
+
+    monkeypatch.setattr(
+        tool,
+        "validate_law_history_state",
+        lambda: (
+            {"coverage_through": "2026-08-05", "retrieval_strategy": "rrf_lexical"},
+            "a" * 64,
+        ),
+    )
+    captures = 0
+
+    def capture(**_kwargs: object) -> ActiveArchiveCatalog:
+        nonlocal captures
+        captures += 1
+        return ActiveArchiveCatalog(
+            pointer_sha256=("b" if captures == 1 else "c") * 64, archives=()
+        )
+
+    monkeypatch.setattr(tool, "capture_active_archive_catalog", capture)
+    binding = tool._capture_law_history_service_binding()
+
+    with pytest.raises(ProfileEvidenceRestartRequired, match="SERVICE_RESTART_REQUIRED"):
+        binding.validate_runtime()
+
+
+def test_law_history_server_binding_checks_pointer_on_each_request_without_rehashing_assets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool = _law_history_uat_tool()
+    from src.hsk_ccct_history import ActiveArchiveCatalog
+
+    monkeypatch.setattr(
+        tool,
+        "validate_law_history_state",
+        lambda: (
+            {"coverage_through": "2026-08-05", "retrieval_strategy": "rrf_lexical"},
+            "a" * 64,
+        ),
+    )
+    verification_modes: list[bool] = []
+
+    def capture(**_kwargs: object) -> ActiveArchiveCatalog:
+        verification_modes.append(bool(_kwargs["verify_assets"]))
+        return ActiveArchiveCatalog(pointer_sha256="b" * 64, archives=())
+
+    monkeypatch.setattr(tool, "capture_active_archive_catalog", capture)
+    binding = tool._capture_law_history_service_binding()
+
+    binding.validate_runtime()
+    assert verification_modes == [True, False]

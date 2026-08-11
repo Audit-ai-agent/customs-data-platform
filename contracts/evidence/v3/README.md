@@ -50,8 +50,12 @@ The default `functional-uat-law-history` `/retrieve` profile validates its
 active local receipts and temporal stores before each authenticated retrieval.
 Its additive `temporal_context` contains `law_as_of`,
 `hsk_snapshot_as_of`, and `requirements_snapshot_as_of`; all three are
-required when the object is present. A legal date different from the fixed
-HSK/requirements snapshot remains `partial`, never a hidden complete result.
+required when the object is present. Its additive `temporal_coverage` labels
+each `law`, `hsk`, and `requirements` component as `covered` or
+`unavailable`; consumers must use it with the dates and must never turn an
+unavailable baseline date into same-date evidence. A verified, explicitly
+activated official HSK/CCCT archive may cover its exact date. Any other legal
+date remains `partial`, never a hidden complete result.
 The retained `functional-uat-3law` response may omit this object for legacy
 compatibility. The legacy launcher still validates the active three-law source
 scope before every authenticated guidance request and returns only sources

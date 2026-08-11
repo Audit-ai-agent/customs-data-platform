@@ -131,6 +131,20 @@ class TemporalContext(ContractModel):
     requirements_snapshot_as_of: date
 
 
+class TemporalCoverage(ContractModel):
+    """Whether each independently dated source is verified for this request.
+
+    Dates alone are not a coverage claim.  In particular an unavailable
+    historical HSK/CCCT archive keeps the retained baseline date visible in
+    ``temporal_context`` while this object prevents consumers from presenting
+    it as an answer for the requested date.
+    """
+
+    law: Literal["covered", "unavailable"]
+    hsk: Literal["covered", "unavailable"]
+    requirements: Literal["covered", "unavailable"]
+
+
 class Evidence(ContractModel):
     evidence_id: EvidenceId
     source_record_id: str = Field(min_length=1, max_length=512)
@@ -189,6 +203,7 @@ class RetrieveResponse(ContractModel):
     status: Literal["ok", "partial", "failed"]
     knowledge_snapshot_id: NullableNonEmpty
     temporal_context: TemporalContext | None = None
+    temporal_coverage: TemporalCoverage | None = None
     results: list[ItemEvidenceResult] = Field(max_length=100)
     errors: list[EvidenceError] = Field(
         default_factory=list,
@@ -217,6 +232,14 @@ class TemporalEvidenceSupport:
     context: TemporalContext
     law_coverage_available: bool
     requirements_lookup_as_of: date
+    # ``None`` preserves the retained 3-law and prior law-history test
+    # backends.  Archive-aware law history always supplies the explicit
+    # three-component public coverage object.
+    temporal_coverage: TemporalCoverage | None = None
+    hsk_coverage_available: bool = True
+    requirements_coverage_available: bool = True
+    hsk_snapshot_id: str | None = None
+    requirements_snapshot_id: str | None = None
 
 
 class EvidenceBackend(Protocol):
@@ -726,7 +749,34 @@ def _law_history_temporal_support(
         raise RuntimeError("LAW_HISTORY_TEMPORAL_SUPPORT_INVALID")
     if support.context.law_as_of != review_as_of:
         raise RuntimeError("LAW_HISTORY_TEMPORAL_CONTEXT_INVALID")
+    if support.temporal_coverage is not None and (
+        support.temporal_coverage.law
+        != ("covered" if support.law_coverage_available else "unavailable")
+        or support.temporal_coverage.hsk
+        != ("covered" if support.hsk_coverage_available else "unavailable")
+        or support.temporal_coverage.requirements
+        != ("covered" if support.requirements_coverage_available else "unavailable")
+    ):
+        raise RuntimeError("LAW_HISTORY_TEMPORAL_COVERAGE_INVALID")
+    if support.requirements_snapshot_id is not None and not support.requirements_snapshot_id:
+        raise RuntimeError("LAW_HISTORY_TEMPORAL_SUPPORT_INVALID")
     return support
+
+
+def _resolve_hsk_for_review_date(
+    backend: EvidenceBackend,
+    code: str | None,
+    review_as_of: date,
+) -> repository.HskResolution:
+    """Use a profile's archived HSK snapshot only when it explicitly opts in."""
+
+    resolver = getattr(backend, "resolve_hsk_as_of", None)
+    if callable(resolver):
+        value = resolver(code, review_as_of)
+        if not isinstance(value, repository.HskResolution):
+            raise RuntimeError("HSK_HISTORY_RESOLUTION_INVALID")
+        return value
+    return backend.resolve_hsk(code)
 
 
 def retrieve_evidence(
@@ -752,49 +802,78 @@ def retrieve_evidence(
             errors=[err],
         )
     temporal_context = history_support.context if history_support is not None else None
-    try:
-        snapshot_id = backend.current_snapshot_id()
-    except Exception as exc:  # DB 장애를 근거 0건으로 오해하지 않도록 계약 응답화
-        code = (
-            "KNOWLEDGE_SNAPSHOT_MISMATCH"
-            if isinstance(exc, KnowledgeSnapshotMismatch)
-            else "KNOWLEDGE_STORE_UNAVAILABLE"
-        )
-        err = _backend_error(code)
-        return RetrieveResponse(
-            schema_version=SCHEMA_VERSION,
-            request_id=request.request_id,
-            status="failed",
-            knowledge_snapshot_id=None,
-            temporal_context=temporal_context,
-            results=_unavailable_results(request, err),
-            errors=[err],
-        )
-    if not snapshot_id:
-        err = _error("KNOWLEDGE_SNAPSHOT_MISSING", "현행 CCCT knowledge snapshot이 없음")
-        return RetrieveResponse(
-            schema_version=SCHEMA_VERSION,
-            request_id=request.request_id,
-            status="failed",
-            knowledge_snapshot_id=None,
-            temporal_context=temporal_context,
-            results=_unavailable_results(request, err),
-            errors=[err],
-        )
+    temporal_coverage = history_support.temporal_coverage if history_support is not None else None
+    # A missing historical CCCT archive is a known, non-retryable coverage
+    # boundary.  It must not depend on today's mutable current snapshot just
+    # to report that boundary: the caller can still receive independently
+    # covered law evidence (when HSK is also archived) with a ``partial``
+    # result.  For every covered-requirements path, retain the established
+    # snapshot lookup and consistency checks.
+    requirements_coverage_available_at_start = (
+        history_support.requirements_coverage_available if history_support is not None else True
+    )
+    if history_support is not None and not requirements_coverage_available_at_start:
+        snapshot_id: str | None = None
+    else:
+        try:
+            # An active historical archive has a verified PostgreSQL binding
+            # and deliberately has no Neo4j current-graph projection.  Do
+            # not make a historical archive lookup depend on the mutable
+            # current graph.
+            snapshot_id = (
+                history_support.requirements_snapshot_id
+                if history_support is not None
+                and history_support.requirements_snapshot_id is not None
+                else backend.current_snapshot_id()
+            )
+        except Exception as exc:  # DB 장애를 근거 0건으로 오해하지 않도록 계약 응답화
+            code = (
+                "KNOWLEDGE_SNAPSHOT_MISMATCH"
+                if isinstance(exc, KnowledgeSnapshotMismatch)
+                else "KNOWLEDGE_STORE_UNAVAILABLE"
+            )
+            err = _backend_error(code)
+            return RetrieveResponse(
+                schema_version=SCHEMA_VERSION,
+                request_id=request.request_id,
+                status="failed",
+                knowledge_snapshot_id=None,
+                temporal_context=temporal_context,
+                temporal_coverage=temporal_coverage,
+                results=_unavailable_results(request, err),
+                errors=[err],
+            )
+        if not snapshot_id:
+            err = _error("KNOWLEDGE_SNAPSHOT_MISSING", "현행 CCCT knowledge snapshot이 없음")
+            return RetrieveResponse(
+                schema_version=SCHEMA_VERSION,
+                request_id=request.request_id,
+                status="failed",
+                knowledge_snapshot_id=None,
+                temporal_context=temporal_context,
+                temporal_coverage=temporal_coverage,
+                results=_unavailable_results(request, err),
+                errors=[err],
+            )
 
-    try:
-        supported_as_of = backend.snapshot_effective_date(snapshot_id)
-    except Exception:
-        err = _backend_error("KNOWLEDGE_SNAPSHOT_METADATA_UNAVAILABLE")
-        return RetrieveResponse(
-            schema_version=SCHEMA_VERSION,
-            request_id=request.request_id,
-            status="failed",
-            knowledge_snapshot_id=snapshot_id,
-            temporal_context=temporal_context,
-            results=_unavailable_results(request, err),
-            errors=[err],
-        )
+    if history_support is None:
+        assert snapshot_id is not None
+        try:
+            supported_as_of = backend.snapshot_effective_date(snapshot_id)
+        except Exception:
+            err = _backend_error("KNOWLEDGE_SNAPSHOT_METADATA_UNAVAILABLE")
+            return RetrieveResponse(
+                schema_version=SCHEMA_VERSION,
+                request_id=request.request_id,
+                status="failed",
+                knowledge_snapshot_id=snapshot_id,
+                temporal_context=temporal_context,
+                temporal_coverage=temporal_coverage,
+                results=_unavailable_results(request, err),
+                errors=[err],
+            )
+    else:
+        supported_as_of = history_support.requirements_lookup_as_of
     # The legacy profile remains deliberately one-date only.  A law-history
     # profile owns a verified legal date range and keeps the retained HSK /
     # CCCT snapshot date visible through ``temporal_context`` instead.
@@ -813,6 +892,7 @@ def retrieve_evidence(
             status="failed",
             knowledge_snapshot_id=snapshot_id,
             temporal_context=temporal_context,
+            temporal_coverage=temporal_coverage,
             results=_unsupported_as_of_results(request, backend, err),
             errors=[err],
         )
@@ -827,11 +907,17 @@ def retrieve_evidence(
     law_coverage_available = (
         history_support.law_coverage_available if history_support is not None else True
     )
+    hsk_coverage_available = (
+        history_support.hsk_coverage_available if history_support is not None else True
+    )
+    requirements_coverage_available = (
+        history_support.requirements_coverage_available if history_support is not None else True
+    )
     temporal_item_errors: list[EvidenceError] = []
     temporal_top_errors: list[EvidenceError] = []
     partial = False
     if history_support is not None:
-        if requirements_as_of != request.review_as_of:
+        if requirements_coverage_available and requirements_as_of != request.review_as_of:
             mismatch = _error(
                 "TEMPORAL_REQUIREMENT_SNAPSHOT_MISMATCH",
                 (
@@ -856,9 +942,75 @@ def retrieve_evidence(
             temporal_item_errors.append(unavailable)
             temporal_top_errors.append(unavailable)
             partial = True
+        if not hsk_coverage_available:
+            unavailable = _error(
+                "HSK_HISTORY_COVERAGE_MISSING",
+                (
+                    "요청 HSK 기준일의 검증된 공식 archive가 없습니다: "
+                    f"hsk_as_of={request.review_as_of.isoformat()}"
+                ),
+                retryable=False,
+            )
+            temporal_item_errors.append(unavailable)
+            temporal_top_errors.append(unavailable)
+            partial = True
+        if not requirements_coverage_available:
+            unavailable = _error(
+                "CCCT_HISTORY_COVERAGE_MISSING",
+                (
+                    "요청 요건 기준일의 검증된 공식 archive가 없습니다: "
+                    f"requirements_as_of={request.review_as_of.isoformat()}"
+                ),
+                retryable=False,
+            )
+            temporal_item_errors.append(unavailable)
+            temporal_top_errors.append(unavailable)
+            partial = True
     for item in request.items:
+        if not hsk_coverage_available:
+            # Never resolve against today's Neo4j master and present it as an
+            # archive-date answer.  HSK candidates and CCCT requirements are
+            # absent in this state.  Independently covered law support may
+            # still be returned because the procedural law query does not
+            # rely on an HSK resolution.  Do not label a caller-provided code
+            # ``invalid``: that conclusion requires the unavailable archive.
+            # ``missing`` here means that this result has no resolvable HSK
+            # value, while the stable coverage error carries the reason.
+            archive_item_errors = list(temporal_item_errors)
+            hsk_unavailable_law_evidence: list[Evidence] = []
+            destination_error, may_lookup_korean_requirements = _destination_coverage(request, item)
+            if destination_error is not None:
+                archive_item_errors.append(destination_error)
+            if (
+                may_lookup_korean_requirements
+                and "law_support" in query_intent
+                and law_coverage_available
+            ):
+                try:
+                    matches = backend.search_law_articles(
+                        _law_query(request, item, ""), request.top_k, request.review_as_of
+                    )
+                    hsk_unavailable_law_evidence = [
+                        _law_match_to_evidence(item.item_id, request.trade_type, match)
+                        for match in matches
+                    ]
+                except Exception:
+                    archive_item_errors.append(_backend_error("LAW_RETRIEVAL_FAILED"))
+            results.append(
+                ItemEvidenceResult(
+                    item_id=item.item_id,
+                    hs_resolution="missing",
+                    resolved_hsk10=None,
+                    candidate_hsk10s=[],
+                    coverage="partial",
+                    requirements_found=False,
+                    evidence=hsk_unavailable_law_evidence,
+                    errors=archive_item_errors,
+                )
+            )
+            continue
         try:
-            resolution = backend.resolve_hsk(item.hs_code)
+            resolution = _resolve_hsk_for_review_date(backend, item.hs_code, request.review_as_of)
         except Exception:
             partial = True
             err = _backend_error("HS_MASTER_UNAVAILABLE")
@@ -885,7 +1037,7 @@ def retrieve_evidence(
             }[resolution.status]
             message = {
                 "missing": "HS Code가 없어 요건 커버리지를 확정할 수 없음",
-                "invalid": "HS Code가 현행 HSK leaf로 해소되지 않음",
+                "invalid": "HS Code가 선택된 HSK leaf로 해소되지 않음",
                 "ambiguous": "HS6의 HSK10 하위 leaf가 여러 개라 자동 확정할 수 없음",
             }[resolution.status]
             results.append(
@@ -920,7 +1072,41 @@ def retrieve_evidence(
             )
             continue
 
+        if not requirements_coverage_available:
+            # HSK itself may be archived while CCCT is not.  Law support can
+            # still be returned only from the independently covered law
+            # history; no current/baseline CCCT row is substituted.
+            archived_law_evidence: list[Evidence] = []
+            archive_item_errors = list(temporal_item_errors)
+            if "law_support" in query_intent and law_coverage_available:
+                try:
+                    matches = backend.search_law_articles(
+                        _law_query(request, item, resolution.resolved_hsk10),
+                        request.top_k,
+                        request.review_as_of,
+                    )
+                    archived_law_evidence = [
+                        _law_match_to_evidence(item.item_id, request.trade_type, match)
+                        for match in matches
+                    ]
+                except Exception:
+                    archive_item_errors.append(_backend_error("LAW_RETRIEVAL_FAILED"))
+            results.append(
+                ItemEvidenceResult(
+                    item_id=item.item_id,
+                    hs_resolution=resolution.status,
+                    resolved_hsk10=resolution.resolved_hsk10,
+                    candidate_hsk10s=list(resolution.candidate_hsk10s),
+                    coverage="partial",
+                    requirements_found=False,
+                    evidence=archived_law_evidence,
+                    errors=archive_item_errors,
+                )
+            )
+            continue
+
         try:
+            assert snapshot_id is not None
             lookup = backend.lookup_requirements(
                 snapshot_id, resolution.resolved_hsk10, request.trade_type, requirements_as_of
             )
@@ -1025,6 +1211,7 @@ def retrieve_evidence(
         status="partial" if partial else "ok",
         knowledge_snapshot_id=snapshot_id,
         temporal_context=temporal_context,
+        temporal_coverage=temporal_coverage,
         results=results,
         errors=top_errors,
     )
