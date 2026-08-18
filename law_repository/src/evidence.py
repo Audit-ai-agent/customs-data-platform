@@ -385,6 +385,27 @@ class DatabaseEvidenceBackend:
             "supported_review_as_of": self.snapshot_effective_date(snapshot_id),
         }
 
+    def list_laws(self, as_of: date) -> list[dict]:
+        """The statutes this store can search, with article counts valid at as_of.
+
+        A read-only reference catalog for the Browser's law-search screen; it
+        carries no requirement, release, or approval meaning.
+        """
+
+        with connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT l.law_id, l.law_name, l.hierarchy, count(a.id) AS article_count
+                FROM laws l JOIN law_articles a USING (law_id)
+                WHERE a.valid_from <= %s
+                  AND (a.valid_to IS NULL OR a.valid_to > %s)
+                GROUP BY l.law_id, l.law_name, l.hierarchy
+                ORDER BY l.law_name, l.law_id
+                """,
+                (as_of, as_of),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
     def search_law_articles(
         self, query: str, top_k: int, as_of: date
     ) -> tuple[LawArticleMatch, ...]:

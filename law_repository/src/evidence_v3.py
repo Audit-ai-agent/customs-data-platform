@@ -92,4 +92,129 @@ def retrieve_evidence_v3(
     return RetrieveResponseV3.model_validate(payload)
 
 
-__all__ = ["RetrieveRequestV3", "RetrieveResponseV3", "retrieve_evidence_v3"]
+class LawSearchRequestV3(ContractModel):
+    """One free-text search over the loaded statute store.
+
+    This is a read-only reference lookup for a human reviewer.  It carries no
+    case, item, or HS meaning and never contributes to a review result.
+    """
+
+    schema_version: Literal["3.0"]
+    request_id: NonEmpty128
+    query: str = Field(min_length=1, max_length=200)
+    top_k: int = Field(ge=1, le=20)
+    as_of: date
+
+
+class LawSearchMatchV3(ContractModel):
+    law_id: str | None = Field(default=None, max_length=128)
+    law_name: str = Field(min_length=1, max_length=400)
+    article_no: str | None = Field(default=None, max_length=64)
+    title: str = Field(min_length=1, max_length=1000)
+    text: str = Field(min_length=1)
+    source_uri: str = Field(min_length=1, max_length=2000)
+    valid_from: date | None
+    valid_to: date | None
+    score: float = Field(ge=0.0, le=1.0)
+
+
+class LawSearchResponseV3(ContractModel):
+    schema_version: Literal["3.0"]
+    request_id: NonEmpty128
+    status: Literal["ok"]
+    as_of: date
+    results: list[LawSearchMatchV3] = Field(max_length=20)
+
+
+class LawCatalogRequestV3(ContractModel):
+    schema_version: Literal["3.0"]
+    request_id: NonEmpty128
+    as_of: date
+
+
+class LawCatalogEntryV3(ContractModel):
+    law_id: NonEmpty128
+    law_name: str = Field(min_length=1, max_length=400)
+    hierarchy: str | None = Field(default=None, max_length=200)
+    article_count: int = Field(ge=0)
+
+
+class LawCatalogResponseV3(ContractModel):
+    schema_version: Literal["3.0"]
+    request_id: NonEmpty128
+    status: Literal["ok"]
+    as_of: date
+    laws: list[LawCatalogEntryV3] = Field(max_length=500)
+
+
+def search_laws_v3(request: LawSearchRequestV3, backend: EvidenceBackend) -> LawSearchResponseV3:
+    """Free-text statute search reusing the retrieval branch's own conversion."""
+
+    from src.evidence import _law_match_to_evidence
+
+    matches = backend.search_law_articles(request.query, request.top_k, request.as_of)
+    results: list[LawSearchMatchV3] = []
+    for match in matches[: request.top_k]:
+        # The converter owns article labelling, official-URI verification, and
+        # the closed-interval valid_to convention.  The item/trade fields it
+        # requires have no meaning for a reference search and are not copied.
+        evidence = _law_match_to_evidence("law-search", "import", match)
+        results.append(
+            LawSearchMatchV3(
+                law_id=evidence.law_id,
+                law_name=evidence.law_name or evidence.title,
+                article_no=evidence.article_no,
+                title=evidence.title,
+                text=evidence.text,
+                source_uri=str(evidence.source_uri),
+                valid_from=evidence.valid_from,
+                valid_to=evidence.valid_to,
+                score=float(evidence.score or 0.0),
+            )
+        )
+    return LawSearchResponseV3(
+        schema_version="3.0",
+        request_id=request.request_id,
+        status="ok",
+        as_of=request.as_of,
+        results=results,
+    )
+
+
+def law_catalog_v3(request: LawCatalogRequestV3, backend: EvidenceBackend) -> LawCatalogResponseV3:
+    """List the statutes the loaded store can search, with live article counts."""
+
+    lister = getattr(backend, "list_laws", None)
+    if not callable(lister):
+        raise RuntimeError("law catalog is unavailable on this Evidence backend")
+    laws = [
+        LawCatalogEntryV3(
+            law_id=str(row["law_id"]),
+            law_name=str(row["law_name"]),
+            hierarchy=(str(row["hierarchy"]) if row.get("hierarchy") else None),
+            article_count=int(row["article_count"]),
+        )
+        for row in lister(request.as_of)
+    ]
+    return LawCatalogResponseV3(
+        schema_version="3.0",
+        request_id=request.request_id,
+        status="ok",
+        as_of=request.as_of,
+        laws=laws,
+    )
+
+
+__all__ = [
+    "LawCatalogEntryV3",
+    "LawCatalogRequestV3",
+    "LawCatalogResponseV3",
+    "LawSearchMatchV3",
+    "LawSearchRequestV3",
+    "LawSearchResponseV3",
+    "RetrieveRequestV3",
+    "RetrieveResponseV3",
+    "law_catalog_v3",
+    "retrieve_evidence_v3",
+    "search_laws_v3",
+]

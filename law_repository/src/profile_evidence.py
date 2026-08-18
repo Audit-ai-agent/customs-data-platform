@@ -19,9 +19,15 @@ from fastapi.responses import JSONResponse
 from src.conformance import TestOnlyConformanceEvidenceBackend
 from src.evidence import ReadinessBackend
 from src.evidence_v3 import (
+    LawCatalogRequestV3,
+    LawCatalogResponseV3,
+    LawSearchRequestV3,
+    LawSearchResponseV3,
     RetrieveRequestV3,
     RetrieveResponseV3,
+    law_catalog_v3,
     retrieve_evidence_v3,
+    search_laws_v3,
 )
 from src.guidance_v3 import (
     GeneralGuidanceQueryRequestV3,
@@ -157,6 +163,54 @@ def create_profile_evidence_application(
                 payload,
                 backend,
             )
+        except HTTPException:
+            raise
+        except ProfileEvidenceRestartRequired:
+            raise
+        except Exception as exc:
+            raise ProfileEvidenceError(type(exc).__name__) from None
+        response.headers["X-Request-ID"] = payload.request_id
+        return result
+
+    @app.post("/internal/rag/v3/law-search", response_model=LawSearchResponseV3)
+    def law_search(
+        payload: LawSearchRequestV3,
+        request: Request,
+        response: Response,
+    ) -> LawSearchResponseV3:
+        """Free-text statute search for a human reviewer's reference screen.
+
+        It reads the same loaded store as retrieval but carries no case, HS,
+        or requirement meaning and never contributes to a review result.
+        """
+
+        _authenticate_and_check_mode(request, token=service_token, mode=mode)
+        try:
+            if runtime_state_validator is not None:
+                runtime_state_validator()
+            result = search_laws_v3(payload, backend)
+        except HTTPException:
+            raise
+        except ProfileEvidenceRestartRequired:
+            raise
+        except Exception as exc:
+            raise ProfileEvidenceError(type(exc).__name__) from None
+        response.headers["X-Request-ID"] = payload.request_id
+        return result
+
+    @app.post("/internal/rag/v3/law-catalog", response_model=LawCatalogResponseV3)
+    def law_catalog(
+        payload: LawCatalogRequestV3,
+        request: Request,
+        response: Response,
+    ) -> LawCatalogResponseV3:
+        """List the statutes the loaded store can search."""
+
+        _authenticate_and_check_mode(request, token=service_token, mode=mode)
+        try:
+            if runtime_state_validator is not None:
+                runtime_state_validator()
+            result = law_catalog_v3(payload, backend)
         except HTTPException:
             raise
         except ProfileEvidenceRestartRequired:
