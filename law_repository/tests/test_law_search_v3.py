@@ -61,7 +61,12 @@ class _SearchableBackend(TestOnlyConformanceEvidenceBackend):
         assert as_of == date(2026, 8, 5)
         return [
             {"law_id": "LAW-226", "law_name": "관세법", "hierarchy": "법률", "article_count": 280},
-            {"law_id": "LAW-DEC", "law_name": "관세법 시행령", "hierarchy": "대통령령", "article_count": 190},
+            {
+                "law_id": "LAW-DEC",
+                "law_name": "관세법 시행령",
+                "hierarchy": "대통령령",
+                "article_count": 190,
+            },
         ]
 
 
