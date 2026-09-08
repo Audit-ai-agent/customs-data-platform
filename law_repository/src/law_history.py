@@ -857,7 +857,9 @@ def _profile_source_file(profile: Path, relative: str) -> Path:
     opened or hashed.
     """
 
-    value = Path(relative)
+    # Receipts written on Windows carry backslash separators; resolve them
+    # identically on POSIX so a profile built on one platform verifies on another.
+    value = Path(relative.replace("\\", "/"))
     if (
         not relative
         or relative.startswith(("/", "\\"))
