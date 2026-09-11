@@ -132,8 +132,23 @@ def test_law_catalog_lists_searchable_statutes() -> None:
     assert body["laws"][0]["article_count"] == 280
 
 
-def test_law_catalog_fails_closed_without_backend_support() -> None:
+class _NoCatalogBackend(TestOnlyConformanceEvidenceBackend):
+    list_laws = None
+
+
+def test_dev_fixture_law_catalog_is_empty_not_unavailable() -> None:
     client = _client(TestOnlyConformanceEvidenceBackend(effective_date=date(2026, 8, 5)))
+    response = client.post(
+        "/internal/rag/v3/law-catalog",
+        json={"schema_version": "3.0", "request_id": "req-cat-3", "as_of": "2026-08-05"},
+        headers=_headers(),
+    )
+    assert response.status_code == 200
+    assert response.json()["laws"] == []
+
+
+def test_law_catalog_fails_closed_without_backend_support() -> None:
+    client = _client(_NoCatalogBackend(effective_date=date(2026, 8, 5)))
     response = client.post(
         "/internal/rag/v3/law-catalog",
         json={"schema_version": "3.0", "request_id": "req-cat-2", "as_of": "2026-08-05"},

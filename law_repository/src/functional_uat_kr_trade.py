@@ -201,7 +201,9 @@ def _active_pointer_payload(snapshot_id: str) -> dict[str, object]:
 
 
 def _safe_profile_file(profile: Path, relative: str) -> Path:
-    value = Path(relative)
+    # Receipts written on Windows carry backslash separators; resolve them
+    # identically on POSIX so a snapshot built on one platform verifies on another.
+    value = Path(relative.replace("\\", "/"))
     if (
         not relative
         or value.is_absolute()

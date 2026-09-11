@@ -125,3 +125,8 @@ class TestOnlyConformanceEvidenceBackend:
         as_of: date,
     ) -> tuple[LawArticleMatch, ...]:
         return ()
+
+    def list_laws(self, as_of: date) -> list[dict]:
+        # The fixture loads no statute text, so its searchable catalog is empty
+        # rather than unavailable; this matches search_law_articles above.
+        return []

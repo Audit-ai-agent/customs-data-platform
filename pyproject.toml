@@ -72,6 +72,7 @@ testpaths = [
   "law_repository/tests/test_lawgo_security.py",
   "law_repository/tests/test_repository_unit.py",
   "law_repository/tests/test_store_consistency.py",
+  "law_repository/tests/test_law_search_v3.py",
 ]
 markers = [
   "live: requires initialized PostgreSQL, Qdrant, and Neo4j services",

@@ -772,3 +772,17 @@ def test_v2_candidate_approval_binds_exact_hash_and_activates_only_after_validat
     candidate_source.write_text("변조", encoding="utf-8")
     with pytest.raises(FunctionalUatKrTradeError, match="KR_TRADE_V2_SOURCE_HASH_MISMATCH"):
         inspect_kr_trade_v2_snapshot(local_root_override=tmp_path)
+
+
+def test_windows_written_receipt_paths_resolve_on_every_platform(tmp_path: Path) -> None:
+    from src import functional_uat_kr_trade, functional_uat_kr_trade_v2
+
+    expected = tmp_path / "data" / "guidance-sources" / "run" / "page.html"
+    windows_relative = "data\\guidance-sources\\run\\page.html"
+    assert functional_uat_kr_trade._safe_profile_file(tmp_path, windows_relative) == expected
+    assert functional_uat_kr_trade_v2._safe_profile_file(tmp_path, windows_relative) == expected
+    for unsafe in ("\\data\\guidance-sources\\x", "data\\guidance-sources\\..\\..\\x"):
+        with pytest.raises(FunctionalUatKrTradeError):
+            functional_uat_kr_trade._safe_profile_file(tmp_path, unsafe)
+        with pytest.raises(FunctionalUatKrTradeError):
+            functional_uat_kr_trade_v2._safe_profile_file(tmp_path, unsafe)

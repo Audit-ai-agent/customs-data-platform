@@ -275,7 +275,9 @@ def _safe_profile_file(
         "guidance-sources", "guidance-source-candidates"
     ] = "guidance-sources",
 ) -> Path:
-    value = Path(relative)
+    # Receipts written on Windows carry backslash separators; resolve them
+    # identically on POSIX so a snapshot built on one platform verifies on another.
+    value = Path(relative.replace("\\", "/"))
     if (
         not relative
         or value.is_absolute()
