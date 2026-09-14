@@ -19,6 +19,7 @@ store = [
 rag = [
   "FlagEmbedding>=1.3",
   "huggingface-hub>=0.23,<2",
+  "kiwipiepy>=0.18",
   "numpy>=1.26,<3",
   "torch>=2.0",
 ]
@@ -67,6 +68,8 @@ testpaths = [
   "law_repository/tests/test_model_identity.py",
   "law_repository/tests/test_github_workflow_security.py",
   "law_repository/tests/test_bm25.py",
+  "law_repository/tests/test_bm25_kiwi.py",
+  "law_repository/tests/test_retrieval_five_stage.py",
   "law_repository/tests/test_graph_unit.py",
   "law_repository/tests/test_hybrid_unit.py",
   "law_repository/tests/test_lawgo_security.py",
@@ -101,6 +104,7 @@ files = [
   "law_repository/src/functional_uat.py",
   "law_repository/src/law_history.py",
   "law_repository/src/law_history_benchmark.py",
+  "law_repository/src/retrieval_five_stage.py",
   "law_repository/src/functional_uat_kr_trade.py",
   "law_repository/src/functional_uat_kr_trade_v2.py",
   "law_repository/src/ingest/laws.py",

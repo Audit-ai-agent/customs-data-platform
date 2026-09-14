@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from src import repository
+from src import retrieval_five_stage as five_stage
 from src.evidence import (
     DatabaseEvidenceBackend,
     LawArticleMatch,
@@ -72,6 +73,16 @@ _MUTATION_LOCK_NAME = ".law-history-mutation.lock"
 _SOURCE_BATCH_MANIFEST_NAME = "source-manifest.json"
 _WINERROR_INVALID_PARAMETER = 87
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+# ``rrf_lexical`` is the unbenchmarked baseline.  ``cross_encoder_rerank`` may
+# only be bound by an explicit benchmark apply.  ``five_stage_cpu`` (rewrite →
+# weighted RRF → DELEGATES graph → CPU rerank → z-blend) is the documented
+# product pipeline; it degrades honestly to the RRF order when the reranker or
+# graph is unavailable, so an operator may bind it at build time and a later
+# benchmark apply may attach its measurement digest.
+LawHistoryRetrievalStrategy = Literal["rrf_lexical", "cross_encoder_rerank", "five_stage_cpu"]
+LAW_HISTORY_RETRIEVAL_STRATEGIES: frozenset[str] = frozenset(
+    {"rrf_lexical", "cross_encoder_rerank", "five_stage_cpu"}
+)
 _MST = re.compile(r"^\d{1,32}$")
 _VERSION_KEY = re.compile(r"^(?P<mst>\d{1,32})@(?P<effective>\d{8})$")
 
@@ -2255,14 +2266,14 @@ def _replace_active_manifest_bytes_if_digest(
 
 def bind_law_history_retrieval_strategy(
     *,
-    strategy: Literal["rrf_lexical", "cross_encoder_rerank"],
+    strategy: LawHistoryRetrievalStrategy,
     expected_manifest_sha256: str,
     benchmark_result_sha256: str,
     local_root_override: Path | None = None,
 ) -> str:
     """Explicitly bind one reviewed, deployable benchmark result to serving."""
 
-    if strategy not in {"rrf_lexical", "cross_encoder_rerank"}:
+    if strategy not in LAW_HISTORY_RETRIEVAL_STRATEGIES:
         raise LawHistoryError("LAW_HISTORY_BENCHMARK_CANDIDATE_NOT_DEPLOYABLE")
     if (
         _SHA256.fullmatch(expected_manifest_sha256) is None
@@ -2318,8 +2329,10 @@ def _manifest_from_sources(
     frozen_inputs: Mapping[str, object],
     coverage_through: date,
     refreshes: Sequence[Mapping[str, object]] = (),
-    retrieval_strategy: Literal["rrf_lexical", "cross_encoder_rerank"] = "rrf_lexical",
+    retrieval_strategy: LawHistoryRetrievalStrategy = "rrf_lexical",
 ) -> dict[str, object]:
+    if retrieval_strategy not in LAW_HISTORY_RETRIEVAL_STRATEGIES:
+        raise LawHistoryError("LAW_HISTORY_MANIFEST_INVALID")
     return {
         "local_state_version": LAW_HISTORY_LOCAL_STATE_VERSION,
         "profile": LAW_HISTORY_PROFILE,
@@ -2381,7 +2394,7 @@ def _validate_active_manifest_payload(
         or manifest["law_ids"] != list(LAW_HISTORY_LAW_IDS)
     ):
         raise LawHistoryError("LAW_HISTORY_MANIFEST_MISMATCH")
-    if manifest["retrieval_strategy"] not in {"rrf_lexical", "cross_encoder_rerank"}:
+    if manifest["retrieval_strategy"] not in LAW_HISTORY_RETRIEVAL_STRATEGIES:
         raise LawHistoryError("LAW_HISTORY_MANIFEST_INVALID")
     benchmark_digest = manifest["retrieval_strategy_benchmark_sha256"]
     if benchmark_digest is not None and (
@@ -3536,11 +3549,14 @@ def build_law_history(
     as_of: date,
     local_root_override: Path | None = None,
     api_get: LawApiGet | None = None,
+    retrieval_strategy: LawHistoryRetrievalStrategy = "rrf_lexical",
 ) -> Path:
     """Build the isolated, all-65 baseline profile from fresh official data."""
 
     if as_of != LAW_HISTORY_BASELINE_AS_OF:
         raise LawHistoryError("LAW_HISTORY_BASELINE_AS_OF_MISMATCH")
+    if retrieval_strategy not in {"rrf_lexical", "five_stage_cpu"}:
+        raise LawHistoryError("LAW_HISTORY_BENCHMARK_CANDIDATE_NOT_DEPLOYABLE")
     try:
         profile = ensure_functional_uat_law_history_profile(root=local_root_override)
     except LocalProfileError as exc:
@@ -3610,6 +3626,7 @@ def build_law_history(
             temporal_store_projection_sha256=temporal_store_projection_sha256,
             frozen_inputs=attestation.manifest,
             coverage_through=as_of,
+            retrieval_strategy=retrieval_strategy,
         )
         _write_active_manifest(profile, manifest)
         return _new_public_artifact(as_of=as_of, counts=counts, models=models)
@@ -4270,8 +4287,15 @@ def _updated_refresh_manifest(
     updated["refreshes"] = [*raw_refreshes, refresh_with_receipts]
     # A benchmark is bound to one exact manifest/projection.  Any source or
     # coverage change invalidates it; a later explicit held-out run may bind
-    # a new deployable strategy.
-    updated["retrieval_strategy"] = "rrf_lexical"
+    # a new deployable strategy.  The five-stage pipeline does not depend on
+    # a benchmark digest to serve honestly, so an explicit five-stage binding
+    # survives a refresh (without its now-stale measurement); a reranker-only
+    # binding falls back to the baseline as before.
+    updated["retrieval_strategy"] = (
+        "five_stage_cpu"
+        if manifest.get("retrieval_strategy") == "five_stage_cpu"
+        else "rrf_lexical"
+    )
     updated["retrieval_strategy_benchmark_sha256"] = None
     updated["data_build_timestamp"] = datetime.now(timezone.utc).isoformat()
     _validated_refresh_records(
@@ -4312,7 +4336,7 @@ def _validate_publishable_refresh_manifest(
         or updated.get("profile") != LAW_HISTORY_PROFILE
         or updated.get("coverage_from") != LAW_HISTORY_BASELINE_AS_OF.isoformat()
         or updated.get("law_ids") != list(LAW_HISTORY_LAW_IDS)
-        or updated.get("retrieval_strategy") not in {"rrf_lexical", "cross_encoder_rerank"}
+        or updated.get("retrieval_strategy") not in {"rrf_lexical", "five_stage_cpu"}
         or updated.get("retrieval_strategy_benchmark_sha256") is not None
     ):
         raise LawHistoryError("LAW_HISTORY_REFRESH_JOURNAL_INVALID")
@@ -4655,13 +4679,19 @@ class FunctionalLawHistoryEvidenceBackend(DatabaseEvidenceBackend):
         use_rerank: bool = False,
         rerank_device: Literal["cpu", "cuda"] = "cpu",
         archive_catalog: ActiveArchiveCatalog | None = None,
+        retrieval_strategy: LawHistoryRetrievalStrategy | None = None,
     ) -> None:
         if coverage_from != LAW_HISTORY_BASELINE_AS_OF or coverage_through < coverage_from:
             raise LawHistoryError("LAW_HISTORY_COVERAGE_RANGE_INVALID")
+        if retrieval_strategy is None:
+            retrieval_strategy = "cross_encoder_rerank" if use_rerank else "rrf_lexical"
+        if retrieval_strategy not in LAW_HISTORY_RETRIEVAL_STRATEGIES:
+            raise LawHistoryError("LAW_HISTORY_MANIFEST_INVALID")
         super().__init__()
         self._coverage_from = coverage_from
         self._coverage_through = coverage_through
-        self._use_rerank = use_rerank
+        self._retrieval_strategy: LawHistoryRetrievalStrategy = retrieval_strategy
+        self._use_rerank = use_rerank or retrieval_strategy == "cross_encoder_rerank"
         self._rerank_device = rerank_device
         # ``None`` retains direct/unit caller compatibility with the earlier
         # fixed-input profile.  The actual service always captures a catalog,
@@ -4732,11 +4762,176 @@ class FunctionalLawHistoryEvidenceBackend(DatabaseEvidenceBackend):
 
         return resolve_hsk_snapshot(archive.hsk_snapshot_id, code)
 
+    @property
+    def retrieval_strategy(self) -> LawHistoryRetrievalStrategy:
+        return self._retrieval_strategy
+
+    # ----------------------------------------------------- five-stage seams
+
+    def _arm_search(
+        self, query: str, arm: str, limit: int, as_of: date
+    ) -> tuple[five_stage.ArmHit, ...]:
+        hits = repository.search(
+            query,
+            arm=arm,
+            limit=limit,
+            as_of=as_of,
+            collection=repository.TEMPORAL_COLLECTION,
+            temporal=True,
+        )
+        return tuple(five_stage.ArmHit(int(hit.article_pk), float(hit.score)) for hit in hits)
+
+    @staticmethod
+    def _hydrate_temporal_rows(pks: Sequence[int], as_of: date) -> dict[int, dict[str, object]]:
+        """Resolve candidate pks to their rows valid at ``as_of`` with the verified URI."""
+
+        if not pks:
+            return {}
+        from psycopg.rows import dict_row
+
+        from src.db.postgres import connect
+
+        with connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT a.id AS article_pk, a.law_id, version.law_name, version.hierarchy,
+                       a.article_no, a.paragraph_no, a.item_no, a.title, a.content,
+                       a.content_hash, a.version_mst, a.valid_from, a.valid_to,
+                       source.official_uri
+                FROM law_articles a
+                JOIN law_versions version
+                  ON version.law_id=a.law_id AND version.version_key=a.version_key
+                JOIN law_version_sources source
+                  ON source.law_id=a.law_id AND source.version_key=a.version_key
+                WHERE a.id = ANY(%s) AND a.valid_from <= %s
+                  AND (a.valid_to IS NULL OR a.valid_to > %s)
+                """,
+                (list(pks), as_of, as_of),
+            )
+            return {int(row["article_pk"]): dict(row) for row in cur.fetchall()}
+
+    @staticmethod
+    def _delegates_neighbor_pairs(
+        seeds: Sequence[tuple[str, int]],
+    ) -> list[tuple[str, int, str, int]]:
+        """Current-graph DELEGATES neighbours addressed by (law_id, article_no)."""
+
+        from src.db.neo4j import driver as make_driver
+
+        pairs = [{"law_id": law_id, "article_no": article_no} for law_id, article_no in seeds]
+        drv = make_driver()
+        try:
+            with drv.session() as session:
+                records = session.run(
+                    """
+                    UNWIND $pairs AS p
+                    MATCH (a:Article {law_id: p.law_id, article_no: p.article_no})
+                          -[:DELEGATES]-(t:Article)
+                    RETURN DISTINCT p.law_id AS seed_law_id, p.article_no AS seed_article_no,
+                           t.law_id AS law_id, t.article_no AS article_no
+                    """,
+                    pairs=pairs,
+                )
+                return [
+                    (
+                        str(record["seed_law_id"]),
+                        int(record["seed_article_no"]),
+                        str(record["law_id"]),
+                        int(record["article_no"]),
+                    )
+                    for record in records
+                ]
+        finally:
+            drv.close()
+
+    @staticmethod
+    def _resolve_leaf_rows(
+        pairs: Sequence[tuple[str, int]], as_of: date
+    ) -> list[dict[str, object]]:
+        """Leaf article rows (the temporal search unit) valid at ``as_of`` for the pairs."""
+
+        if not pairs:
+            return []
+        from psycopg.rows import dict_row
+
+        from src.db.postgres import connect
+
+        wanted = {(law_id, article_no) for law_id, article_no in pairs}
+        # Same half-open interval as the candidate hydration above, qualified
+        # on the article alias so the joined version rows cannot shadow it.
+        with connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT a.id AS article_pk, a.law_id, version.law_name, version.hierarchy,
+                       a.article_no, a.paragraph_no, a.item_no, a.title, a.content,
+                       a.content_hash, a.version_mst, a.valid_from, a.valid_to,
+                       source.official_uri
+                FROM law_articles a
+                JOIN law_versions version
+                  ON version.law_id=a.law_id AND version.version_key=a.version_key
+                JOIN law_version_sources source
+                  ON source.law_id=a.law_id AND source.version_key=a.version_key
+                WHERE a.law_id = ANY(%(law_ids)s) AND a.article_no = ANY(%(article_nos)s)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM law_articles child WHERE child.parent_article_pk=a.id
+                  )
+                  AND a.valid_from <= %(as_of)s
+                  AND (a.valid_to IS NULL OR a.valid_to > %(as_of)s)
+                """,
+                {
+                    "law_ids": sorted({law_id for law_id, _ in wanted}),
+                    "article_nos": sorted({article_no for _, article_no in wanted}),
+                    "as_of": as_of,
+                },
+            )
+            return [
+                dict(row)
+                for row in cur.fetchall()
+                if (str(row["law_id"]), int(row["article_no"])) in wanted
+            ]
+
+    def _graph_neighbors(
+        self,
+        seeds: Sequence[Mapping[str, object]],
+        as_of: date,
+        exclude: frozenset[int],
+    ) -> tuple[list[dict[str, object]], five_stage.GraphStatus]:
+        return five_stage.delegates_neighbors_as_of(
+            seeds,
+            as_of=as_of,
+            neighbor_pairs=self._delegates_neighbor_pairs,
+            resolve_leaf_rows=self._resolve_leaf_rows,
+            exclude=exclude,
+        )
+
+    def _rerank_scores(self, query: str, passages: Sequence[str]) -> list[float] | None:
+        # The local pinned model is optional at inference time.  A load or
+        # inference failure leaves the deterministic order unchanged and does
+        # not claim ``rerank`` in the public evidence.
+        from src.embed import rerank
+
+        return rerank.scores(query, list(passages), device=self._rerank_device)
+
     def search_law_articles(
         self, query: str, top_k: int, as_of: date
     ) -> tuple[LawArticleMatch, ...]:
-        """Temporal-filter each arm before RRF; no current graph expansion."""
+        """Temporal-filter each arm before ranking.
 
+        ``five_stage_cpu`` runs rewrite → weighted RRF → temporal DELEGATES
+        expansion → CPU rerank → z-blend.  The other strategies keep the
+        original RRF + lexical blend with an optional reranker pass.
+        """
+
+        if self._retrieval_strategy == "five_stage_cpu":
+            return five_stage.search_five_stage(
+                query,
+                top_k,
+                as_of,
+                search_arm=self._arm_search,
+                hydrate=self._hydrate_temporal_rows,
+                neighbors=self._graph_neighbors,
+                rerank_scores=self._rerank_scores,
+            )
         recall = min(max(top_k * 2, 8), 40)
         dense_hits = repository.search(
             query,
@@ -4860,7 +5055,7 @@ def backend_from_active_law_history(
     return FunctionalLawHistoryEvidenceBackend(
         coverage_from=LAW_HISTORY_BASELINE_AS_OF,
         coverage_through=date.fromisoformat(cast(str, manifest["coverage_through"])),
-        use_rerank=manifest["retrieval_strategy"] == "cross_encoder_rerank",
+        retrieval_strategy=cast(LawHistoryRetrievalStrategy, manifest["retrieval_strategy"]),
         archive_catalog=capture_active_archive_catalog(
             local_root_override=local_root_override,
             verify_assets=True,
@@ -4872,8 +5067,10 @@ __all__ = [
     "LAW_HISTORY_BASELINE_AS_OF",
     "LAW_HISTORY_LOCAL_STATE_VERSION",
     "LAW_HISTORY_PROFILE",
+    "LAW_HISTORY_RETRIEVAL_STRATEGIES",
     "FunctionalLawHistoryEvidenceBackend",
     "LawHistoryError",
+    "LawHistoryRetrievalStrategy",
     "LawHistorySource",
     "backend_from_active_law_history",
     "bind_law_history_retrieval_strategy",

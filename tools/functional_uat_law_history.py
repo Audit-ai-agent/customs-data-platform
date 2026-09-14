@@ -27,8 +27,10 @@ for import_root in (ROOT, LAW_ROOT):
 from src.law_history import (  # noqa: E402
     LAW_HISTORY_BASELINE_AS_OF,
     LAW_HISTORY_PROFILE,
+    LAW_HISTORY_RETRIEVAL_STRATEGIES,
     FunctionalLawHistoryEvidenceBackend,
     LawHistoryError,
+    LawHistoryRetrievalStrategy,
     _active_manifest_path,
     _law_history_mutation_lock,
     _pending_refresh_path,
@@ -63,7 +65,11 @@ from src.profile_evidence import (  # noqa: E402
 )
 
 
-LawHistoryRetrievalStrategy = Literal["rrf_lexical", "cross_encoder_rerank"]
+# Strategies an operator may bind at build time without a benchmark digest.
+BUILD_RETRIEVAL_STRATEGIES: tuple[LawHistoryRetrievalStrategy, ...] = (
+    "rrf_lexical",
+    "five_stage_cpu",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +85,7 @@ class _LawHistoryServiceBinding:
         return FunctionalLawHistoryEvidenceBackend(
             coverage_from=LAW_HISTORY_BASELINE_AS_OF,
             coverage_through=self.coverage_through,
-            use_rerank=self.retrieval_strategy == "cross_encoder_rerank",
+            retrieval_strategy=self.retrieval_strategy,
             archive_catalog=self.archive_catalog,
         )
 
@@ -116,7 +122,7 @@ def _binding_from_manifest(
         coverage_through = date.fromisoformat(cast(str, coverage_raw))
     except (TypeError, ValueError) as exc:
         raise LawHistoryError("LAW_HISTORY_MANIFEST_INVALID") from exc
-    if strategy_raw not in {"rrf_lexical", "cross_encoder_rerank"}:
+    if strategy_raw not in LAW_HISTORY_RETRIEVAL_STRATEGIES:
         raise LawHistoryError("LAW_HISTORY_MANIFEST_INVALID")
     return _LawHistoryServiceBinding(
         manifest_sha256=manifest_sha256,
@@ -190,6 +196,20 @@ def build_parser() -> argparse.ArgumentParser:
     build = commands.add_parser("build", help="build the complete 65-law baseline")
     build.add_argument("--as-of", type=_date, default=LAW_HISTORY_BASELINE_AS_OF)
     build.add_argument("--allow-cuda", action="store_true", help="explicit local-only CUDA opt-in")
+    build.add_argument(
+        "--retrieval-strategy",
+        choices=BUILD_RETRIEVAL_STRATEGIES,
+        default="rrf_lexical",
+        help="serving strategy recorded in the new active manifest",
+    )
+    build.add_argument(
+        "--allow-unbenchmarked",
+        action="store_true",
+        help=(
+            "acknowledge that a non-baseline strategy is bound without a held-out "
+            "benchmark digest; a later benchmark apply may attach one"
+        ),
+    )
     refresh = commands.add_parser(
         "refresh", help="explicitly collect one official law-history range"
     )
@@ -378,8 +398,11 @@ def main(argv: list[str] | None = None) -> int:
             print("law-history required model cache is ready")
             return 0
         if args.command == "build":
+            strategy = cast(LawHistoryRetrievalStrategy, args.retrieval_strategy)
+            if strategy != "rrf_lexical" and not bool(args.allow_unbenchmarked):
+                raise LawHistoryError("LAW_HISTORY_BUILD_STRATEGY_REQUIRES_ACKNOWLEDGEMENT")
             with _cuda_opt_in_scope(bool(args.allow_cuda)):
-                artifact = build_law_history(as_of=args.as_of)
+                artifact = build_law_history(as_of=args.as_of, retrieval_strategy=strategy)
             print(f"law-history baseline manifest written: {artifact}")
             return 0
         if args.command == "refresh":

@@ -1093,6 +1093,13 @@ def test_law_history_rebind_frozen_inputs_is_an_explicit_local_command(
             },
             "a" * 64,
         ),
+        (
+            {
+                "coverage_through": "2026-08-05",
+                "retrieval_strategy": "five_stage_cpu",
+            },
+            "a" * 64,
+        ),
     ],
 )
 def test_law_history_server_binding_rejects_manifest_digest_or_backend_config_drift(
@@ -1221,3 +1228,63 @@ def test_law_history_server_binding_checks_pointer_on_each_request_without_rehas
 
     binding.validate_runtime()
     assert verification_modes == [True, False]
+
+
+def test_law_history_server_binding_passes_the_manifest_strategy_to_the_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool = _law_history_uat_tool()
+    from src.hsk_ccct_history import ActiveArchiveCatalog
+
+    monkeypatch.setattr(
+        tool,
+        "validate_law_history_state",
+        lambda: (
+            {"coverage_through": "2026-08-05", "retrieval_strategy": "five_stage_cpu"},
+            "a" * 64,
+        ),
+    )
+    monkeypatch.setattr(
+        tool,
+        "capture_active_archive_catalog",
+        lambda **_kwargs: ActiveArchiveCatalog(pointer_sha256="b" * 64, archives=()),
+    )
+    binding = tool._capture_law_history_service_binding()
+    assert binding.retrieval_strategy == "five_stage_cpu"
+    backend = binding.build_backend()
+    assert backend.retrieval_strategy == "five_stage_cpu"
+
+    monkeypatch.setattr(
+        tool,
+        "validate_law_history_state",
+        lambda: ({"coverage_through": "2026-08-05", "retrieval_strategy": "bm25_only"}, "a" * 64),
+    )
+    with pytest.raises(tool.LawHistoryError, match="MANIFEST_INVALID"):
+        tool._capture_law_history_service_binding()
+
+
+def test_law_history_build_requires_an_acknowledgement_for_a_non_baseline_strategy(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    tool = _law_history_uat_tool()
+    observed: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        tool,
+        "build_law_history",
+        lambda **kwargs: observed.append(kwargs) or Path("ignored-artifact"),
+    )
+
+    assert tool.main(["build"]) == 0
+    assert observed[-1]["retrieval_strategy"] == "rrf_lexical"
+
+    assert tool.main(["build", "--retrieval-strategy", "five_stage_cpu"]) == 2
+    assert "BUILD_STRATEGY_REQUIRES_ACKNOWLEDGEMENT" in capsys.readouterr().err
+    assert len(observed) == 1
+
+    assert (
+        tool.main(["build", "--retrieval-strategy", "five_stage_cpu", "--allow-unbenchmarked"]) == 0
+    )
+    assert observed[-1]["retrieval_strategy"] == "five_stage_cpu"
+
+    with pytest.raises(SystemExit):
+        tool.build_parser().parse_args(["build", "--retrieval-strategy", "cross_encoder_rerank"])

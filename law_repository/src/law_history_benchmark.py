@@ -23,7 +23,7 @@ from datetime import date, datetime
 from typing import Literal, cast
 
 
-RuntimeRetrievalStrategy = Literal["rrf_lexical", "cross_encoder_rerank"]
+RuntimeRetrievalStrategy = Literal["rrf_lexical", "cross_encoder_rerank", "five_stage_cpu"]
 
 # Candidate identifiers are deliberately stable.  In particular, the Kiwi
 # encoder fingerprint belongs in its own field rather than in the candidate
@@ -32,15 +32,23 @@ RuntimeRetrievalStrategy = Literal["rrf_lexical", "cross_encoder_rerank"]
 BASELINE_CANDIDATE = "rrf_lexical"
 CPU_RERANK_CANDIDATE = "cross_encoder_rerank_cpu"
 GPU_RERANK_CANDIDATE = "cross_encoder_rerank_gpu"
+FIVE_STAGE_CPU_CANDIDATE = "five_stage_cpu"
 KIWI_CANDIDATE = "kiwi_sparse"
 BENCHMARK_CANDIDATES = frozenset(
     {
         BASELINE_CANDIDATE,
         CPU_RERANK_CANDIDATE,
+        FIVE_STAGE_CPU_CANDIDATE,
         GPU_RERANK_CANDIDATE,
         KIWI_CANDIDATE,
     }
 )
+# The documented five-stage product pipeline trades latency for recall by
+# design (query variants, graph neighbours, and a bounded CPU rerank pool).
+# It is therefore exempt from the 1.10x p95 non-regression gate; its latency
+# is still measured and recorded, and its recall must not regress.
+LATENCY_EXEMPT_CANDIDATES = frozenset({FIVE_STAGE_CPU_CANDIDATE})
+BENCHMARK_RESULT_SCHEMA_VERSION = "5.0"
 _LOCAL_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{2,127}$")
 
 
@@ -166,6 +174,8 @@ def runtime_strategy_for_candidate(candidate: str) -> RuntimeRetrievalStrategy |
         return "rrf_lexical"
     if candidate == CPU_RERANK_CANDIDATE:
         return "cross_encoder_rerank"
+    if candidate == FIVE_STAGE_CPU_CANDIDATE:
+        return "five_stage_cpu"
     return None
 
 
@@ -514,9 +524,16 @@ def measure_candidate(
 
 
 def choose_candidate(
-    *, baseline: CandidateMetrics, candidates: Iterable[CandidateMetrics]
+    *,
+    baseline: CandidateMetrics,
+    candidates: Iterable[CandidateMetrics],
+    latency_exempt: frozenset[str] = LATENCY_EXEMPT_CANDIDATES,
 ) -> CandidateDecision:
-    """Apply the published non-regression and deterministic tie-break rules."""
+    """Apply the published non-regression and deterministic tie-break rules.
+
+    ``latency_exempt`` candidates skip only the p95 gate; their recall must
+    still be at least the baseline's and their latency must be measured.
+    """
 
     if (
         not baseline.available
@@ -541,7 +558,7 @@ def choose_candidate(
             continue
         if candidate.strict_recall_at_10 < baseline.strict_recall_at_10:
             continue
-        if candidate.p95_ms > baseline.p95_ms * 1.10:
+        if candidate.candidate not in latency_exempt and candidate.p95_ms > baseline.p95_ms * 1.10:
             continue
         eligible.append(candidate)
     if not eligible:
@@ -577,21 +594,30 @@ def choose_candidate(
 
 
 def choose_deployable_candidate(
-    *, baseline: CandidateMetrics, cpu_rerank: CandidateMetrics
+    *,
+    baseline: CandidateMetrics,
+    cpu_rerank: CandidateMetrics,
+    five_stage: CandidateMetrics | None = None,
 ) -> CandidateDecision:
-    """Make the promotion decision from the two executable service modes.
+    """Make the promotion decision from the executable service modes.
 
     Kiwi and CUDA measurements remain in the aggregate as diagnostics, but
     their local index/device setup has no matching persistent Evidence-service
     configuration.  They also run after the CPU candidates in this one local
     benchmark process, so their RSS must not be presented as an unbiased
-    all-candidate promotion tie-break.  Only the baseline and CPU reranker
-    represent deployable strategies and may influence an apply result.
+    all-candidate promotion tie-break.  Only the baseline, the CPU reranker,
+    and the five-stage CPU pipeline represent deployable strategies and may
+    influence an apply result.
     """
 
     if baseline.candidate != BASELINE_CANDIDATE or cpu_rerank.candidate != CPU_RERANK_CANDIDATE:
         raise LawHistoryBenchmarkError("LAW_HISTORY_BENCHMARK_CANDIDATES_INVALID")
-    return choose_candidate(baseline=baseline, candidates=(cpu_rerank,))
+    deployable: list[CandidateMetrics] = [cpu_rerank]
+    if five_stage is not None:
+        if five_stage.candidate != FIVE_STAGE_CPU_CANDIDATE:
+            raise LawHistoryBenchmarkError("LAW_HISTORY_BENCHMARK_CANDIDATES_INVALID")
+        deployable.append(five_stage)
+    return choose_candidate(baseline=baseline, candidates=tuple(deployable))
 
 
 def benchmark_result_payload(
@@ -617,16 +643,17 @@ def benchmark_result_payload(
     expected = choose_deployable_candidate(
         baseline=baseline,
         cpu_rerank=by_candidate[CPU_RERANK_CANDIDATE],
+        five_stage=by_candidate[FIVE_STAGE_CPU_CANDIDATE],
     )
     if decision != expected:
         raise LawHistoryBenchmarkError("LAW_HISTORY_BENCHMARK_DECISION_INVALID")
     if not isinstance(generated_at, str) or not generated_at:
         raise LawHistoryBenchmarkError("LAW_HISTORY_BENCHMARK_TIMESTAMP_INVALID")
     return {
-        # V4 rejects the earlier tracemalloc-only aggregates at the explicit
-        # apply boundary.  They cannot safely participate in the documented
-        # native-inclusive memory tie-break.
-        "schema_version": "4.0",
+        # V4 rejected the earlier tracemalloc-only aggregates at the explicit
+        # apply boundary.  V5 adds the five-stage CPU candidate to the fixed
+        # candidate set, so a V4 aggregate can no longer be applied either.
+        "schema_version": BENCHMARK_RESULT_SCHEMA_VERSION,
         "profile": "functional-uat-law-history",
         "generated_at": generated_at,
         "active_manifest_sha256": active_manifest_sha256,
@@ -674,7 +701,10 @@ def benchmark_application_from_bytes(
         "decision",
     }:
         raise LawHistoryBenchmarkError("LAW_HISTORY_BENCHMARK_RESULT_INVALID")
-    if payload["schema_version"] != "4.0" or payload["profile"] != "functional-uat-law-history":
+    if (
+        payload["schema_version"] != BENCHMARK_RESULT_SCHEMA_VERSION
+        or payload["profile"] != "functional-uat-law-history"
+    ):
         raise LawHistoryBenchmarkError("LAW_HISTORY_BENCHMARK_RESULT_INVALID")
     generated_at = payload["generated_at"]
     if not isinstance(generated_at, str):
@@ -719,6 +749,7 @@ def benchmark_application_from_bytes(
         expected = choose_deployable_candidate(
             baseline=by_candidate[BASELINE_CANDIDATE],
             cpu_rerank=by_candidate[CPU_RERANK_CANDIDATE],
+            five_stage=by_candidate[FIVE_STAGE_CPU_CANDIDATE],
         )
     except LawHistoryBenchmarkError as exc:
         raise LawHistoryBenchmarkError("LAW_HISTORY_BENCHMARK_RESULT_INVALID") from exc
@@ -875,32 +906,33 @@ def cast_int(value: int | None) -> int:
 
 
 class KiwiSparseIndex:
-    """Separate optional Korean sparse index; it never reuses Qdrant BM25.
+    """Separate in-process Korean sparse index; it never reuses Qdrant BM25.
 
     The index is intended only for the benchmark process and can be rebuilt
-    from the local temporal corpus.  Its fingerprint binds the Kiwi package
-    version and tokenizer mode, so a result cannot be compared against a
-    different sparse encoder accidentally.
+    from the local temporal corpus.  It tokenizes with the exact product
+    encoder (``src.embed.bm25``), so the diagnostic measures the product
+    tokenizer under a plain in-memory BM25 rather than a second tokenizer.
+    Its fingerprint binds the encoder rules and the installed Kiwi release,
+    so a result cannot be compared against a different sparse encoder
+    accidentally.
     """
 
     def __init__(self) -> None:
+        from src.embed import bm25
+
         try:
-            from kiwipiepy import Kiwi, __version__
-        except ImportError as exc:
+            self.encoder_fingerprint = bm25.encoder_fingerprint()
+        except bm25.KiwiUnavailable as exc:
             raise LawHistoryBenchmarkError("LAW_HISTORY_KIWI_UNAVAILABLE") from exc
-        self._kiwi = Kiwi()
-        self.encoder_fingerprint = hashlib.sha256(
-            f"kiwi-sparse/v1:{__version__}:form-content".encode("utf-8")
-        ).hexdigest()
+        self._tokenize = bm25.tokenize
         self._documents: dict[str, Counter[str]] = {}
         self._document_frequency: Counter[str] = Counter()
 
     def _tokens(self, text: str) -> tuple[str, ...]:
-        return tuple(
-            token.form.lower()
-            for token in self._kiwi.tokenize(text)
-            if len(token.form.strip()) >= 2
-        )
+        try:
+            return tuple(self._tokenize(text))
+        except RuntimeError as exc:
+            raise LawHistoryBenchmarkError("LAW_HISTORY_KIWI_UNAVAILABLE") from exc
 
     def build(self, documents: Iterable[tuple[str, str]]) -> None:
         self._documents.clear()
@@ -934,7 +966,10 @@ class KiwiSparseIndex:
 __all__ = [
     "BASELINE_CANDIDATE",
     "BENCHMARK_CANDIDATES",
+    "BENCHMARK_RESULT_SCHEMA_VERSION",
     "CPU_RERANK_CANDIDATE",
+    "FIVE_STAGE_CPU_CANDIDATE",
+    "LATENCY_EXEMPT_CANDIDATES",
     "CandidateDecision",
     "CandidateMetrics",
     "GPU_RERANK_CANDIDATE",

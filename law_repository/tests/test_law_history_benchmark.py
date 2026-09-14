@@ -11,7 +11,9 @@ import pytest
 
 from src.law_history_benchmark import (
     BASELINE_CANDIDATE,
+    BENCHMARK_RESULT_SCHEMA_VERSION,
     CPU_RERANK_CANDIDATE,
+    FIVE_STAGE_CPU_CANDIDATE,
     GPU_RERANK_CANDIDATE,
     KIWI_CANDIDATE,
     CandidateMetrics,
@@ -189,12 +191,14 @@ def test_gpu_measurement_is_unavailable_without_a_separate_cuda_allocation_probe
 def _benchmark_metrics(
     *,
     cpu: CandidateMetrics | None = None,
+    five_stage: CandidateMetrics | None = None,
     kiwi: CandidateMetrics | None = None,
     gpu: CandidateMetrics | None = None,
 ) -> list[CandidateMetrics]:
     return [
         CandidateMetrics(BASELINE_CANDIDATE, True, 0.8, 0.9, 100.0, 1000, 2),
         cpu or CandidateMetrics(CPU_RERANK_CANDIDATE, False, None, None, None, None, 2),
+        five_stage or CandidateMetrics(FIVE_STAGE_CPU_CANDIDATE, False, None, None, None, None, 2),
         kiwi or CandidateMetrics(KIWI_CANDIDATE, False, None, None, None, None, 2),
         gpu or CandidateMetrics(GPU_RERANK_CANDIDATE, False, None, None, None, None, 2),
     ]
@@ -245,7 +249,9 @@ def _approved_held_out_suite(
 def _benchmark_bytes(
     metrics: list[CandidateMetrics], *, held_out_approval: HeldOutApproval | None = None
 ) -> bytes:
-    decision = choose_deployable_candidate(baseline=metrics[0], cpu_rerank=metrics[1])
+    decision = choose_deployable_candidate(
+        baseline=metrics[0], cpu_rerank=metrics[1], five_stage=metrics[2]
+    )
     approval = held_out_approval or _approved_held_out_suite()[1]
     payload = benchmark_result_payload(
         metrics=metrics,
@@ -345,13 +351,15 @@ def test_benchmark_result_records_cpu_and_explicit_gpu_or_not_run_modes() -> Non
     payload = benchmark_result_payload(
         metrics=_benchmark_metrics(),
         decision=choose_deployable_candidate(
-            baseline=_benchmark_metrics()[0], cpu_rerank=_benchmark_metrics()[1]
+            baseline=_benchmark_metrics()[0],
+            cpu_rerank=_benchmark_metrics()[1],
+            five_stage=_benchmark_metrics()[2],
         ),
         active_manifest_sha256="a" * 64,
         held_out_approval=approval,
         generated_at="2026-08-10T00:00:00+00:00",
     )
-    assert payload["schema_version"] == "4.0"
+    assert payload["schema_version"] == BENCHMARK_RESULT_SCHEMA_VERSION == "5.0"
     raw_metrics = payload["metrics"]
     assert isinstance(raw_metrics, list)
     assert all(isinstance(metric, dict) for metric in raw_metrics)
@@ -359,6 +367,7 @@ def test_benchmark_result_records_cpu_and_explicit_gpu_or_not_run_modes() -> Non
     modes = {metric["candidate"]: metric["device_mode"] for metric in metrics}
     assert modes[BASELINE_CANDIDATE] == "cpu"
     assert modes[CPU_RERANK_CANDIDATE] == "cpu"
+    assert modes[FIVE_STAGE_CPU_CANDIDATE] == "cpu"
     assert modes[KIWI_CANDIDATE] == "cpu"
     assert modes[GPU_RERANK_CANDIDATE] == "not_run"
 
@@ -382,13 +391,16 @@ def test_benchmark_result_rejects_metrics_not_measured_on_the_approved_case_coun
     metrics = [
         CandidateMetrics(BASELINE_CANDIDATE, True, 0.8, 0.9, 100.0, 1000, 1),
         CandidateMetrics(CPU_RERANK_CANDIDATE, False, None, None, None, None, 1),
+        CandidateMetrics(FIVE_STAGE_CPU_CANDIDATE, False, None, None, None, None, 1),
         CandidateMetrics(KIWI_CANDIDATE, False, None, None, None, None, 1),
         CandidateMetrics(GPU_RERANK_CANDIDATE, False, None, None, None, None, 1),
     ]
     with pytest.raises(LawHistoryBenchmarkError, match="APPROVAL_MISMATCH"):
         benchmark_result_payload(
             metrics=metrics,
-            decision=choose_deployable_candidate(baseline=metrics[0], cpu_rerank=metrics[1]),
+            decision=choose_deployable_candidate(
+                baseline=metrics[0], cpu_rerank=metrics[1], five_stage=metrics[2]
+            ),
             active_manifest_sha256="a" * 64,
             held_out_approval=approval,
             generated_at="2026-08-10T00:00:00+00:00",
@@ -806,6 +818,7 @@ def test_cli_measurement_uses_active_coverage_date_for_every_law_retriever(
     assert seen_as_of == [
         (BASELINE_CANDIDATE, date(2026, 8, 6)),
         (CPU_RERANK_CANDIDATE, date(2026, 8, 6)),
+        (FIVE_STAGE_CPU_CANDIDATE, date(2026, 8, 6)),
         (KIWI_CANDIDATE, date(2026, 8, 6)),
     ]
     assert approval.law_as_of == date(2026, 8, 6)
@@ -980,3 +993,69 @@ def test_cli_measurement_rejects_a_full_projection_that_is_not_the_active_manife
     stderr = capsys.readouterr().err
     assert "BENCHMARK_MANIFEST_STALE" in stderr
     assert "private-query" not in stderr
+
+
+def test_five_stage_candidate_is_exempt_from_the_latency_gate_but_not_recall() -> None:
+    """The documented product pipeline may be slower; it may never recall less."""
+
+    slower_but_better = CandidateMetrics(FIVE_STAGE_CPU_CANDIDATE, True, 0.85, 0.95, 400.0, 2000, 2)
+    decision = choose_candidate(baseline=_baseline(), candidates=(slower_but_better,))
+    assert decision.selected == FIVE_STAGE_CPU_CANDIDATE
+
+    slower_and_worse = CandidateMetrics(FIVE_STAGE_CPU_CANDIDATE, True, 0.75, 0.95, 400.0, 2000, 2)
+    assert (
+        choose_candidate(baseline=_baseline(), candidates=(slower_and_worse,)).selected
+        == BASELINE_CANDIDATE
+    )
+    # The exemption is not a blanket rule: an ordinary candidate with the same
+    # numbers still fails the p95 gate.
+    ordinary = CandidateMetrics(CPU_RERANK_CANDIDATE, True, 0.85, 0.95, 400.0, 2000, 2)
+    assert (
+        choose_candidate(baseline=_baseline(), candidates=(ordinary,)).selected
+        == BASELINE_CANDIDATE
+    )
+
+
+def test_deployable_decision_considers_five_stage_and_application_binds_it() -> None:
+    five_stage = CandidateMetrics(FIVE_STAGE_CPU_CANDIDATE, True, 0.9, 0.95, 350.0, 2000, 2)
+    metrics = _benchmark_metrics(
+        cpu=CandidateMetrics(CPU_RERANK_CANDIDATE, True, 0.8, 0.9, 99.0, 900, 2),
+        five_stage=five_stage,
+    )
+    decision = choose_deployable_candidate(
+        baseline=metrics[0], cpu_rerank=metrics[1], five_stage=metrics[2]
+    )
+    assert decision.selected == FIVE_STAGE_CPU_CANDIDATE
+
+    application = benchmark_application_from_bytes(
+        _benchmark_bytes(metrics), held_out_approval=_approved_held_out_suite()[1]
+    )
+    assert application.selected_candidate == FIVE_STAGE_CPU_CANDIDATE
+    assert application.retrieval_strategy == "five_stage_cpu"
+
+    with pytest.raises(LawHistoryBenchmarkError, match="CANDIDATES_INVALID"):
+        choose_deployable_candidate(
+            baseline=metrics[0], cpu_rerank=metrics[1], five_stage=metrics[3]
+        )
+
+
+def test_benchmark_result_requires_the_five_stage_candidate_in_the_fixed_set() -> None:
+    """A V4 aggregate (four candidates) can no longer be applied by mistake."""
+
+    raw = _benchmark_bytes(_benchmark_metrics())
+    payload = json.loads(raw)
+    payload["metrics"] = [
+        metric for metric in payload["metrics"] if metric["candidate"] != FIVE_STAGE_CPU_CANDIDATE
+    ]
+    with pytest.raises(LawHistoryBenchmarkError, match="RESULT_INVALID"):
+        benchmark_application_from_bytes(
+            json.dumps(payload, sort_keys=True).encode("utf-8"),
+            held_out_approval=_approved_held_out_suite()[1],
+        )
+    legacy = json.loads(raw)
+    legacy["schema_version"] = "4.0"
+    with pytest.raises(LawHistoryBenchmarkError, match="RESULT_INVALID"):
+        benchmark_application_from_bytes(
+            json.dumps(legacy, sort_keys=True).encode("utf-8"),
+            held_out_approval=_approved_held_out_suite()[1],
+        )

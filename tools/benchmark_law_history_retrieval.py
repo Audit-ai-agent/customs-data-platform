@@ -35,6 +35,7 @@ from src.law_history import (  # noqa: E402
 from src.law_history_benchmark import (  # noqa: E402
     BASELINE_CANDIDATE,
     CPU_RERANK_CANDIDATE,
+    FIVE_STAGE_CPU_CANDIDATE,
     GPU_RERANK_CANDIDATE,
     KIWI_CANDIDATE,
     CandidateDecision,
@@ -383,6 +384,27 @@ def main(argv: list[str] | None = None) -> int:
             rerank = CandidateMetrics(
                 CPU_RERANK_CANDIDATE, False, None, None, None, None, len(cases)
             )
+        # The five-stage CPU pipeline is the third deployable mode.  It must
+        # actually rerank to count: an aggregate measured while the model was
+        # unavailable would only re-measure the RRF order under a new name.
+        five_stage_retriever = _law_id_retriever(
+            FunctionalLawHistoryEvidenceBackend(
+                coverage_from=LAW_HISTORY_BASELINE_AS_OF,
+                coverage_through=coverage_through,
+                retrieval_strategy="five_stage_cpu",
+            ),
+            as_of=evaluation_as_of,
+            require_rerank=True,
+        )
+        five_stage = measure_candidate(
+            candidate=FIVE_STAGE_CPU_CANDIDATE,
+            cases=cases,
+            retrieve_law_ids=five_stage_retriever,
+        )
+        if five_stage.available and not five_stage_retriever.rerank_observed:
+            five_stage = CandidateMetrics(
+                FIVE_STAGE_CPU_CANDIDATE, False, None, None, None, None, len(cases)
+            )
         try:
             kiwi, kiwi_retrieve = _kiwi_retriever(as_of=evaluation_as_of)
             kiwi_metrics = measure_candidate(
@@ -470,8 +492,10 @@ def main(argv: list[str] | None = None) -> int:
                 len(cases),
                 device_mode="cuda",
             )
-        metrics = [baseline, rerank, kiwi_metrics, gpu_metrics]
-        decision = choose_deployable_candidate(baseline=baseline, cpu_rerank=rerank)
+        metrics = [baseline, rerank, five_stage, kiwi_metrics, gpu_metrics]
+        decision = choose_deployable_candidate(
+            baseline=baseline, cpu_rerank=rerank, five_stage=five_stage
+        )
         path = _write_metrics(
             metrics=metrics,
             decision=decision,

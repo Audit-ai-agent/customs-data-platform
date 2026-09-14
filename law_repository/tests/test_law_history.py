@@ -2606,3 +2606,171 @@ def test_exact_effective_repeal_body_is_collected_but_empty_nonrepeal_is_rejecte
             source_kind="refresh",
             api_get=lambda _endpoint, **_params: repeal_body("일부개정"),
         )
+
+
+def test_refresh_keeps_an_explicit_five_stage_binding_but_drops_its_stale_benchmark(
+    tmp_path: Path,
+) -> None:
+    """Five-stage serves honestly without a digest; a reranker-only binding still resets."""
+
+    baseline_sources = _complete_refresh_sources(
+        effective_date=date(2026, 8, 5), digest="a" * 64, mst_offset=10_000
+    )
+    refresh_sources = _complete_refresh_sources(
+        effective_date=date(2026, 8, 6), digest="b" * 64, mst_offset=20_000
+    )
+    baseline_assets = [
+        source.local_state(profile=tmp_path, source_root=tmp_path) for source in baseline_sources
+    ]
+    staged_assets = [
+        source.local_state(profile=tmp_path, source_root=tmp_path) for source in refresh_sources
+    ]
+    refresh = _refresh_record(
+        from_date=date(2026, 8, 6), to_date=date(2026, 8, 6), sources=refresh_sources
+    )
+
+    updated = _updated_refresh_manifest(
+        manifest={
+            "source_assets": baseline_assets,
+            "refreshes": [],
+            "retrieval_strategy": "five_stage_cpu",
+            "retrieval_strategy_benchmark_sha256": "c" * 64,
+        },
+        staged_assets=staged_assets,
+        refresh=refresh,
+        to_date=date(2026, 8, 6),
+        counts={"law_count": 65},
+        source_article_projection_sha256="e" * 64,
+        temporal_store_projection_sha256="d" * 64,
+    )
+
+    assert updated["retrieval_strategy"] == "five_stage_cpu"
+    assert updated["retrieval_strategy_benchmark_sha256"] is None
+
+
+def test_active_manifest_accepts_five_stage_without_a_digest_but_not_rerank_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src import law_history as history
+
+    # Only the strategy/digest rule is under test; the receipt-chain checks
+    # that follow it are exercised by their own tests.
+    monkeypatch.setattr(history, "_validate_frozen_inputs_manifest", lambda _value: None)
+    monkeypatch.setattr(history, "_validated_refresh_records", lambda **_kwargs: ())
+
+    def manifest(strategy: str, digest: str | None) -> dict[str, object]:
+        return {
+            "local_state_version": history.LAW_HISTORY_LOCAL_STATE_VERSION,
+            "profile": history.LAW_HISTORY_PROFILE,
+            "coverage_from": history.LAW_HISTORY_BASELINE_AS_OF.isoformat(),
+            "coverage_through": history.LAW_HISTORY_BASELINE_AS_OF.isoformat(),
+            "law_ids": list(LAW_HISTORY_LAW_IDS),
+            "source_assets": [{"law_id": "000001"}],
+            "model_ids/revisions": {},
+            "store_counts": {},
+            "source_article_projection_sha256": "a" * 64,
+            "temporal_store_projection_sha256": "b" * 64,
+            "frozen_inputs": {},
+            "retrieval_strategy": strategy,
+            "retrieval_strategy_benchmark_sha256": digest,
+            "refreshes": [],
+            "data_build_timestamp": "2026-08-05T00:00:00+00:00",
+        }
+
+    def validated(strategy: str, digest: str | None) -> str:
+        try:
+            history._validate_active_manifest_payload(manifest(strategy, digest))
+        except history.LawHistoryError as exc:
+            return str(exc)
+        return "ok"
+
+    assert validated("rrf_lexical", None) == "ok"
+    assert validated("five_stage_cpu", None) == "ok"
+    assert validated("five_stage_cpu", "c" * 64) == "ok"
+    assert validated("cross_encoder_rerank", "c" * 64) == "ok"
+    assert validated("cross_encoder_rerank", None) == "LAW_HISTORY_MANIFEST_INVALID"
+    assert validated("bm25_only", None) == "LAW_HISTORY_MANIFEST_INVALID"
+
+
+def test_build_binds_only_a_benchmark_free_strategy_into_the_new_manifest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from src import law_history as history
+
+    with pytest.raises(history.LawHistoryError, match="CANDIDATE_NOT_DEPLOYABLE"):
+        history.build_law_history(
+            as_of=history.LAW_HISTORY_BASELINE_AS_OF,
+            local_root_override=tmp_path,
+            retrieval_strategy="cross_encoder_rerank",
+        )
+    with pytest.raises(history.LawHistoryError, match="MANIFEST_INVALID"):
+        history._manifest_from_sources(
+            profile=tmp_path,
+            source_root=tmp_path,
+            baseline_sources=(),
+            models={},
+            counts={},
+            source_article_projection_sha256="s" * 64,
+            temporal_store_projection_sha256="p" * 64,
+            frozen_inputs={},
+            coverage_through=history.LAW_HISTORY_BASELINE_AS_OF,
+            retrieval_strategy="bm25_only",  # type: ignore[arg-type]
+        )
+    manifest = history._manifest_from_sources(
+        profile=tmp_path,
+        source_root=tmp_path,
+        baseline_sources=(),
+        models={},
+        counts={},
+        source_article_projection_sha256="s" * 64,
+        temporal_store_projection_sha256="p" * 64,
+        frozen_inputs={},
+        coverage_through=history.LAW_HISTORY_BASELINE_AS_OF,
+        retrieval_strategy="five_stage_cpu",
+    )
+    assert manifest["retrieval_strategy"] == "five_stage_cpu"
+    assert manifest["retrieval_strategy_benchmark_sha256"] is None
+
+
+def test_temporal_backend_routes_five_stage_through_injected_seams(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The strategy switch dispatches to the five-stage pipeline with the backend seams."""
+
+    from src import law_history as history
+    from src import retrieval_five_stage as five
+
+    backend = history.FunctionalLawHistoryEvidenceBackend(
+        coverage_from=history.LAW_HISTORY_BASELINE_AS_OF,
+        coverage_through=date(2026, 8, 10),
+        retrieval_strategy="five_stage_cpu",
+    )
+    assert backend.retrieval_strategy == "five_stage_cpu"
+    assert (
+        history.FunctionalLawHistoryEvidenceBackend(
+            coverage_from=history.LAW_HISTORY_BASELINE_AS_OF,
+            coverage_through=date(2026, 8, 10),
+            use_rerank=True,
+        ).retrieval_strategy
+        == "cross_encoder_rerank"
+    )
+    with pytest.raises(history.LawHistoryError, match="MANIFEST_INVALID"):
+        history.FunctionalLawHistoryEvidenceBackend(
+            coverage_from=history.LAW_HISTORY_BASELINE_AS_OF,
+            coverage_through=date(2026, 8, 10),
+            retrieval_strategy="bm25_only",  # type: ignore[arg-type]
+        )
+    captured: dict[str, object] = {}
+
+    def fake_search(query: str, top_k: int, as_of: date, **kwargs: object) -> tuple[object, ...]:
+        captured.update({"query": query, "top_k": top_k, "as_of": as_of, **kwargs})
+        return ()
+
+    monkeypatch.setattr(five, "search_five_stage", fake_search)
+    assert backend.search_law_articles("세관장확인", 7, date(2026, 8, 6)) == ()
+    assert captured["query"] == "세관장확인" and captured["top_k"] == 7
+    assert captured["as_of"] == date(2026, 8, 6)
+    assert captured["search_arm"] == backend._arm_search
+    assert captured["hydrate"] == backend._hydrate_temporal_rows
+    assert captured["neighbors"] == backend._graph_neighbors
+    assert captured["rerank_scores"] == backend._rerank_scores
