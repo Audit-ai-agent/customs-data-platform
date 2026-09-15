@@ -57,3 +57,21 @@ def test_extract_refs_cross_law_by_name() -> None:
     refs = graph.extract_refs(content, "012247", 2000, REG)
     assert ("001805", 700) in refs
     assert ("001783", 4200) in refs
+
+
+def test_current_article_predicate_uses_flag_without_as_of() -> None:
+    from src.ingest.graph import current_article_predicate
+
+    assert current_article_predicate(None) == ("a.is_current", ())
+
+
+def test_current_article_predicate_cuts_ledger_at_as_of() -> None:
+    from datetime import date
+
+    from src.ingest.graph import current_article_predicate
+
+    predicate, params = current_article_predicate(date(2026, 8, 5))
+    assert "a.is_current" not in predicate
+    assert "a.valid_from <= %s" in predicate
+    assert "a.valid_to IS NULL OR a.valid_to > %s" in predicate
+    assert params == (date(2026, 8, 5), date(2026, 8, 5))

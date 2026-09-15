@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import re
 import sys
+from datetime import date
 
 from src.lawgo import jo_code
 
@@ -163,23 +164,46 @@ SET e.basis = r.basis, e.count = r.count
 """
 
 
-def _fetch_current_articles():
+def current_article_predicate(as_of: date | None) -> tuple[str, tuple[object, ...]]:
+    """Return the SQL predicate that selects the article rows to graph.
+
+    Without ``as_of`` the retained three-law loader's ``is_current`` flag is
+    the source of truth.  The law-history ledger deliberately appends every
+    version with ``is_current=false`` and closes superseded intervals with
+    ``valid_to``, so a build for that profile must select the version that is
+    effective on the build's legal date instead of the flag.
+    """
+
+    if as_of is None:
+        return "a.is_current", ()
+    return "a.valid_from <= %s AND (a.valid_to IS NULL OR a.valid_to > %s)", (as_of, as_of)
+
+
+def _fetch_current_articles(as_of: date | None = None):
     """현행 whole-article 행(분할 자식 제외). 반환: node dict + (law_id,art_no)->pk 맵 + 본문."""
+    predicate, params = current_article_predicate(as_of)
     with connect() as conn, conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT a.id, a.law_id, l.law_name, l.hierarchy, a.article_no, a.title, a.content
             FROM law_articles a JOIN laws l USING (law_id)
-            WHERE a.is_current AND a.paragraph_no IS NULL
+            WHERE {predicate} AND a.paragraph_no IS NULL
             ORDER BY a.id
-            """
+            """,
+            params,
         )
         return cur.fetchall()
 
 
-def build(keep: bool = False, nodes: bool = True, edges: bool = True) -> None:
+def build(
+    keep: bool = False,
+    nodes: bool = True,
+    edges: bool = True,
+    *,
+    as_of: date | None = None,
+) -> None:
     reg = _fetch_registry()
-    rows = _fetch_current_articles()
+    rows = _fetch_current_articles(as_of)
     node_rows = [
         {
             "article_pk": r[0],

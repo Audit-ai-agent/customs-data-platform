@@ -1733,14 +1733,19 @@ def _assert_empty_law_history_stores(profile: Path) -> None:
         raise LawHistoryError("LAW_HISTORY_PROFILE_DIRTY")
 
 
-def _load_hsk_requirements_and_temporal_index(attestation: FrozenInputAttestation) -> None:
+def _load_hsk_requirements_and_temporal_index(
+    attestation: FrozenInputAttestation, *, as_of: date
+) -> None:
     from src.ingest import ccct, graph, hsk
     from src.ingest.laws import index_temporal_qdrant
 
     hsk.main(nodes=attestation.hsk_nodes)
     ccct.load(dataset=attestation.ccct_dataset)
     index_temporal_qdrant()
-    graph.build()
+    # The ledger keeps ``is_current=false`` on every version, so the article
+    # graph must be cut at the build's legal date or it stays empty and the
+    # ``five_stage_cpu`` DELEGATES expansion never finds a neighbour.
+    graph.build(as_of=as_of)
 
 
 def _new_public_artifact(
@@ -3605,7 +3610,7 @@ def build_law_history(
         except LocalProfileError as exc:
             raise LawHistoryError("LAW_HISTORY_CREDENTIAL_UNAVAILABLE") from exc
         _load_history_sources(profile=profile, source_root=source_root, sources=sources)
-        _load_hsk_requirements_and_temporal_index(attestation)
+        _load_hsk_requirements_and_temporal_index(attestation, as_of=as_of)
         counts = _history_store_counts()
         _verify_frozen_input_projections_full(attestation)
         source_assets = [
