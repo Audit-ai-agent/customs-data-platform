@@ -10,6 +10,7 @@ from types import ModuleType
 import pytest
 
 from src.law_history_benchmark import (
+    LATENCY_EXEMPT_CANDIDATES,
     BASELINE_CANDIDATE,
     BENCHMARK_RESULT_SCHEMA_VERSION,
     CPU_RERANK_CANDIDATE,
@@ -995,29 +996,40 @@ def test_cli_measurement_rejects_a_full_projection_that_is_not_the_active_manife
     assert "private-query" not in stderr
 
 
-def test_five_stage_candidate_is_exempt_from_the_latency_gate_but_not_recall() -> None:
-    """The documented product pipeline may be slower; it may never recall less."""
+def test_five_stage_candidate_is_gated_by_latency_like_any_other() -> None:
+    """The product pipeline is promoted only when recall and p95 both hold."""
 
     slower_but_better = CandidateMetrics(FIVE_STAGE_CPU_CANDIDATE, True, 0.85, 0.95, 400.0, 2000, 2)
     decision = choose_candidate(baseline=_baseline(), candidates=(slower_but_better,))
-    assert decision.selected == FIVE_STAGE_CPU_CANDIDATE
+    assert decision.selected == BASELINE_CANDIDATE
+    assert decision.reason == "no_candidate_passed_non_regression"
 
-    slower_and_worse = CandidateMetrics(FIVE_STAGE_CPU_CANDIDATE, True, 0.75, 0.95, 400.0, 2000, 2)
+    within_budget = CandidateMetrics(FIVE_STAGE_CPU_CANDIDATE, True, 0.85, 0.95, 105.0, 2000, 2)
     assert (
-        choose_candidate(baseline=_baseline(), candidates=(slower_and_worse,)).selected
+        choose_candidate(baseline=_baseline(), candidates=(within_budget,)).selected
+        == FIVE_STAGE_CPU_CANDIDATE
+    )
+
+    faster_but_worse = CandidateMetrics(FIVE_STAGE_CPU_CANDIDATE, True, 0.75, 0.95, 105.0, 2000, 2)
+    assert (
+        choose_candidate(baseline=_baseline(), candidates=(faster_but_worse,)).selected
         == BASELINE_CANDIDATE
     )
-    # The exemption is not a blanket rule: an ordinary candidate with the same
-    # numbers still fails the p95 gate.
-    ordinary = CandidateMetrics(CPU_RERANK_CANDIDATE, True, 0.85, 0.95, 400.0, 2000, 2)
+    # The default exemption set is empty; an explicit local experiment may
+    # still opt one candidate out of the latency gate.
+    assert LATENCY_EXEMPT_CANDIDATES == frozenset()
     assert (
-        choose_candidate(baseline=_baseline(), candidates=(ordinary,)).selected
-        == BASELINE_CANDIDATE
+        choose_candidate(
+            baseline=_baseline(),
+            candidates=(slower_but_better,),
+            latency_exempt=frozenset({FIVE_STAGE_CPU_CANDIDATE}),
+        ).selected
+        == FIVE_STAGE_CPU_CANDIDATE
     )
 
 
 def test_deployable_decision_considers_five_stage_and_application_binds_it() -> None:
-    five_stage = CandidateMetrics(FIVE_STAGE_CPU_CANDIDATE, True, 0.9, 0.95, 350.0, 2000, 2)
+    five_stage = CandidateMetrics(FIVE_STAGE_CPU_CANDIDATE, True, 0.9, 0.95, 105.0, 2000, 2)
     metrics = _benchmark_metrics(
         cpu=CandidateMetrics(CPU_RERANK_CANDIDATE, True, 0.8, 0.9, 99.0, 900, 2),
         five_stage=five_stage,

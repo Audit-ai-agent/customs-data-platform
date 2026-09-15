@@ -43,11 +43,14 @@ BENCHMARK_CANDIDATES = frozenset(
         KIWI_CANDIDATE,
     }
 )
-# The documented five-stage product pipeline trades latency for recall by
-# design (query variants, graph neighbours, and a bounded CPU rerank pool).
-# It is therefore exempt from the 1.10x p95 non-regression gate; its latency
-# is still measured and recorded, and its recall must not regress.
-LATENCY_EXEMPT_CANDIDATES = frozenset({FIVE_STAGE_CPU_CANDIDATE})
+# Every deployable candidate, including the documented five-stage product
+# pipeline, must pass the same 1.10x p95 non-regression gate: a candidate is
+# promoted only when it satisfies both recall and latency (2026-09-15: the CPU
+# five-stage p95 of 110 s versus the 1.9 s baseline exceeded the Agent evidence
+# timeout, so an exemption would have selected an unserviceable strategy).
+# ``choose_candidate`` keeps an explicit ``latency_exempt`` parameter for local
+# experiments only; the default set is empty.
+LATENCY_EXEMPT_CANDIDATES: frozenset[str] = frozenset()
 BENCHMARK_RESULT_SCHEMA_VERSION = "5.0"
 _LOCAL_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{2,127}$")
 
